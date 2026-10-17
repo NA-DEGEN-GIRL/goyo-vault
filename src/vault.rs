@@ -53,6 +53,26 @@ impl Entry {
         Ok(())
     }
 }
+/// The TOTP secret in the forms an authenticator app accepts.
+pub struct OtpSetup(Zeroizing<[u8; 20]>);
+impl OtpSetup {
+    /// Base32 setup key for manual entry.
+    pub fn code(&self) -> Zeroizing<String> {
+        otp::base32(self.0.as_slice())
+    }
+    /// Key URI for the QR; SHA-1, 6 digits and 30 s are defaults.
+    pub fn uri(&self) -> Zeroizing<String> {
+        const HEAD: &str = "otpauth://totp/Goyo%20Vault?secret=";
+        const TAIL: &str = "&issuer=Goyo%20Vault";
+        let code = self.code();
+        // Sized up front so the secret is never left behind by a reallocation.
+        let mut uri = Zeroizing::new(String::with_capacity(HEAD.len() + code.len() + TAIL.len()));
+        uri.push_str(HEAD);
+        uri.push_str(&code);
+        uri.push_str(TAIL);
+        uri
+    }
+}
 pub struct Provision {
     id: [u8; 16],
     key: Key,
@@ -66,20 +86,11 @@ impl Provision {
             otp: crypto::random()?,
         })
     }
-    pub fn setup_code(&self) -> Zeroizing<String> {
-        otp::base32(self.otp.as_slice())
+    pub fn setup(&self) -> OtpSetup {
+        OtpSetup(Zeroizing::new(*self.otp))
     }
-    /// Key URI for authenticator apps; SHA-1, 6 digits and 30 s are defaults.
-    pub fn setup_uri(&self) -> Zeroizing<String> {
-        const HEAD: &str = "otpauth://totp/Goyo%20Vault?secret=";
-        const TAIL: &str = "&issuer=Goyo%20Vault";
-        let code = self.setup_code();
-        // Sized up front so the secret is never left behind by a reallocation.
-        let mut uri = Zeroizing::new(String::with_capacity(HEAD.len() + code.len() + TAIL.len()));
-        uri.push_str(HEAD);
-        uri.push_str(&code);
-        uri.push_str(TAIL);
-        uri
+    pub fn setup_code(&self) -> Zeroizing<String> {
+        self.setup().code()
     }
     pub fn finish(
         &self,
@@ -275,6 +286,18 @@ impl Session {
         distinct(&path, &self.key_path)?;
         let _lock = FileLock::acquire(&path)?;
         atomic_write(&path, &self.key_bytes, false)
+    }
+    /// The TOTP secret again, to enroll a spare phone or app before the
+    /// current one is lost. Storing it as a vault entry would not help: the
+    /// vault cannot be opened without the OTP. The vault is already open with
+    /// all four factors, but the password is asked again so a window left
+    /// open does not hand out the second factor.
+    pub fn otp_setup(&self, password: &str) -> Result<OtpSetup> {
+        if password.len() > 1024 {
+            return Err(AUTH_ERROR);
+        }
+        let _verified = decode_key(&self.key_bytes, password)?;
+        Ok(OtpSetup(Zeroizing::new(*self.otp)))
     }
     pub fn change_password(&mut self, current: &str, password: &str, input: &str) -> Result<()> {
         password_policy(password)?;
@@ -640,6 +663,13 @@ mod workflow_tests {
         assert!(p.finish(&v, &k, "short", &input).is_err());
         assert!(!v.exists() && !k.exists());
         let mut s = p.finish(&v, &k, pass, &input).unwrap();
+        let setup = s.otp_setup(pass).unwrap();
+        assert_eq!(setup.code(), p.setup_code());
+        assert!(setup.uri().contains(p.setup_code().as_str()));
+        assert_eq!(
+            s.otp_setup("wrong synthetic password").err(),
+            Some(AUTH_ERROR)
+        );
         s.put(None, entry("original secret")).unwrap();
         s.put(Some(0), entry("updated secret")).unwrap();
         s.backup(&b).unwrap();

@@ -63,7 +63,7 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 
 > [!IMPORTANT]
 > - Scan the QR **only with the scanner inside your OTP app.** Pointing an ordinary camera or Google Lens at it, or taking a photo, can leave the secret in your photo library or in the cloud.
-> - The QR and setup key are shown only on this screen. In case you lose your phone, turn on Authenticator's own backup or write the setup key on paper and keep it somewhere safe.
+> - Losing your phone means you cannot open the vault. After creating it, add the OTP to a spare device with **OTP backup** (step 8 below), or turn on Authenticator's own backup.
 
 ### 3. Save an entry
 
@@ -112,7 +112,16 @@ To restore, press **Restore from backup (백업에서 복원)** on the first-sta
 
 **Change password (비밀번호 변경)** on the vault screen asks for the current password, the new one and a fresh OTP, then re-encrypts the key file. **Back up the key again** afterwards.
 
-### 8. Theme
+### 8. OTP backup (in case you lose your phone)
+
+![OTP backup](docs/images/otp-backup.png)
+
+Press **OTP backup (OTP 백업)** at the bottom of the vault screen and enter your current password to see the same QR and setup key as when you created the vault. Add it to a spare phone or another OTP app and it shows the same codes as your phone, so you can still open the vault if the phone is lost. Writing the setup key on paper and keeping it somewhere safe works too.
+
+> [!NOTE]
+> Saving the setup key as an entry inside the vault is not a backup: the vault needs the OTP to open, so after losing the phone you could not get that entry out. Move it to another device or to paper **before** the phone is gone.
+
+### 9. Theme
 
 ![Light theme](docs/images/light.png)
 
@@ -120,7 +129,7 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 
 ## Please read
 
-- **There is no recovery.** Lose the vault file, the key file, the password or the OTP and the vault cannot be opened. There is no way around it.
+- **There is no recovery.** Lose the vault file, the key file, the password or the OTP and the vault cannot be opened. There is no way around it. Prepare for a lost phone with **OTP backup**.
 - **Keep the key file separate.** With vault and key in the same folder, both can be lost or stolen together.
 - **The OTP is an extra check inside this app.** Someone with both files and your password can decrypt the vault without it. The real extra protection against stolen files is keeping the key file elsewhere.
 - **Changing the password does not revoke old key copies.** An old key copy plus the old password still opens later versions of the vault. If you suspect a leak, destroy old copies yourself.
