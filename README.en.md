@@ -14,10 +14,10 @@
 ## What it does
 
 - **Fully offline:** no network code, no server, account, sync or auto-update.
-- **Four things open a vault:** the vault file (`.goyo`), a separate key file (`.goyokey`), your password and a phone OTP.
+- **The app asks for four things:** the vault file (`.goyo`), a separate key file (`.goyokey`), your password and a phone OTP. The OTP is checked by the app only, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
-- **Auto-lock** of an open vault after 60 seconds idle, after 30 seconds in another app, when you lock the screen or the PC sleeps.
-- **Screen-capture protection:** the window is excluded from ordinary screenshots and screen recordings.
+- **Auto-lock** of an open vault after 60 seconds idle (2 minutes on the OTP backup screen), after 30 seconds in another app, when you lock the screen, the PC sleeps or Windows shuts down.
+- **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
 - **A single executable, no installer.** Dark and light themes.
 
 ## Requirements
@@ -28,8 +28,12 @@
 ## Install
 
 1. Download `GoyoVault-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases).
-2. The ZIP contains a `GoyoVault` folder. Extract it to **a place you will keep**, for example `Documents`, which gives you `Documents\GoyoVault`. Do not run it from inside the ZIP. The vault is saved next to the executable by default, so a temporary folder that gets cleaned up would take your vault with it.
-3. Run `GoyoVault\goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. Choose **More info → Run anyway**. You can check the download against `SHA256SUMS.txt` inside the ZIP.
+2. **Check the download before running it.** The only official source is this repository (`github.com/NA-DEGEN-GIRL/goyo-vault`). In PowerShell run `Get-FileHash .\GoyoVault-<version>-windows-x64.zip` and compare it with the SHA-256 in the release notes. `SHA256SUMS.txt` inside the ZIP only detects corruption: whoever swaps the ZIP can update it too.
+3. The ZIP contains a `GoyoVault` folder. Extract it to **a folder only you use that is not synced**, for example `C:\Users\<you>\GoyoVault`. Avoid:
+   - the inside of the ZIP or a temporary folder: cleaning it up deletes your vault (the app warns at start-up);
+   - `Documents`/`Desktop` backed up by OneDrive, and Dropbox or Google Drive folders: vault and key end up in the same cloud account;
+   - a new folder directly under `C:\`, shared folders and USB sticks others use: someone else could replace the program.
+4. Run `GoyoVault\goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. If the hash matched in step 2, choose **More info → Run anyway**. With Smart App Control enforcing, unsigned programs may be blocked outright.
 
 ### Updating
 
@@ -56,14 +60,14 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 
 ![Create a vault](docs/images/create.png)
 
-1. Check where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder. Keeping the key file somewhere else, such as a USB drive, is safer.
-2. Enter a **password** twice. It needs at least 12 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
-3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
+1. Choose where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder, so the key caption warns in red. **Pick another place for the key, such as a USB drive, with Browse (찾기).** In the same folder, anyone who copies the folder only has to guess the password. The app remembers the last vault and key it opened (`goyo-vault.paths`), so a key on a USB drive does not need browsing every time.
+2. Enter a **password** twice. It needs at least 12 characters; repeated characters and passwords made only of common words, keyboard walks or number runs (`password1234`, `qwerty123456`, `1q2w3e4r5t6y`) are refused. For seed phrases or private keys use **4–6 unrelated words**. Words from common-password lists such as `dragon` or `sunshine` do not count, so pick uncommon ones. The check only filters the obvious; passing it does not make a password safe. If the key file is stolen, a common password falls to one GPU within a day; four random words are out of reach. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
+3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. Each vault gets its own entry name, such as `Goyo Vault (3FA2-C1D0)`; the same name appears above the OTP field when you open the vault, so with several vaults you can pick the right code. While you are in another app the QR and key are hidden, and **Back (뒤로)** keeps the same QR when you return. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
 4. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
 
 > [!IMPORTANT]
 > - Scan the QR **only with the scanner inside your OTP app.** Pointing an ordinary camera or Google Lens at it, or taking a photo, can leave the secret in your photo library or in the cloud.
-> - Losing your phone means you cannot open the vault. After creating it, add the OTP to a spare device with **OTP backup** (step 8 below), or turn on Authenticator's own backup.
+> - Losing your phone means you cannot open the vault with this app. After creating it, add the OTP to a spare device with **OTP backup** (step 8 below), or turn on Authenticator's own backup.
 
 ### 3. Save an entry
 
@@ -105,10 +109,17 @@ Use the buttons at the bottom of the vault screen.
 
 - **Back up vault (금고 백업)** saves the encrypted vault to a new file.
 - **Back up key (열쇠 백업)** saves the encrypted key file to a new file. Store it **apart** from the vault backup.
+- A failed backup is reported in a dialog box. No dialog means the file was saved.
+
+**Backup rules**
+- Keep vault backups and key backups on **at least two different drives**. One USB stick holding both leaves only the password.
+- Make a new vault backup after adding or changing entries, especially a new seed phrase.
+- Every few months, **actually restore** a backup (it goes to a new file, so the original is safe).
+- Do not let this vault be the only copy of a valuable seed phrase; also keep it on paper or metal.
 
 ![Restore from backup](docs/images/restore.png)
 
-To restore, press **Restore from backup (백업에서 복원)** on the first-start or open screen. Choose the backup and the key file, enter your password and OTP, and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, so the next start opens it directly.
+To restore, press **Restore from backup (백업에서 복원)** on the first-start or open screen. Choose the backup and the key file, enter your password and OTP, and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
 ### 7. Change the password
 
@@ -131,12 +142,13 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 
 ## Please read
 
-- **There is no recovery.** Lose the vault file, the key file, the password or the OTP and the vault cannot be opened. There is no way around it. Prepare for a lost phone with **OTP backup**.
-- **Keep the key file separate.** With vault and key in the same folder, both can be lost or stolen together.
+- **Keep the key file separate. This matters most.** With vault and key in the same folder (the default) or in the same cloud account, whoever takes both only has to keep guessing the password, without any OTP. The app warns about such placements in red.
+- **There is no recovery.** Lose the vault file, the key file, the password or the OTP and this app cannot open the vault. There is no way around it. Prepare for a lost phone with **OTP backup**.
+- **Do not delete `.goyotmp` files carelessly.** If power fails or a USB stick is pulled during a save, a temporary file such as `vault.goyo.<digits>.goyotmp` may be all that is left. It can be the only copy; rename it back. The app points this out when the main file is missing.
 - **The OTP is an extra check inside this app.** Someone with both files and your password can decrypt the vault without it. The real extra protection against stolen files is keeping the key file elsewhere.
 - **Changing the password does not revoke old key copies.** An old key copy plus the old password still opens later versions of the vault. If you suspect a leak, destroy old copies yourself.
 - **Anything you copy can be read by other programs.** Copy only when needed. When you paste into a password or secret field, the app clears the clipboard right away, but it cannot erase what the source app left behind (for example in Win+V history).
-- **It cannot protect an infected PC.** Keyloggers, malware with administrator rights, kernel attacks or a camera pointed at the screen are out of reach.
+- **It cannot protect an infected PC.** A keylogger records the password, and malware running as you can copy the vault and key or replace the program. Malware with administrator rights, kernel attacks and a camera pointed at the screen are also out of reach. Use a hardware wallet for large holdings.
 
 ## Security design and limits
 
@@ -151,21 +163,26 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 
 **Memory and files**
 - On normal exit and on lock, keys, strings, serialization buffers and Argon2 working memory are wiped with `zeroize`. Copies inside Windows input controls, graphics memory, CPU registers, the page file or crash dumps are not guaranteed to be removed.
-- No plaintext file is ever written. An encrypted temporary file in the same folder is synced and then renamed into place. A file lock prevents two instances from using one vault; it stops cooperating programs, not malware running as you.
+- No plaintext file is ever written. An encrypted temporary file in the same folder is synced, renamed into place and flushed again under its final name. A file lock prevents two instances from using one vault. The lock goes by path, so two hard links to one vault can still be opened twice; it stops cooperating programs, not malware running as you.
+- `goyo-vault.theme` (theme) and `goyo-vault.paths` (last vault and key locations) next to the program hold no secrets. The paths file does reveal where the key is, so do not share that folder.
 - Power-loss safety depends on the drive and file system; FAT/exFAT is not guaranteed. `.goyolock` files, encrypted temporary files left after a crash, and metadata such as file names and paths are not hidden.
 - Windows device names such as `CON`, `NUL` or `COM1` are refused as file names, because a backup to `NUL` would look successful and keep nothing.
 
 **Screen, input and clipboard**
 - Input fields use the Windows password input scope, and the secret and note fields are detached from the IME. Depending on the input method, Korean may not be typeable in other fields either; paste instead. OS text services, third-party keyboards and voice input cannot be fully prevented from learning what you type. If input protection cannot be set up, that field and saving/unlocking are blocked.
-- The eye icon in a password field shows the text only when you press it. While shown, copying, reads by other programs, accessibility reads and screen capture stay blocked, and the IME stays off. Other programs still cannot unmask the field. Locking, the idle timeout and changing screens hide it again. It cannot stop someone looking over your shoulder.
-- Values copied by the app are excluded from Win+V history and cloud sync and marked so that clipboard managers honouring the convention do not record them. If another program holds the clipboard, clearing is retried, and closing waits until it succeeds. A forced kill or a system shutdown cannot guarantee this cleanup.
+- Input fields and the entry list ignore every window message other programs send them, however it is sent, so another program cannot read the text, infer it from character positions or change the list selection. The main window ignores button clicks and commands that other programs send or post, including while a message box or file dialog is open. It also ignores keyboard or mouse input that arrives while the app is not in front, so the mouse wheel does not scroll the list then. A program running as you can still fake input while the app is in front.
+- For the same reason, screen readers such as Narrator cannot read the app's input fields or entry list.
+- The eye icon in a password field shows the text only when you press it. While shown, copying, reads by other programs, accessibility reads and screen capture stay blocked, and the IME stays off. Locking, the idle timeout, changing screens and switching to another app hide it again. It cannot stop someone looking over your shoulder.
+- Values copied by the app are excluded from Win+V history and cloud sync and marked so that clipboard managers honouring the convention do not record them. If another program holds the clipboard, clearing is retried, and closing waits until it succeeds. Windows shutdown and restart also lock and try to clear it; a forced kill cannot guarantee this cleanup. Values that went through the clipboard can leave copies in Windows' own memory.
 - Switching apps keeps a just-copied value for the rest of its 15 seconds so you can paste it. Manual lock, screen lock and sleep clear it immediately. Content another app put on the clipboard in the meantime is left alone.
-- Capture exclusion only covers capture paths that Windows supports.
+- Capture exclusion only covers capture paths that Windows supports. It cannot stop a camera.
 - The enrollment QR is drawn straight to the window by a built-in encoder. No image file is written, no outside service is used, and the intermediate buffers holding the secret are wiped with `zeroize`.
 
 **Process hardening**
-- At start-up the app disables dynamic code, legacy extension points, non-system fonts and remote or low-integrity image loads, **loads only Microsoft-signed DLLs** and **forbids child processes**. Third-party IMEs, third-party shell extensions in the file dialog and DLLs injected at run time therefore do not run inside the app.
-- Debuggers, remote sessions and broken capture protection lock the vault or block actions. This is not a full malware or keylogger detector, and the app never claims that the PC is "safe".
+- Every DLL the program loads before it starts running is looked up in System32 only; other Windows DLLs are loaded from System32 only, after the defenses are on. Each release is checked by running the program with fake DLLs, and then real copies of System32 DLLs, placed next to it; the check fails if any is loaded from that folder (`scripts/check_dll_planting.py`).
+- Right after start the app disables dynamic code, legacy extension points, non-system fonts and remote or low-integrity image loads; from then on it **loads only Microsoft-signed DLLs** and **forbids child processes**. Third-party IMEs and third-party shell extensions in the file dialog therefore do not run inside the app.
+- Access to the process and all its threads is narrowed so other programs running as you cannot read or write the app's memory or start threads in it to inject code. Threads Windows starts later (for example for a file dialog) get the same restriction within 0.5 seconds. Programs with administrator (debug) rights are not stopped.
+- An attached user-mode debugger or a Remote Desktop (RDP) session locks the vault or blocks actions. These are best-effort checks that can be bypassed; they do not detect remote-control tools such as TeamViewer, memory reading or keyloggers, and the app never claims that the PC is "safe".
 - Rolling a vault back to an old backup, resetting the retry delay by restarting the app, and malicious apps bypassing the checks cannot be fully prevented without a server or separate trusted hardware.
 - 256-bit symmetric keys are used, but no post-quantum certification or guarantee is claimed.
 
@@ -185,7 +202,8 @@ python scripts/check_dependencies.py
 target/release/goyo-vault.exe --self-check
 ```
 
-- `python scripts/package_release.py` builds the release ZIP. It strips the build machine's paths from the executable and refuses to package if a user name or local path is still inside.
+- `python scripts/package_release.py` builds the release ZIP. It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executable (and stops if any remain), and only packages a binary that passes the PE flag and DLL list check (`scripts/inspect_pe.py`) and the DLL planting check (`scripts/check_dll_planting.py`).
+- Releases are built with rustc 1.98.1. The `/Brepro` linker option makes builds comparable: the same toolchain and commit should give the same executable.
 - `scripts/make_icon.ps1` regenerates the icon; `build.rs` embeds `assets/goyo.ico` into the executable.
 - `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window.
 

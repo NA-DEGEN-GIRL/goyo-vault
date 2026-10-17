@@ -1,6 +1,16 @@
 """Build and package only explicitly allowed artifacts; never collects vault data."""
 import hashlib, json, os, pathlib, shutil, subprocess, sys, zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
+# RUSTFLAGS (or a per-target CARGO_TARGET_<triple>_RUSTFLAGS / CARGO_BUILD_RUSTFLAGS)
+# would silently replace the hardening flags in .cargo/config.toml.
+for name, value in os.environ.items():
+    if value and (name.upper() in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')
+                  or (name.upper().startswith('CARGO_') and name.upper().endswith('RUSTFLAGS'))):
+        sys.exit(f'Refusing to package with {name} set: it would drop the hardening flags.')
+# Build only committed sources, so a release always matches a commit.
+inputs = ['src', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo', 'assets']
+if subprocess.check_output(['git', 'status', '--porcelain', '--', *inputs], cwd=root).strip():
+    sys.exit('Refusing to package: commit the source changes first (git status).')
 # Panic locations embed source paths, e.g. C:\Users\<name>\.cargo\registry\...
 # Remap the machine-specific prefixes so the published exe names no user or folder.
 cargo_home = pathlib.Path(os.environ.get('CARGO_HOME') or pathlib.Path.home()/'.cargo')
@@ -13,6 +23,7 @@ for private in {str(pathlib.Path.home()), str(root), os.environ.get('USERNAME', 
         if form.lower().encode() in binary.lower() or form.lower().encode('utf-16-le') in binary.lower():
             sys.exit(f'Refusing to package: the executable contains a local path or user name ({form!r}).')
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
+subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe'], cwd=root)
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version', '1'], cwd=root))
 notices = ['# Third-party notices', 'Dependencies in Cargo.lock; some are target-specific and may not be linked.']
 for package in sorted(metadata['packages'], key=lambda p: p['name']):

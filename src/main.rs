@@ -5,12 +5,12 @@ mod theme;
 mod win;
 use goyo_vault::{
     crypto,
-    vault::{Entry, OtpSetup, Provision, Session},
+    vault::{Entry, OtpSetup, Provision, Session, leftover_temp, vault_tag},
 };
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::{null, null_mut},
     sync::OnceLock,
     time::{Duration, Instant},
@@ -26,9 +26,15 @@ thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static INTERNAL_READ: Cell<bool> = const { Cell::new(false) };
     static PENDING_EVENTS: Cell<u8> = const { Cell::new(0) };
+    /// The window was hidden until pending events are handled.
+    static HIDDEN_FOR_EVENTS: Cell<bool> = const { Cell::new(false) };
     static WINDOW_GONE: Cell<bool> = const { Cell::new(false) };
+    /// Set by edit_proc before it posts PASTE_CLEARED (bit 1) or INPUT_ERROR
+    /// (bit 2), so the same messages posted by another program do nothing.
+    static PASTE_NOTICE: Cell<u8> = const { Cell::new(0) };
 }
 static EDIT_PROC: OnceLock<Proc> = OnceLock::new();
+static LIST_PROC: OnceLock<Proc> = OnceLock::new();
 const DRAIN_EVENTS: u32 = 0x8001;
 const INPUT_ERROR: u32 = 0x8002;
 const PASTE_CLEARED: u32 = 0x8003;
@@ -77,6 +83,7 @@ const PEEK_CURRENT: i32 = 129;
 /// what was shown; capture exclusion already keeps the window out of shots.
 const AWAY_LOCK: Duration = Duration::from_secs(30);
 const OTP_SETUP: i32 = 135;
+const KEY_NOTE: i32 = 220;
 const PEEK_FIELDS: [(i32, i32); 3] = [
     (PEEK_PASS, PASS),
     (PEEK_CONFIRM, CONFIRM),
@@ -152,6 +159,13 @@ struct App {
     otp_setup: Option<OtpSetup>,
     /// When another app took focus while a vault was open.
     away_since: Option<Instant>,
+    /// Another app is in front (see deactivated/activated).
+    inactive: bool,
+    /// Which PEEK_FIELDS are shown with the eye button. Kept here, not in the
+    /// button's window data, which other programs can overwrite.
+    shown: [bool; 3],
+    /// Tone of the status line on the next build (one-shot).
+    status_tone: isize,
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
@@ -160,7 +174,7 @@ impl App {
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_owned()))
             .unwrap_or_default();
-        Self {
+        let mut app = Self {
             hwnd,
             font,
             scale,
@@ -194,7 +208,19 @@ impl App {
             from_welcome: false,
             otp_setup: None,
             away_since: None,
+            inactive: false,
+            shown: [false; 3],
+            status_tone: TONE_MUTED,
+        };
+        // The last vault and key that opened, so a key kept on a USB drive does
+        // not have to be picked with "찾기" on every start.
+        if let Some((vault, key)) = load_paths()
+            && vault.is_file()
+        {
+            app.vault_path = vault;
+            app.key_path = key;
         }
+        app
     }
     fn px(&self, n: i32) -> i32 {
         (n as f32 * self.scale) as i32
@@ -401,37 +427,39 @@ impl App {
         }
     }
     /// Shows or hides the typed password. This is the only way to change the
-    /// mask: edit_proc still drops EM_SETPASSWORDCHAR sent by anyone else.
+    /// mask: edit_proc drops EM_SETPASSWORDCHAR and every other message sent
+    /// by another program, and window_proc ignores their WM_COMMANDs.
     /// Shown text stays behind the same protections as masked text (no
-    /// copy, no external WM_GETTEXT or accessibility read, capture exclusion),
-    /// and every rebuild (lock, idle timeout, screen change) masks it again.
+    /// copy, no external read, capture exclusion), and every rebuild (lock,
+    /// idle timeout, screen change) and app switch masks it again.
     fn peek(&mut self, button: i32) -> crypto::Result<()> {
-        let Some(&(_, field)) = PEEK_FIELDS.iter().find(|(p, _)| *p == button) else {
+        let Some(i) = PEEK_FIELDS.iter().position(|(p, _)| *p == button) else {
             return Ok(());
         };
-        let (edit, b) = (self.handle(field), self.handle(button));
-        if edit == 0 || b == 0 {
+        let edit = self.handle(PEEK_FIELDS[i].1);
+        if edit == 0 {
             return Ok(());
         }
-        let show = unsafe { GetWindowLongPtrW(b, -21) } != theme::EYE_ON;
-        self.set_shown(edit, b, show)?;
+        self.set_shown(i, !self.shown[i])?;
         unsafe {
             // Keep typing where the user left off.
             SetFocus(edit);
         }
         Ok(())
     }
-    /// Masks every password shown with the eye button. Never moves focus,
-    /// so it is safe while another app is being activated.
-    fn mask_passwords(&self) {
-        for (button, field) in PEEK_FIELDS {
-            let (edit, b) = (self.handle(field), self.handle(button));
-            if edit != 0 && b != 0 && unsafe { GetWindowLongPtrW(b, -21) } == theme::EYE_ON {
-                let _ = self.set_shown(edit, b, false); // masking cannot fail
-            }
+    /// Masks every password field, whatever its recorded state, and never
+    /// moves focus, so it is safe while another app is being activated.
+    fn mask_passwords(&mut self) {
+        for i in 0..PEEK_FIELDS.len() {
+            let _ = self.set_shown(i, false); // masking cannot fail
         }
     }
-    fn set_shown(&self, edit: Hwnd, b: Hwnd, show: bool) -> crypto::Result<()> {
+    fn set_shown(&mut self, i: usize, show: bool) -> crypto::Result<()> {
+        let (button, field) = PEEK_FIELDS[i];
+        let (edit, b) = (self.handle(field), self.handle(button));
+        if edit == 0 || b == 0 {
+            return Ok(());
+        }
         let original = EDIT_PROC.get().copied();
         unsafe {
             let mask = if show { 0 } else { '•' as usize };
@@ -447,9 +475,11 @@ impl App {
                 }
                 if context != 0 || SetInputScope(edit, 31) != 0 {
                     CallWindowProcW(original, edit, 0xcc, '•' as usize, 0);
+                    self.shown[i] = false;
                     return Err("입력 보호를 확인할 수 없어 비밀번호를 표시하지 않았습니다.");
                 }
             }
+            self.shown[i] = show;
             SetWindowLongPtrW(b, -21, if show { theme::EYE_ON } else { theme::EYE });
             let name = if show {
                 "비밀번호 숨기기"
@@ -462,8 +492,51 @@ impl App {
         }
         Ok(())
     }
+    /// Key path caption; warns when the placement undoes the key file's
+    /// protection. Refreshed whenever a path field changes.
+    fn refresh_key_note(&mut self) {
+        let h = self.handle(KEY_NOTE);
+        if h == 0 {
+            return;
+        }
+        let (Ok(vault), Ok(key)) = (self.read(VPATH), self.read(KPATH)) else {
+            return;
+        };
+        let create = self.screen == Screen::Create;
+        let warning = placement_warning(Path::new(vault.as_str()), Path::new(key.as_str()));
+        let text = match (warning, create) {
+            (Some(Placement::SameFolder), true) => {
+                "새 열쇠 파일 · 금고와 같은 폴더라 함께 도난당하면 비밀번호만 남습니다"
+            }
+            (Some(Placement::SameFolder), false) => "열쇠 파일 · 금고와 같은 폴더에 있습니다",
+            (Some(Placement::Cloud), true) => {
+                "새 열쇠 파일 · 금고와 함께 클라우드 동기화 폴더에 있습니다"
+            }
+            (Some(Placement::Cloud), false) => {
+                "열쇠 파일 · 금고와 함께 클라우드 동기화 폴더에 있습니다"
+            }
+            (None, true) => "새 열쇠 파일 · 금고와 다른 곳(USB 등)에 두세요",
+            (None, false) => "열쇠 파일",
+        };
+        unsafe {
+            SetWindowLongPtrW(
+                h,
+                -21,
+                if warning.is_some() {
+                    TONE_DANGER
+                } else {
+                    TONE_MUTED
+                },
+            );
+            SetWindowTextW(h, wide(text).as_ptr());
+            InvalidateRect(h, null(), 1);
+        }
+    }
     fn path_field(&mut self, id: i32, browse: i32, label: &str, value: &str, y: i32) {
-        self.label(label, AX, y, AW);
+        // The key caption is addressable: refresh_key_note rewrites it.
+        let small = self.font_of(|t| t.small);
+        let caption = if id == KPATH { KEY_NOTE } else { 0 };
+        self.text(caption, label, (AX, y, AW, 20), small, TONE_MUTED, 0);
         self.input(id, value, (AX, y + 22, AW, 40), false, false, 64);
         self.button(browse, "찾기", AX + AW - 70, y + 26, 64, 32, theme::GHOST);
     }
@@ -513,6 +586,7 @@ impl App {
         }
         self.controls.clear();
         self.frames.clear();
+        self.shown = [false; 3];
     }
     fn status(&mut self, text: &str) {
         self.set_status(text, TONE_MUTED);
@@ -572,13 +646,13 @@ impl App {
         (AX, y, AW, 210)
     }
     /// Labels of the OTP card; the frame, QR and key are painted.
-    fn enrollment_labels(&mut self, footer: &str) {
+    fn enrollment_labels(&mut self, tag: &str, footer: &str) {
         let strong = self.font_of(|t| t.strong);
         let (cx, cy, cw, _) = self.enroll();
         let (rx, rw) = (cx + 180, cw - 196);
         self.text(
             0,
-            "휴대폰 OTP 등록",
+            &format!("휴대폰 OTP 등록 · {tag}"),
             (rx, cy + 14, rw, 22),
             strong,
             TONE_TEXT,
@@ -646,7 +720,8 @@ impl App {
         }
         let small = self.font_of(|t| t.small);
         let status = self.status.clone();
-        self.text(STATUS, &status, (40, 690, 796, 40), small, TONE_MUTED, 0);
+        let tone = std::mem::replace(&mut self.status_tone, TONE_MUTED);
+        self.text(STATUS, &status, (40, 690, 796, 40), small, tone, 0);
         let dark = theme::is_dark();
         let (x, y, _, _) = THEME_SWITCH;
         for (i, (id, name, on)) in [(THEME_DARK, "다크", dark), (THEME_LIGHT, "라이트", !dark)]
@@ -770,11 +845,14 @@ impl App {
             y += 72;
         }
         if create {
+            self.refresh_key_note();
             let half = (AW - 16) / 2;
             self.password_field(PASS, "비밀번호 · 12자 이상", AX, y, half);
             self.password_field(CONFIRM, "비밀번호 확인", AX + half + 16, y, half);
             // Enrollment card: QR, setup key and frame are painted.
+            let tag = self.provision.as_ref().map(|p| p.tag()).unwrap_or_default();
             self.enrollment_labels(
+                &tag,
                 "휴대폰을 잃으면 금고를 열 수 없으니 예비 기기에도 등록해 두세요.\r\n금고를 연 뒤 아래쪽 'OTP 백업'에서 이 QR을 다시 볼 수 있습니다.",
             );
             self.field(OTP, "앱에 표시된 6자리", "", AX, 600, 180, true);
@@ -788,8 +866,18 @@ impl App {
                 theme::PRIMARY,
             );
         } else {
+            self.refresh_key_note();
             self.password_field(PASS, "비밀번호", AX, y, AW - 196);
-            self.field(OTP, "Google OTP 6자리", "", AX + AW - 180, y, 180, true);
+            let source = if restore {
+                &self.backup_path
+            } else {
+                &self.vault_path
+            };
+            let caption = match vault_tag(source) {
+                Some(tag) => format!("OTP 6자리 · {tag}"),
+                None => "Google OTP 6자리".into(),
+            };
+            self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
             y += 88;
             let submit = if restore {
                 "확인 · 새 파일로 복원"
@@ -870,6 +958,13 @@ impl App {
             },
             list,
         ));
+        unsafe {
+            let orig = SetWindowLongPtrW(list, -4, list_proc as *const () as isize);
+            if orig == 0 {
+                std::process::abort();
+            }
+            LIST_PROC.get_or_init(|| std::mem::transmute::<isize, Proc>(orig));
+        }
         unsafe {
             SendMessageW(list, 0x1a0, 0, self.px(40) as isize);
         }
@@ -985,7 +1080,11 @@ impl App {
         self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 160, AW);
         self.password_field(PASS, "새 비밀번호 · 12자 이상", AX, 232, AW);
         self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
-        self.field(OTP, "새 Google OTP 6자리", "", AX, 376, 180, true);
+        let caption = match self.session.as_ref() {
+            Some(s) => format!("새 OTP 6자리 · {}", s.tag()),
+            None => "새 Google OTP 6자리".into(),
+        };
+        self.field(OTP, &caption, "", AX, 376, 180, true);
         self.note(
             "현재 열쇠 파일만 갱신됩니다. 이전 열쇠와 이전 비밀번호로 이후 금고도 열 수 있습니다. 유출 대응용 키 교체가 아닙니다. 변경 후 새 열쇠 파일을 별도로 백업하세요.",
             AX + 18,
@@ -1028,7 +1127,9 @@ impl App {
                 AW,
                 22,
             );
+            let tag = self.otp_setup.as_ref().map(|s| s.tag()).unwrap_or_default();
             self.enrollment_labels(
+                &tag,
                 "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
             );
             self.button(CANCEL, "닫기", AX + AW - 160, 384, 160, 42, theme::PRIMARY);
@@ -1116,18 +1217,33 @@ impl App {
         if self.screen == Screen::Welcome {
             self.status.clear();
         }
+        let folder = &self.home_dir;
+        let temp = std::env::temp_dir().to_string_lossy().to_lowercase();
+        if folder
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with(temp.trim_end_matches('\\'))
+        {
+            self.status = "압축 파일 안이나 임시 폴더에서 실행 중입니다. 이 폴더는 지워질 수 있으니, 계속 보관할 폴더에 압축을 푼 뒤 실행하세요.".into();
+            self.status_tone = TONE_DANGER;
+        } else if in_cloud_folder(folder) {
+            self.status = "프로그램 폴더가 클라우드 동기화 폴더에 있습니다. 여기에 금고와 열쇠를 함께 두면 둘 다 같은 계정에 올라갑니다.".into();
+            self.status_tone = TONE_DANGER;
+        }
     }
-    /// Another app became active. An open vault locks. Before unlocking
-    /// there is nothing to lock, so a half-filled form (a new vault whose OTP
-    /// is being enrolled, a restore) stays for the user to come back to; shown
-    /// passwords are masked, and the idle timeout and Windows session lock
-    /// still clear everything.
-    /// Nothing revealed stays on screen while the user is elsewhere: shown
-    /// passwords are masked, the 15-second view and copy permission end and
-    /// the OTP QR closes. An open vault locks if the user stays away for
-    /// AWAY_LOCK (see timer).
+    /// Another app is in front. Nothing revealed stays on screen while the
+    /// user is elsewhere: passwords shown with the eye are masked and the new
+    /// vault's OTP QR is hidden; with a vault open the 15-second view and copy
+    /// permission also end and the OTP backup QR closes. Pre-unlock forms are
+    /// kept. An open vault locks after AWAY_LOCK (see timer). Runs on
+    /// WM_ACTIVATEAPP and from the timer, which also catches missed messages.
     fn deactivated(&mut self) {
         self.mask_passwords();
+        if !std::mem::replace(&mut self.inactive, true) && self.provision.is_some() {
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
         if self.session.is_none() {
             return;
         }
@@ -1145,8 +1261,18 @@ impl App {
             self.build();
         }
     }
+    /// Back in front. Trusts only the real foreground window, so a
+    /// WM_ACTIVATEAPP faked by another program cannot cancel the away lock.
     fn activated(&mut self) {
+        if !is_foreground(self.hwnd) {
+            return;
+        }
         self.away_since = None;
+        if std::mem::take(&mut self.inactive) {
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
     }
     fn lock(&mut self, why: &str, clear_clipboard: bool) {
         self.auth_dirty = false;
@@ -1158,6 +1284,7 @@ impl App {
         self.otp_setup = None;
         self.away_since = None;
         self.selected = None;
+        self.status_tone = TONE_MUTED;
         self.editing = None;
         self.copy_until = None;
         self.reveal_until = None;
@@ -1169,6 +1296,17 @@ impl App {
         self.from_welcome = false;
         self.status = why.into();
         self.build();
+    }
+    /// Drops the keys, the OTP secret and any reveal or copy permission
+    /// without touching the controls; a pending lock rebuilds the screen
+    /// moments later (see window_proc).
+    fn scrub(&mut self) {
+        self.session = None;
+        self.provision = None;
+        self.otp_setup = None;
+        self.reveal_until = None;
+        self.copy_until = None;
+        self.expire_clipboard();
     }
     fn expire_clipboard(&mut self) {
         if let Some((seq, _)) = self.clipboard {
@@ -1246,15 +1384,21 @@ impl App {
         // say what to do and do not start the retry delay.
         match self.screen {
             Screen::Login if !self.vault_path.is_file() => {
-                return Err("금고 파일을 찾을 수 없습니다. 경로를 확인하거나 '찾기'로 선택하세요.");
+                return Err(if leftover_temp(&self.vault_path) {
+                    LEFTOVER_TEMP
+                } else {
+                    "금고 파일을 찾을 수 없습니다. 경로를 확인하거나 '찾기'로 선택하세요."
+                });
             }
             Screen::Restore if !self.backup_path.is_file() => {
                 return Err("복원할 백업 파일을 '찾기'로 선택하세요.");
             }
             Screen::Login | Screen::Restore if !self.key_path.is_file() => {
-                return Err(
-                    "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요.",
-                );
+                return Err(if leftover_temp(&self.key_path) {
+                    LEFTOVER_TEMP
+                } else {
+                    "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요."
+                });
             }
             Screen::Restore if self.dest_path.exists() => {
                 return Err(
@@ -1273,6 +1417,7 @@ impl App {
         unsafe {
             UpdateWindow(self.hwnd);
         }
+        let screen = self.screen;
         let result = match self.screen {
             Screen::Create => {
                 goyo_vault::vault::password_policy(&pass)?;
@@ -1301,13 +1446,24 @@ impl App {
                 self.new_key_path = PathBuf::new();
                 self.backup_path = PathBuf::new();
                 self.dest_path = PathBuf::new();
+                save_paths(&s.path, &s.key_path);
+                let warning = placement_warning(&s.path, &s.key_path);
                 self.session = Some(s);
                 self.provision = None;
                 self.failed = 0;
                 self.screen = Screen::Vault;
-                self.status =
+                let first = if screen == Screen::Create {
+                    "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요."
+                } else {
                     "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다."
-                        .into();
+                };
+                self.status = match warning {
+                    Some(w) => {
+                        self.status_tone = TONE_DANGER;
+                        format!("{first}\r\n{}", w.message())
+                    }
+                    None => first.into(),
+                };
                 self.build();
                 Ok(())
             }
@@ -1348,6 +1504,10 @@ impl App {
         if notify == 0x300 && matches!(id, PASS | CONFIRM | OTP | CURRENT_PASS) {
             self.auth_dirty = true;
         }
+        if notify == 0x300 && matches!(id, VPATH | KPATH) {
+            self.refresh_key_note();
+            return Ok(());
+        }
         // Focus moved between inputs: repaint the field outlines.
         if matches!(notify, 0x100 | 0x200) || (id == LIST && matches!(notify, 4 | 5)) {
             unsafe {
@@ -1378,12 +1538,12 @@ impl App {
                 check_environment(self.hwnd)?;
                 self.paths()?;
                 // Generate before switching so a failure leaves the screen as is.
-                let provision = if id == CREATE {
-                    Some(Provision::new()?)
-                } else {
-                    None
-                };
-                self.provision = provision;
+                // Back or Esc keeps it: the QR may already be on the phone, and a
+                // new one would silently make that entry useless. Lock and the
+                // idle timeout still drop it.
+                if id == CREATE && self.provision.is_none() {
+                    self.provision = Some(Provision::new()?);
+                }
                 self.copy_until = None;
                 self.reveal_until = None;
                 self.from_welcome = id == OPEN;
@@ -1623,6 +1783,8 @@ impl App {
         }
     }
     fn timer(&mut self) {
+        // Threads Windows started since the last tick (e.g. for a file dialog).
+        restrict_threads();
         let now = Instant::now();
         let ticking =
             self.reveal_until.is_some() || self.copy_until.is_some() || self.clipboard.is_some();
@@ -1650,17 +1812,26 @@ impl App {
                 self.lock(e, true);
                 return;
             }
-            // A missed activation message must not lock a vault in use.
-            if unsafe { GetForegroundWindow() } == self.hwnd {
-                self.away_since = None;
+            // The foreground window decides, not WM_ACTIVATEAPP alone: a missed
+            // message must not lock a vault in use, and a missed or faked one
+            // must not stop the away lock (e.g. focus left during an unlock).
+            if is_foreground(self.hwnd) {
+                self.activated();
+            } else if !self.inactive || (self.session.is_some() && self.away_since.is_none()) {
+                self.deactivated();
             }
             if self.session.is_some() && self.away_since.is_some_and(|t| now - t >= AWAY_LOCK) {
                 self.lock("다른 앱에 30초 넘게 머물러 잠갔습니다.", false);
                 return;
             }
             // Scanning a QR or copying the key onto paper takes longer.
-            let showing_otp = self.provision.is_some() || self.otp_setup.is_some();
-            let seconds = if showing_otp { 300 } else { 60 };
+            let seconds = if self.provision.is_some() {
+                300
+            } else if self.otp_setup.is_some() {
+                120
+            } else {
+                60
+            };
             if now.duration_since(self.activity) >= Duration::from_secs(seconds) {
                 self.lock("미사용 시간이 지나 자동으로 잠갔습니다.", true);
                 return;
@@ -1833,7 +2004,11 @@ impl App {
             if self.screen == Screen::Create
                 && let Some(provision) = &self.provision
             {
-                self.draw_enrollment(dc, &provision.setup(), &p, code);
+                if self.inactive {
+                    self.draw_enrollment_hidden(dc, &p, small);
+                } else {
+                    self.draw_enrollment(dc, &provision.setup(), &p, code);
+                }
             }
             if self.screen == Screen::OtpBackup
                 && let Some(setup) = &self.otp_setup
@@ -1843,6 +2018,24 @@ impl App {
             if self.screen == Screen::Vault {
                 self.draw_detail(dc, small, title);
             }
+        }
+    }
+    /// While another app is in front the card shows no QR and no key.
+    unsafe fn draw_enrollment_hidden(&self, dc: isize, p: &theme::Palette, small: isize) {
+        let (cx, cy, _, _) = self.enroll();
+        unsafe {
+            let tile = self.r(cx + 16, cy + 16, 148, 148);
+            theme::round(dc, &tile, self.px(8), Some(p.surface), None);
+            theme::text(
+                dc,
+                "창을 선택하면\nQR이 다시 보입니다",
+                &tile,
+                small,
+                p.muted,
+                DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+            );
+            let key = self.r(cx + 180, cy + 106, self.enroll().2 - 196, 58);
+            theme::round(dc, &key, self.px(8), Some(p.surface), None);
         }
     }
     /// QR for authenticator apps plus the same key as text for manual entry.
@@ -2289,9 +2482,9 @@ fn drain_pending(h: Hwnd) {
         unsafe {
             if a.closing && a.clipboard.is_none() {
                 DestroyWindow(h);
-            } else {
-                ShowWindow(h, 4);
-            } // Show locked UI without stealing focus.
+            } else if HIDDEN_FOR_EVENTS.with(|v| v.replace(false)) {
+                ShowWindow(h, 8); // Show locked UI in its state, without focus.
+            }
         }
     });
 }
@@ -2302,9 +2495,7 @@ fn valid_paste(data: &[u16], multiline: bool, remaining: usize) -> bool {
         && char::decode_utf16(data.iter().copied()).all(|c| c.is_ok_and(|c| c != '\0'))
 }
 fn paste_into_edit(h: Hwnd) -> crypto::Result<()> {
-    let mut data = clipboard_text(h)?;
-    // Read after the text: format synthesis may advance the sequence.
-    let sequence = unsafe { GetClipboardSequenceNumber() };
+    let (mut data, sequence) = clipboard_text(h)?;
     unsafe {
         let multiline = GetWindowLongPtrW(h, -16) & 4 != 0;
         let (mut start, mut end) = (0u32, 0u32);
@@ -2332,13 +2523,36 @@ fn paste_into_edit(h: Hwnd) -> crypto::Result<()> {
         // clipboard. Anything copied since then belongs to the user.
         let id = GetWindowLongPtrW(h, -12) as i32;
         if matches!(id, SECRET | PASS | CONFIRM | CURRENT_PASS) && clear_pasted(h, sequence) {
+            PASTE_NOTICE.with(|n| n.set(n.get() | 1));
             PostMessageW(GetParent(h), PASTE_CLEARED, 0, 0);
         }
     }
     Ok(())
 }
 
+/// Clears and returns a notice bit set by edit_proc (see PASTE_NOTICE).
+fn take_notice(bit: u8) -> bool {
+    PASTE_NOTICE.with(|n| {
+        let set = n.get() & bit != 0;
+        n.set(n.get() & !bit);
+        set
+    })
+}
+/// The entry list ignores everything other programs send it, so they cannot
+/// move the selection behind the user's back.
+unsafe extern "system" fn list_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+    if from_other_thread() {
+        return 0;
+    }
+    unsafe { CallWindowProcW(LIST_PROC.get().copied(), h, m, w, l) }
+}
 unsafe extern "system" fn edit_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+    // Only this UI thread drives the inputs. Anything sent from another
+    // program is dropped: besides text reads, even geometry such as
+    // EM_POSFROMCHAR leaks a secret through character widths.
+    if from_other_thread() {
+        return 0;
+    }
     if matches!(
         m,
         0x300 | 0x301 | 0x7b | 0xc4 | 0x317 | 0x318 | 0x3d | 0xd0 | 0xcc | 0xbc
@@ -2350,6 +2564,7 @@ unsafe extern "system" fn edit_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isiz
     }
     if m == 0x302 {
         if paste_into_edit(h).is_err() {
+            PASTE_NOTICE.with(|n| n.set(n.get() | 2));
             unsafe {
                 PostMessageW(GetParent(h), INPUT_ERROR, 0, 0);
             }
@@ -2363,6 +2578,31 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
     if m == 0x317 || m == 0x318 {
         return 0;
     }
+    // Commands, owner-draw, input and the app's own notices only ever come
+    // from this UI thread. Sent from another program, they are fakes (e.g. a
+    // scripted click on "copy").
+    let foreign = from_other_thread();
+    if foreign
+        && matches!(
+            m,
+            0x100..=0x109 | 0x111 | 0x113 | 0x2b | 0x133..=0x138 | 0x201..=0x20e
+                | 0x211 | 0x212 | 0x231 | 0x232
+                | DRAIN_EVENTS
+                | INPUT_ERROR
+                | PASTE_CLEARED
+        )
+    {
+        return 0;
+    }
+    // Message boxes, file dialogs and the move/menu loops dispatch posted
+    // messages without accept_queued. The main window gets no real click
+    // meanwhile, so a command or click then is a fake.
+    match m {
+        0x211 | 0x231 => set_modal_loop(true), // WM_ENTERMENULOOP, WM_ENTERSIZEMOVE
+        0x212 | 0x232 => set_modal_loop(false), // WM_EXITMENULOOP, WM_EXITSIZEMOVE
+        0x111 | 0x201 if in_modal() => return 0,
+        _ => {}
+    }
     // Theme messages never borrow APP, so controls keep their look while busy.
     if m == 0x14 {
         return 1; // WM_PAINT fills the whole client area itself.
@@ -2372,7 +2612,13 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
     {
         return brush;
     }
-    if m == 0x2b && l != 0 && unsafe { theme::draw_item(&*(l as *const DrawItem)) } {
+    if m == 0x2b
+        && l != 0
+        && unsafe {
+            let item = &*(l as *const DrawItem);
+            IsChild(h, item.item) != 0 && theme::draw_item(item)
+        }
+    {
         return 1;
     }
     if m == 2 {
@@ -2397,23 +2643,42 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         if !APP.with(|cell| cell.try_borrow_mut().is_ok()) {
             return 0;
         }
-        if let Err(e) = modal_command(h, (w & 0xffff) as i32) {
-            report(h, e);
+        let id = (w & 0xffff) as i32;
+        if let Err(e) = modal_command(h, id) {
+            // A failed backup must not pass as one more status line.
+            if matches!(id, BACKUP | KEYBACKUP) {
+                message(h, e);
+            } else {
+                report(h, e);
+            }
         }
         return 0;
     }
-    let strong_event = (m == 0x2b1 && matches!(w, 2 | 3 | 4 | 6 | 7 | 9)) || (m == 0x218 && w == 4);
+    let strong_event = (m == 0x2b1 && matches!(w, 2 | 3 | 4 | 6 | 7 | 9))
+        || (m == 0x218 && w == 4)
+        || (m == 0x16 && w != 0);
     let security_event = (m == 0x1c && w == 0) || strong_event;
+    let deferrable = security_event || m == 0x10;
+    let bit = if m == 0x10 {
+        4
+    } else if strong_event {
+        2
+    } else {
+        1
+    };
+    let defer = |hide: bool| unsafe {
+        PENDING_EVENTS.with(|p| p.set(p.get() | bit));
+        if hide && IsWindowVisible(h) != 0 {
+            ShowWindow(h, 0);
+            HIDDEN_FOR_EVENTS.with(|v| v.set(true));
+        }
+        PostMessageW(h, DRAIN_EVENTS, 0, 0);
+    };
     let mut error = None;
     let handled = APP.with(|cell| {
         let Ok(mut borrow) = cell.try_borrow_mut() else {
-            if security_event || m == 0x10 {
-                let bit = if m == 0x10 { 4 } else if strong_event { 2 } else { 1 };
-                PENDING_EVENTS.with(|p| p.set(p.get() | bit));
-                unsafe {
-                    ShowWindow(h, 0);
-                    PostMessageW(h, DRAIN_EVENTS, 0, 0);
-                }
+            if deferrable {
+                defer(true);
                 return true;
             }
             return false;
@@ -2421,6 +2686,20 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         let Some(app) = borrow.as_mut() else {
             return false;
         };
+        // Windows sends session end, sleep and some close requests from other
+        // threads, and calls the app makes while handling them inherit that
+        // origin: the controls would drop their own wipe and teardown. Drop
+        // the secrets now and rebuild the screen from the queue. A faked
+        // activation is ignored; the timer checks the real foreground window.
+        if foreign && (deferrable || m == 0x1c) {
+            if deferrable {
+                if bit != 1 {
+                    app.scrub();
+                }
+                defer(bit != 1);
+            }
+            return true;
+        }
         match m {
             0x111 => {
                 if let Err(e) = app.command((w & 0xffff) as i32, (w >> 16) as u16) {
@@ -2458,6 +2737,11 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
                 app.lock("절전 전환으로 잠갔습니다.", true);
                 true
             }
+            // Windows is ending the session or Restart Manager closes the app.
+            0x16 if w != 0 => {
+                app.lock("Windows 종료로 잠갔습니다.", true);
+                true
+            }
             0x10 => {
                 app.lock("종료 중 · 클립보드 지우기를 확인하고 있습니다.", true);
                 app.closing = true;
@@ -2469,17 +2753,23 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
                 true
             }
             PASTE_CLEARED => {
-                app.status("붙여넣은 값을 클립보드에서 지웠습니다. 다른 앱이 남긴 기록(Win+V 등)은 지우지 못합니다.");
+                if take_notice(1) {
+                    app.status("붙여넣은 값을 클립보드에서 지웠습니다. 다른 앱이 남긴 기록(Win+V 등)은 지우지 못합니다.");
+                }
                 true
             }
             INPUT_ERROR => {
-                app.status("붙여넣기 실패: 길이 제한, 줄바꿈, 유니코드 형식 또는 클립보드 사용 상태를 확인하세요.");
+                if take_notice(2) {
+                    app.status("붙여넣기 실패: 길이 제한, 줄바꿈, 유니코드 형식 또는 클립보드 사용 상태를 확인하세요.");
+                }
                 true
             }
             _ => false,
         }
     });
-    drain_pending(h);
+    if !foreign {
+        drain_pending(h);
+    }
     if let Some(e) = error {
         report(h, e);
     }
@@ -2508,10 +2798,103 @@ fn load_theme() -> bool {
 }
 fn save_theme(dark: bool) {
     if let Some(p) = theme_file() {
-        // Best effort: a read-only folder only loses the preference.
-        let _ = std::fs::write(p, if dark { "dark" } else { "light" });
+        write_setting(&p, if dark { b"dark" } else { b"light" });
     }
 }
+/// Best effort: a read-only folder only loses the setting. Removing first
+/// means a planted link with this name is replaced, not written through.
+fn write_setting(path: &Path, data: &[u8]) {
+    use std::io::Write;
+    if cfg!(test) {
+        return;
+    }
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(data));
+}
+fn paths_file() -> Option<PathBuf> {
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join("goyo-vault.paths"),
+    )
+}
+/// Vault and key locations only (no secrets), one per line.
+fn save_paths(vault: &Path, key: &Path) {
+    if let Some(p) = paths_file() {
+        let text = format!("{}\n{}\n", vault.display(), key.display());
+        write_setting(&p, text.as_bytes());
+    }
+}
+fn load_paths() -> Option<(PathBuf, PathBuf)> {
+    use std::io::Read;
+    if cfg!(test) {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(paths_file()?)
+        .ok()?
+        .take(8192)
+        .read_to_string(&mut text)
+        .ok()?;
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let (vault, key) = (lines.next()?, lines.next()?);
+    Some((PathBuf::from(vault), PathBuf::from(key)))
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Placement {
+    SameFolder,
+    Cloud,
+}
+impl Placement {
+    fn message(self) -> &'static str {
+        match self {
+            Placement::SameFolder => {
+                "주의: 열쇠 파일이 금고와 같은 폴더에 있어, 폴더째 가져간 사람은 비밀번호만 알아내면 됩니다. '열쇠 백업'으로 USB 등에 옮기고 원래 열쇠는 지우세요."
+            }
+            Placement::Cloud => {
+                "주의: 금고와 열쇠가 모두 클라우드 동기화 폴더에 있어, 그 계정이 털리면 비밀번호만 남습니다. 열쇠는 동기화되지 않는 곳에 두세요."
+            }
+        }
+    }
+}
+/// Placements that leave only the password between a thief and the data.
+fn placement_warning(vault: &Path, key: &Path) -> Option<Placement> {
+    let folder = |p: &Path| p.parent().map(|d| d.to_string_lossy().to_lowercase());
+    if folder(vault).is_some_and(|f| !f.is_empty()) && folder(vault) == folder(key) {
+        Some(Placement::SameFolder)
+    } else if in_cloud_folder(vault) && in_cloud_folder(key) {
+        Some(Placement::Cloud)
+    } else {
+        None
+    }
+}
+/// OneDrive (incl. known-folder backup of Documents/Desktop), Dropbox,
+/// Google Drive and iCloud folders.
+fn in_cloud_folder(p: &Path) -> bool {
+    let path = p.to_string_lossy().to_lowercase();
+    let roots = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|r| r.to_string_lossy().to_lowercase());
+    roots
+        .filter(|r| !r.is_empty())
+        .any(|r| path.starts_with(&r))
+        || [
+            "\\dropbox\\",
+            "\\google drive\\",
+            "\\my drive\\",
+            "\\icloud drive\\",
+            "\\iclouddrive\\",
+        ]
+        .iter()
+        .any(|n| path.contains(n))
+}
+const LEFTOVER_TEMP: &str = "파일이 없고, 저장이 끊기며 남은 임시 파일(.goyotmp)이 같은 폴더에 있습니다. 지우지 마세요. 그 파일 이름을 원래 이름으로 바꾸면 복구될 수 있습니다.";
 /// Title bar colours follow the palette (Windows 11 immersive dark mode).
 fn apply_window_theme(h: Hwnd) {
     let dark: i32 = theme::is_dark().into();
@@ -2538,6 +2921,29 @@ fn create_window(instance: isize, class: &[u16]) -> Hwnd {
         )
     }
 }
+/// Filters posted messages. The app never posts commands, clicks, list or
+/// edit operations, text, activation or modal-loop notices to itself, so
+/// those come from another program. Keyboard and mouse-button input is real
+/// only while one of the app's windows is in front; otherwise it was posted by
+/// someone else.
+fn accept_queued(h: Hwnd, msg: &Msg) -> bool {
+    let ours = msg.hwnd != 0 && (msg.hwnd == h || unsafe { IsChild(h, msg.hwnd) } != 0);
+    if !ours {
+        return true;
+    }
+    let m = msg.message;
+    if matches!(
+        m,
+        0x0c | 0x1c | 0x2b | 0x111 | 0xb0..=0xda | 0xf0..=0xf8 | 0x180..=0x1b2
+            | 0x211 | 0x212 | 0x231 | 0x232
+    ) {
+        return false;
+    }
+    if (0x100..=0x109).contains(&m) || (0x201..=0x20e).contains(&m) {
+        return is_foreground(h);
+    }
+    true
+}
 /// Owner-drawn buttons report DLGC_BUTTON only, so IsDialogMessage would turn
 /// Enter into IDOK. Click the focused button instead, like a native push button.
 fn enter_on_button(h: Hwnd, msg: &Msg) -> bool {
@@ -2563,7 +2969,7 @@ fn main() {
         }
         message(h, e);
     };
-    if let Err(e) = initialize_defenses() {
+    if let Err(e) = initialize_defenses().and_then(|_| restrict_process_access()) {
         startup_error(0, e);
         return;
     }
@@ -2604,7 +3010,13 @@ fn main() {
         apply_window_theme(h);
         SendMessageW(h, 0x80, 0, small); // WM_SETICON, ICON_SMALL
         SendMessageW(h, 0x80, 1, big);
-        if SetWindowDisplayAffinity(h, 0x11) == 0 || WTSRegisterSessionNotification(h, 0) == 0 {
+        // Without this, Modern Standby laptops never send WM_POWERBROADCAST,
+        // so closing the lid would not lock.
+        let suspend = RegisterSuspendResumeNotification(h, 0);
+        if SetWindowDisplayAffinity(h, 0x11) == 0
+            || WTSRegisterSessionNotification(h, 0) == 0
+            || suspend == 0
+        {
             startup_error(
                 h,
                 "캡처 차단 또는 세션 잠금 감시를 설정할 수 없어 종료합니다.",
@@ -2626,11 +3038,25 @@ fn main() {
             app.build();
             ok &= !app.input_failed;
             drop(app);
+            UnregisterSuspendResumeNotification(suspend);
             WTSUnRegisterSessionNotification(h);
             DestroyWindow(h);
+            // Planting check: a DLL loaded from the program folder fails here
+            // even if it loaded silently.
+            for planted in modules_beside_exe() {
+                eprintln!(
+                    "FAIL: DLL loaded from the program folder: {}",
+                    planted.display()
+                );
+                ok = false;
+            }
+            if !restrict_threads() || open_threads() != 0 {
+                eprintln!("FAIL: a thread is still open to other programs");
+                ok = false;
+            }
             if ok {
                 println!(
-                    "PASS: process mitigations, Windows version, capture exclusion, local session, debugger check, timer, RDSEED, input scope, IME exclusion"
+                    "PASS: process mitigations, process and thread access, no DLL beside the exe, Windows version, capture exclusion, session and sleep notifications, local session, debugger check, timer, RDSEED, input scope, IME exclusion"
                 );
             } else {
                 std::process::exit(1);
@@ -2655,6 +3081,9 @@ fn main() {
         UpdateWindow(h);
         let mut msg = Msg::default();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+            if !accept_queued(h, &msg) {
+                continue;
+            }
             if (0x100..=0x109).contains(&msg.message) || (0x201..=0x20e).contains(&msg.message) {
                 APP.with(|a| {
                     if let Ok(mut b) = a.try_borrow_mut()
@@ -2672,6 +3101,7 @@ fn main() {
                 DispatchMessageW(&msg);
             }
         }
+        UnregisterSuspendResumeNotification(suspend);
         WTSUnRegisterSessionNotification(h);
         APP.with(|a| {
             a.borrow_mut().take();
@@ -2863,6 +3293,9 @@ mod tests {
             // Back within AWAY_LOCK: still open.
             app.away_since = Some(Instant::now() - Duration::from_secs(20));
             app.activated();
+            // Not actually in front: an activation message alone (which another
+            // program could fake) does not cancel the away lock.
+            assert!(app.away_since.is_some());
             app.timer();
             assert!(app.session.is_some());
             // Away longer than AWAY_LOCK: locked.
@@ -2926,6 +3359,22 @@ mod tests {
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), 0);
             app.command(PEEK_PASS, 0).unwrap();
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
+            // A shown/masked state faked in the button's window data (which
+            // other programs can write) does not stop re-masking.
+            app.command(PEEK_PASS, 0).unwrap();
+            SetWindowLongPtrW(app.handle(PEEK_PASS), -21, theme::EYE);
+            app.mask_passwords();
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
+            // Create keeps one OTP secret across Back and a second visit.
+            app.command(CREATE, 0).unwrap();
+            let code = app.provision.as_ref().unwrap().setup_code();
+            app.command(BACK, 0).unwrap();
+            app.command(CREATE, 0).unwrap();
+            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            app.provision = None;
+            app.screen = Screen::Login;
+            app.build();
+            SetWindowTextW(app.handle(PASS), wide("synthetic password only").as_ptr());
             app.command(PEEK_PASS, 0).unwrap(); // left shown: the lock below must mask it
             app.command(PASS, 0x300).unwrap();
             app.activity = Instant::now() - Duration::from_secs(61);
@@ -3381,6 +3830,189 @@ mod tests {
             let _ = std::fs::remove_file(e.unwrap().path());
         }
         let _ = std::fs::remove_dir(&temp);
+    }
+    /// Another thread stands in for another program: Windows reports both as
+    /// "sent from another thread" (ISMEX_SEND, or ISMEX_NOTIFY for
+    /// SendNotifyMessage). Posted fakes are covered by accept_queued.
+    #[test]
+    fn foreign_messages_are_ignored() {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn PeekMessageW(m: *mut Msg, h: Hwnd, min: u32, max: u32, remove: u32) -> i32;
+            fn SendNotifyMessageW(h: Hwnd, m: u32, w: usize, l: isize) -> i32;
+        }
+        fn pump_until<T>(worker: &std::thread::JoinHandle<T>) {
+            unsafe {
+                while !worker.is_finished() {
+                    let mut msg = Msg::default();
+                    while PeekMessageW(&mut msg, 0, 0, 0, 1) != 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // Notifications and posted follow-ups still in the queue.
+                let mut msg = Msg::default();
+                while PeekMessageW(&mut msg, 0, 0, 0, 1) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+        unsafe {
+            let name = wide("GoyoForeignMessageTest");
+            let instance = GetModuleHandleW(null());
+            let wc = WndClass {
+                style: 0,
+                proc: Some(window_proc),
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: 0,
+                cursor: 0,
+                background: 6,
+                menu: null(),
+                class: name.as_ptr(),
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let h = CreateWindowExW(
+                0,
+                name.as_ptr(),
+                wide("Synthetic foreign message test").as_ptr(),
+                0x00ca0000,
+                0,
+                0,
+                900,
+                800,
+                0,
+                0,
+                instance,
+                null_mut(),
+            );
+            assert_ne!(h, 0);
+            WINDOW_GONE.with(|p| p.set(false));
+            theme::set_dark(true);
+            let mut app = App::new(h);
+            app.vault_path = std::env::current_exe().unwrap(); // Login screen
+            app.build();
+            let pass = app.handle(PASS);
+            let peek = app.handle(PEEK_PASS);
+            SetWindowTextW(pass, wide("synthetic secret").as_ptr());
+            let local = SendMessageW(pass, 0xd6, 3, 0); // EM_POSFROMCHAR, same thread
+            assert_ne!(local, 0);
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            let results = std::thread::spawn(move || {
+                let send = |to: Hwnd, m: u32, w: usize| SendMessageW(to, m, w, 0);
+                // Not waited for, so these arrive as ISMEX_NOTIFY.
+                SendNotifyMessageW(h, 0x111, THEME_LIGHT as usize, 0);
+                SendNotifyMessageW(peek, 0xf5, 0, 0);
+                [
+                    send(pass, 0xd6, 3),                  // EM_POSFROMCHAR
+                    send(pass, 0xc1, 0),                  // EM_LINELENGTH
+                    send(pass, 0x0e, 0),                  // WM_GETTEXTLENGTH
+                    send(h, 0x111, THEME_LIGHT as usize), // WM_COMMAND
+                    send(peek, 0xf5, 0),                  // BM_CLICK
+                ]
+            });
+            pump_until(&results);
+            assert_eq!(results.join().unwrap(), [0; 5]);
+            // Inside a message box or the move loop, posted commands skip
+            // accept_queued; window_proc itself refuses them then.
+            set_modal_loop(true);
+            assert_eq!(window_proc(h, 0x111, THEME_LIGHT as usize, 0), 0);
+            set_modal_loop(false);
+            assert!(!in_modal());
+            APP.with(|cell| {
+                let b = cell.borrow();
+                let a = b.as_ref().unwrap();
+                assert!(theme::is_dark(), "foreign WM_COMMAND changed the theme");
+                assert!(!a.shown[0], "foreign click unmasked the password");
+                assert_ne!(SendMessageW(pass, 0xd2, 0, 0), 0);
+                // Posted fakes never reach the window procedure.
+                let posted = |hwnd: Hwnd, message: u32| Msg {
+                    hwnd,
+                    message,
+                    ..Msg::default()
+                };
+                for m in [0x111, 0xf5, 0x0c, 0x1c, 0x2b, 0x186, 0xd6, 0x231, 0x232] {
+                    assert!(!accept_queued(
+                        h,
+                        &posted(if m == 0x111 { h } else { pass }, m)
+                    ));
+                }
+                // Input counts only while the app is in front. Whether the
+                // hidden test window is depends on how the test was started.
+                let front = is_foreground(h);
+                assert_eq!(accept_queued(h, &posted(pass, 0x100)), front);
+                assert_eq!(accept_queued(h, &posted(peek, 0x201)), front);
+                assert!(accept_queued(h, &posted(h, 0x113))); // WM_TIMER
+                assert!(accept_queued(h, &posted(0, 0x111))); // not ours
+            });
+            // Windows sends WM_ENDSESSION from another thread. The lock must
+            // still wipe the inputs and keep the paths: its own calls to the
+            // controls would otherwise look foreign and be dropped.
+            let ended = std::thread::spawn(move || SendMessageW(h, 0x16, 1, 0));
+            pump_until(&ended);
+            ended.join().unwrap();
+            APP.with(|cell| {
+                let b = cell.borrow();
+                let a = b.as_ref().unwrap();
+                assert!(a.read(PASS).unwrap().is_empty(), "lock left the password");
+                assert!(a.screen == Screen::Login, "lock lost the vault path");
+                assert!(a.status.contains("잠갔습니다"));
+            });
+            assert_eq!(PENDING_EVENTS.with(Cell::get), 0);
+            APP.with(|cell| {
+                cell.borrow_mut().take();
+            });
+            DestroyWindow(h);
+            WINDOW_GONE.with(|p| p.set(false));
+            PENDING_EVENTS.with(|p| p.set(0));
+        }
+    }
+    /// The self-check's planting test reports a DLL loaded from the exe's
+    /// folder. A renamed copy of a System32 DLL stands in for a planted one.
+    #[test]
+    fn dll_beside_exe_is_reported() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryW(name: *const u16) -> isize;
+            fn FreeLibrary(module: isize) -> i32;
+        }
+        assert!(modules_beside_exe().is_empty());
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let planted = dir.join(format!("goyo-plant-test-{}.dll", std::process::id()));
+        std::fs::copy(system.join("wtsapi32.dll"), &planted).unwrap();
+        unsafe {
+            let module = LoadLibraryW(wide(&planted.to_string_lossy()).as_ptr());
+            assert_ne!(module, 0);
+            let found = modules_beside_exe();
+            FreeLibrary(module);
+            let _ = std::fs::remove_file(&planted);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].file_name() == planted.file_name());
+        }
+        assert!(modules_beside_exe().is_empty());
+    }
+    /// Threads started after launch (the test harness has several) get the
+    /// same restricted DACL as the UI thread.
+    #[test]
+    fn later_threads_are_restricted() {
+        let (stop, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || wait.recv().ok());
+        assert!(restrict_threads());
+        let start = Instant::now();
+        assert!(restrict_threads()); // the timer's per-tick cost
+        let cost = start.elapsed();
+        assert_eq!(open_threads(), 0);
+        assert!(cost < Duration::from_millis(10), "{cost:?}"); // runs every 500 ms
+        stop.send(()).unwrap();
+        worker.join().unwrap();
     }
     #[test]
     fn close_and_timer_do_not_rebuild_destroyed_windows() {

@@ -16,6 +16,12 @@ pub const AUTH_ERROR: &str =
 
 pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
     let mut out = Zeroizing::new([0; N]);
+    random_into(out.as_mut_slice())?;
+    Ok(out)
+}
+/// Fills `out` in place. Long-lived secrets use this so the bytes are never
+/// moved through a return value, which leaves unwiped copies on the stack.
+pub fn random_into(out: &mut [u8]) -> Result<()> {
     for chunk in out.chunks_mut(64) {
         // Collect 1024 raw hardware bits per conditioned 512-bit block. This
         // does not create entropy: CPU/microcode and the machine remain trusted.
@@ -36,7 +42,7 @@ pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
         digest.as_mut_slice().zeroize();
         previous.zeroize();
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(target_arch = "x86_64")]

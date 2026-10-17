@@ -37,8 +37,25 @@ flags = u16(config+78)
 report = {'sha256':hashlib.sha256(b).hexdigest(), 'bytes':len(b),
           'machine':hex(u16(pe+4)), 'dll_characteristics':hex(u16(optional+70)),
           'dependent_load_flags':hex(flags), 'imports':imports}
+characteristics = u16(optional+70)
 assert flags == 0x800, 'Static DLL lookup must use System32'
-assert u16(optional+70) & 0x4000, 'CFG flag missing'
+for bit, name in [(0x20, 'HIGH_ENTROPY_VA'), (0x40, 'DYNAMIC_BASE (ASLR)'), (0x100, 'NX_COMPAT (DEP)'), (0x4000, 'GUARD_CF (CFG)')]:
+    assert characteristics & bit, f'{name} flag missing'
+# CET shadow stack compatibility lives in the debug directory (type 20).
+cet = False
+debug_rva, debug_size = u32(optional+112+6*8), u32(optional+112+6*8+4)
+for i in range(debug_size // 28 if debug_rva else 0):
+    entry = offset(debug_rva) + i*28
+    if u32(entry+12) == 20:
+        cet = bool(u32(u32(entry+24)) & 1)
+assert cet, 'CETCOMPAT flag missing'
+assert not u32(optional+112+13*8), 'Delay imports are not expected'
+# Only these DLLs may load before main runs; anything else (wtsapi32 pulled
+# SspiCli.dll from the exe folder) must be loaded at run time from System32.
+allowed = {'user32.dll', 'gdi32.dll', 'kernel32.dll', 'ntdll.dll', 'imm32.dll', 'dwmapi.dll', 'uxtheme.dll', 'comdlg32.dll'}
+for dll in imports:
+    assert dll.lower() in allowed or dll.lower().startswith('api-ms-win-core-'), f'Unexpected static import {dll}'
+report['cet_compat'] = cet
 for names in imports.values():
     assert not any(n.startswith(('BCrypt','CryptProtect','CryptUnprotect')) or n in ('ProcessPrng','SystemFunction036') for n in names), 'OS crypto/RNG imported'
 output = json.dumps(report, indent=2)

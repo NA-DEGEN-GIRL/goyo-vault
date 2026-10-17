@@ -10,3 +10,4 @@ goyo-vault.theme
 /scripts/mcp_client.py
 /scripts/mcp-*.json
 /scripts/prepare_review.py
+goyo-vault.paths

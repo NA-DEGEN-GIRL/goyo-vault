@@ -53,44 +53,82 @@ impl Entry {
         Ok(())
     }
 }
+/// Heap copy of a secret, filled in place so no copy is left on the stack.
+fn boxed<const N: usize>(src: &[u8; N]) -> Box<Zeroizing<[u8; N]>> {
+    let mut out = Box::new(Zeroizing::new([0u8; N]));
+    out.as_mut_slice().copy_from_slice(src);
+    out
+}
+/// Short, non-secret name for a vault: the first 4 bytes of its random ID.
+/// Each vault gets its own authenticator entry, so a second vault's QR can
+/// never replace (Microsoft Authenticator) or be mistaken for the first.
+fn tag(id: &[u8; 16]) -> String {
+    format!("{:02X}{:02X}-{:02X}{:02X}", id[0], id[1], id[2], id[3])
+}
+/// The tag of the vault file at `path`, read from its plaintext header.
+pub fn vault_tag(path: &Path) -> Option<String> {
+    let mut head = [0u8; 24];
+    File::open(path).ok()?.read_exact(&mut head).ok()?;
+    (&head[..8] == DATA_MAGIC).then(|| tag(head[8..24].try_into().unwrap()))
+}
 /// The TOTP secret in the forms an authenticator app accepts.
-pub struct OtpSetup(Zeroizing<[u8; 20]>);
+pub struct OtpSetup {
+    id: [u8; 16],
+    otp: Box<Zeroizing<[u8; 20]>>,
+}
 impl OtpSetup {
     /// Base32 setup key for manual entry.
     pub fn code(&self) -> Zeroizing<String> {
-        otp::base32(self.0.as_slice())
+        otp::base32(self.otp.as_slice())
+    }
+    /// Account name shown in the authenticator app, e.g. "3FA2-C1D0".
+    pub fn tag(&self) -> String {
+        tag(&self.id)
     }
     /// Key URI for the QR; SHA-1, 6 digits and 30 s are defaults.
     pub fn uri(&self) -> Zeroizing<String> {
-        const HEAD: &str = "otpauth://totp/Goyo%20Vault?secret=";
+        const HEAD: &str = "otpauth://totp/Goyo%20Vault:";
+        const SECRET: &str = "?secret=";
         const TAIL: &str = "&issuer=Goyo%20Vault";
-        let code = self.code();
+        let (tag, code) = (self.tag(), self.code());
+        let size = HEAD.len() + tag.len() + SECRET.len() + code.len() + TAIL.len();
         // Sized up front so the secret is never left behind by a reallocation.
-        let mut uri = Zeroizing::new(String::with_capacity(HEAD.len() + code.len() + TAIL.len()));
-        uri.push_str(HEAD);
-        uri.push_str(&code);
-        uri.push_str(TAIL);
+        let mut uri = Zeroizing::new(String::with_capacity(size));
+        for part in [HEAD, &tag, SECRET, &code, TAIL] {
+            uri.push_str(part);
+        }
         uri
     }
 }
 pub struct Provision {
     id: [u8; 16],
-    key: Key,
-    otp: Zeroizing<[u8; 20]>,
+    key: Box<Key>,
+    otp: Box<Zeroizing<[u8; 20]>>,
 }
 impl Provision {
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            id: *crypto::random()?,
-            key: crypto::random()?,
-            otp: crypto::random()?,
-        })
+        let mut p = Self {
+            id: [0; 16],
+            key: Box::default(),
+            otp: Box::default(),
+        };
+        crypto::random_into(&mut p.id)?;
+        crypto::random_into(p.key.as_mut_slice())?;
+        crypto::random_into(p.otp.as_mut_slice())?;
+        Ok(p)
     }
     pub fn setup(&self) -> OtpSetup {
-        OtpSetup(Zeroizing::new(*self.otp))
+        OtpSetup {
+            id: self.id,
+            otp: boxed(&self.otp),
+        }
     }
     pub fn setup_code(&self) -> Zeroizing<String> {
         self.setup().code()
+    }
+    /// The authenticator account name, without copying the OTP secret.
+    pub fn tag(&self) -> String {
+        tag(&self.id)
     }
     pub fn finish(
         &self,
@@ -113,8 +151,8 @@ impl Provision {
             path: vault,
             key_path,
             id: self.id,
-            key: Zeroizing::new(*self.key),
-            otp: Zeroizing::new(*self.otp),
+            key: boxed(&self.key),
+            otp: boxed(&self.otp),
             last,
             entries: Vec::new(),
             key_bytes,
@@ -131,6 +169,74 @@ impl Provision {
     }
 }
 pub const MIN_PASSWORD: usize = 12;
+/// Common words, keyboard walks, runs and repeats are what guessing tools try
+/// first. A password made only of such pieces is refused at any length:
+/// "password1234", "qwerty123456", "1q2w3e4r5t6y" and "123456123456" all are,
+/// while unrelated words ("dragon-tiger-lemon") or a sentence still pass.
+fn predictable(s: &str) -> bool {
+    const WALKS: [&str; 10] = [
+        "abcdefghijklmnopqrstuvwxyz",
+        "01234567890",
+        "qwertyuiop[]",
+        "asdfghjkl;'",
+        "zxcvbnm,./",
+        "1q2w3e4r5t6y7u8i9o0p",
+        "q1w2e3r4t5y6u7i8o9p0",
+        "1qaz2wsx3edc4rfv5tgb6yhn7ujm8ik9ol0p",
+        "qazwsxedcrfvtgbyhnujmikolp",
+        "!@#$%^&*()",
+    ];
+    const WORDS: [&str; 40] = [
+        "password", "passwd", "pass", "iloveyou", "love", "letmein", "welcome", "admin", "login",
+        "secret", "master", "hello", "dragon", "monkey", "shadow", "sunshine", "princess",
+        "football", "baseball", "soccer", "superman", "batman", "freedom", "whatever", "trustno",
+        "starwars", "qwerty", "test", "google", "naver", "kakao", "samsung", "bitcoin", "crypto",
+        "wallet", "korea", "seoul", "sarang", "dkssud",
+        "tkfkd", // 안녕, 사랑 typed with the Korean layout off
+    ];
+    let mut chars: Zeroizing<Vec<char>> = Zeroizing::new(Vec::with_capacity(s.len()));
+    chars.extend(
+        s.chars()
+            .flat_map(char::to_lowercase)
+            .filter(|c| !c.is_whitespace()),
+    );
+    if chars.iter().all(char::is_ascii_digit) {
+        return true; // dates, phone numbers
+    }
+    // A repeated block counts once: "qwerqwerqwer" is judged as "qwer".
+    let n = chars.len();
+    let unit = (1..=n / 2)
+        .find(|p| n.is_multiple_of(*p) && (*p..n).all(|i| chars[i] == chars[i - p]))
+        .unwrap_or(n);
+    let text = &chars[..unit];
+    let mut covered = vec![false; unit];
+    let words: Vec<Vec<char>> = WORDS.iter().map(|w| w.chars().collect()).collect();
+    let walks: Vec<Vec<char>> = WALKS
+        .iter()
+        .flat_map(|w| [w.chars().collect(), w.chars().rev().collect()])
+        .collect();
+    // No run is longer than the longest walk, which keeps this fast up to the
+    // 1024-byte limit.
+    let longest = walks.iter().map(Vec::len).max().unwrap_or(0);
+    for i in 0..unit {
+        for w in &words {
+            if text[i..].starts_with(w) {
+                covered[i..i + w.len()].fill(true);
+            }
+        }
+        // Longest run from i that sits inside a keyboard or alphabet walk.
+        let run = (3..=(unit - i).min(longest)).rev().find(|len| {
+            let piece = &text[i..i + len];
+            walks
+                .iter()
+                .any(|walk| walk.windows(*len).any(|w| w == piece))
+        });
+        if let Some(len) = run {
+            covered[i..i + len].fill(true);
+        }
+    }
+    covered.iter().filter(|c| !**c).count() < 4
+}
 pub fn password_policy(s: &str) -> Result<()> {
     // Argon2id slows each guess, but a stolen key file can still be guessed
     // offline without limit (the OTP does not take part in decryption), so
@@ -140,13 +246,20 @@ pub fn password_policy(s: &str) -> Result<()> {
             "비밀번호는 12자 이상, UTF-8 1024바이트 이하로 입력하세요. 짧고 복잡한 암호보다 긴 문장이 안전합니다.",
         );
     }
-    // Length alone admits "aaaaaaaaaaaaaaaa" or "abababababababab".
-    let mut distinct: Zeroizing<Vec<char>> = Zeroizing::new(s.chars().collect());
+    // Length alone admits "aaaaaaaaaaaaaaaa" or "abababababababab". Sized up
+    // front: a growing Vec would free unwiped copies of the password.
+    let mut distinct: Zeroizing<Vec<char>> = Zeroizing::new(Vec::with_capacity(s.len()));
+    distinct.extend(s.chars());
     distinct.sort_unstable();
     distinct.dedup();
     if distinct.len() < 6 {
         return Err(
             "같은 글자를 반복한 비밀번호는 쓸 수 없습니다. 서로 다른 글자가 6개 이상 필요합니다.",
+        );
+    }
+    if predictable(s) {
+        return Err(
+            "흔한 단어(password, dragon 등)·키보드 배열·연속된 숫자는 추측 도구가 가장 먼저 시도해서 글자 수로 치지 않습니다. 흔하지 않은 단어나 나만 아는 문장을 섞으세요.",
         );
     }
     Ok(())
@@ -156,8 +269,8 @@ pub struct Session {
     pub path: PathBuf,
     pub key_path: PathBuf,
     id: [u8; 16],
-    key: Key,
-    otp: Zeroizing<[u8; 20]>,
+    key: Box<Key>,
+    otp: Box<Zeroizing<[u8; 20]>>,
     last: u64,
     pub entries: Vec<Entry>,
     key_bytes: Vec<u8>,
@@ -297,7 +410,13 @@ impl Session {
             return Err(AUTH_ERROR);
         }
         let _verified = decode_key(&self.key_bytes, password)?;
-        Ok(OtpSetup(Zeroizing::new(*self.otp)))
+        Ok(OtpSetup {
+            id: self.id,
+            otp: boxed(&self.otp),
+        })
+    }
+    pub fn tag(&self) -> String {
+        tag(&self.id)
     }
     pub fn change_password(&mut self, current: &str, password: &str, input: &str) -> Result<()> {
         password_policy(password)?;
@@ -340,7 +459,7 @@ fn encode_key(id: &[u8; 16], key: &[u8; 32], otp: &[u8; 20], password: &str) -> 
     header.extend_from_slice(&ciphertext);
     Ok(header)
 }
-type KeyMaterial = ([u8; 16], Key, Zeroizing<[u8; 20]>);
+type KeyMaterial = ([u8; 16], Box<Key>, Box<Zeroizing<[u8; 20]>>);
 fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
     if data.len() != 148 || &data[..8] != KEY_MAGIC {
         return Err(AUTH_ERROR);
@@ -350,9 +469,9 @@ fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
     let nonce = data[56..80].try_into().unwrap();
     let wrapping = crypto::derive(password.as_bytes(), salt)?;
     let plain = crypto::open(&wrapping, nonce, &data[..80], &data[80..])?;
-    let mut key = Zeroizing::new([0; 32]);
+    let mut key: Box<Key> = Box::default();
     key.copy_from_slice(&plain[..32]);
-    let mut otp = Zeroizing::new([0; 20]);
+    let mut otp: Box<Zeroizing<[u8; 20]>> = Box::default();
     otp.copy_from_slice(&plain[32..]);
     Ok((id, key, otp))
 }
@@ -584,6 +703,11 @@ fn atomic_write(path: &Path, data: &[u8], replace: bool) -> Result<()> {
             .map_err(|_| "저장 실패: 디스크 공간과 권한을 확인하세요.")?;
         drop(f);
         publish(&temp, path, replace)?;
+        // The rename is only metadata. Flush the file under its final name so a
+        // power cut right after "saved" cannot undo it (FAT/exFAT included).
+        if let Ok(f) = OpenOptions::new().write(true).open(path) {
+            let _ = f.sync_all();
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -592,6 +716,26 @@ fn atomic_write(path: &Path, data: &[u8], replace: bool) -> Result<()> {
     result
 }
 
+/// Whether an interrupted save left `<path>.<random>.goyotmp` next to `path`.
+/// When the main file is missing, that temp file may be the only full copy.
+pub fn leftover_temp(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let prefix = format!("{}.", name.to_string_lossy().to_lowercase());
+    fs::read_dir(if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    })
+    .map(|entries| {
+        entries.flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n.starts_with(&prefix) && n.ends_with(".goyotmp")
+        })
+    })
+    .unwrap_or(false)
+}
 #[cfg(windows)]
 fn publish(temp: &Path, target: &Path, replace: bool) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -666,6 +810,15 @@ mod workflow_tests {
         let setup = s.otp_setup(pass).unwrap();
         assert_eq!(setup.code(), p.setup_code());
         assert!(setup.uri().contains(p.setup_code().as_str()));
+        // Each vault is its own authenticator account; the URI still fits the QR.
+        assert_eq!(vault_tag(&v), Some(s.tag()));
+        assert_eq!(setup.tag(), s.tag());
+        assert!(setup.uri().contains(&format!("Goyo%20Vault:{}?", s.tag())));
+        assert!(setup.uri().len() <= crate::qr::CAPACITY);
+        assert!(!leftover_temp(&v));
+        fs::write(t.file("vault.goyo.0123.goyotmp"), b"synthetic").unwrap();
+        assert!(leftover_temp(&v) && !leftover_temp(&k));
+        fs::remove_file(t.file("vault.goyo.0123.goyotmp")).unwrap();
         assert_eq!(
             s.otp_setup("wrong synthetic password").err(),
             Some(AUTH_ERROR)
@@ -798,6 +951,36 @@ mod workflow_tests {
         assert!(password_policy("correct hors").is_ok()); // 12 characters
         assert!(password_policy("correct hor").is_err()); // 11
         assert!(password_policy("다람쥐 헌 쳇바퀴에 타고파").is_ok());
+        // Guessable at any length: words, walks, runs, repeats, digits only.
+        for weak in [
+            "password1234",
+            "Password1234!",
+            "qwerty123456",
+            "1q2w3e4r5t6y",
+            "123456123456",
+            "iloveyou1234",
+            "qwertyuiop12",
+            "abcdef123456",
+            "qwerqwerqwer",
+            "202610171234",
+            "asdfghjkl;'12",
+            "q1w2e3r4t5y6u7",
+            "sunshine princess dragon football",
+        ] {
+            assert!(password_policy(weak).is_err(), "{weak}");
+        }
+        // No length at which the check stops (it used to give up past 64).
+        let words = "password".repeat(9);
+        assert!(password_policy(&words[..65]).is_err());
+        assert!(password_policy(&"qwerty".repeat(170)).is_err()); // 1020 bytes
+        for strong in [
+            "dragon-tiger-lemon",
+            "purple cactus 7 sing",
+            "Goyo vault sits quietly",
+            "a long synthetic password",
+        ] {
+            assert!(password_policy(strong).is_ok(), "{strong}");
+        }
     }
     #[test]
     fn password_change_failure_stages_preserve_recoverability() {
@@ -928,8 +1111,8 @@ mod tests {
     fn key_password_and_tamper() {
         let bytes = encode_key(&[1; 16], &[2; 32], &[3; 20], "long-test-password").unwrap();
         let (_, key, otp) = decode_key(&bytes, "long-test-password").unwrap();
-        assert_eq!(*key, [2; 32]);
-        assert_eq!(*otp, [3; 20]);
+        assert_eq!(**key, [2; 32]);
+        assert_eq!(**otp, [3; 20]);
         assert!(decode_key(&bytes, "wrong-password").is_err());
         let mut bad = bytes;
         bad[8] ^= 1;
