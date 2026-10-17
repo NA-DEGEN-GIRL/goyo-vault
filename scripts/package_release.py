@@ -27,7 +27,9 @@ for package in sorted(metadata['packages'], key=lambda p: p['name']):
             shutil.copyfile(p, root/'LICENSE-APACHE')
 (root/'docs/THIRD_PARTY_NOTICES.md').write_text('\n'.join(notices), encoding='utf-8')
 version = metadata['packages'][next(i for i,p in enumerate(metadata['packages']) if p['name']=='goyo-vault')]['version']
-folder = root/'dist'/f'GoyoVault-{version}'
+# One unversioned folder: extracting a new release over the old one keeps the
+# vault and key files that live next to the executable.
+folder = root/'dist'/'GoyoVault'
 folder.mkdir(parents=True, exist_ok=True)
 files = ['README.md','README.en.md','시작하기.txt','LICENSE-MIT','LICENSE-APACHE','docs/FORMAT.md','docs/SECURITY_REVIEW.md',
          'docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json']

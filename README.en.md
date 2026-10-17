@@ -28,8 +28,15 @@
 ## Install
 
 1. Download `GoyoVault-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases).
-2. Extract it to **a folder you will keep**, for example `Documents\GoyoVault`. Do not run it from inside the ZIP. The vault is saved next to the executable by default, so a temporary folder that gets cleaned up would take your vault with it.
-3. Run `goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. Choose **More info → Run anyway**. You can check the download against `SHA256SUMS.txt` inside the ZIP.
+2. The ZIP contains a `GoyoVault` folder. Extract it to **a place you will keep**, for example `Documents`, which gives you `Documents\GoyoVault`. Do not run it from inside the ZIP. The vault is saved next to the executable by default, so a temporary folder that gets cleaned up would take your vault with it.
+3. Run `GoyoVault\goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. Choose **More info → Run anyway**. You can check the download against `SHA256SUMS.txt` inside the ZIP.
+
+### Updating
+
+Extract the new ZIP **to the same place, overwriting the old files.** Only the program and documents change; the vault (`.goyo`), key (`.goyokey`) and theme setting in that folder stay. Back up the vault and key first.
+
+> [!NOTE]
+> ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault elsewhere (다른 위치에 있는 금고 열기)**.
 
 ## How to use it
 
