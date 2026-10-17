@@ -16,7 +16,7 @@
 - **Fully offline:** no network code, no server, account, sync or auto-update.
 - **Four things open a vault:** the vault file (`.goyo`), a separate key file (`.goyokey`), your password and a phone OTP.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
-- **Auto-lock** after 60 seconds idle, when you switch to another app, lock the screen or the PC sleeps.
+- **Auto-lock** of an open vault after 60 seconds idle, when you switch to another app, lock the screen or the PC sleeps.
 - **Screen-capture protection:** the window is excluded from ordinary screenshots and screen recordings.
 - **A single executable, no installer.** Dark and light themes.
 
@@ -57,7 +57,7 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 ![Create a vault](docs/images/create.png)
 
 1. Check where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder. Keeping the key file somewhere else, such as a USB drive, is safer.
-2. Enter a **password** twice. It needs at least 16 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
+2. Enter a **password** twice. It needs at least 12 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
 3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
 4. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
 
@@ -92,6 +92,8 @@ Pick an entry in the list to see it on the right.
 ![Open vault](docs/images/login.png)
 
 The vault locks itself after 60 seconds without use, when you switch to another app, lock the screen or the PC sleeps. **Lock (잠금)** locks it right away.
+
+Screens before a vault is open (open, new vault, restore) keep what you typed and the OTP setup QR when you switch to another app; only a password you made visible is hidden again. They are still cleared after the idle time (5 minutes for a new vault, 60 seconds otherwise) or when you lock Windows.
 
 To open it again, enter your password and a **new** OTP code. A code that was already used is refused, so if you just opened the vault, wait for the next code on your phone. If you moved the vault or key file, pick it with **Browse (찾기)**.
 

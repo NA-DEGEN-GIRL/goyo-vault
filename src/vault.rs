@@ -119,10 +119,14 @@ impl Provision {
         Ok(session)
     }
 }
+pub const MIN_PASSWORD: usize = 12;
 pub fn password_policy(s: &str) -> Result<()> {
-    if s.chars().count() < 16 || s.len() > 1024 {
+    // Argon2id slows each guess, but a stolen key file can still be guessed
+    // offline without limit (the OTP does not take part in decryption), so
+    // length is what keeps the password out of reach.
+    if s.chars().count() < MIN_PASSWORD || s.len() > 1024 {
         return Err(
-            "비밀번호는 16자 이상, UTF-8 1024바이트 이하로 입력하세요. 긴 무작위 문장을 권장합니다.",
+            "비밀번호는 12자 이상, UTF-8 1024바이트 이하로 입력하세요. 짧고 복잡한 암호보다 긴 문장이 안전합니다.",
         );
     }
     // Length alone admits "aaaaaaaaaaaaaaaa" or "abababababababab".
@@ -761,6 +765,9 @@ mod workflow_tests {
         assert!(password_policy("short but varied").is_ok());
         assert!(password_policy("우리집 강아지는 복슬복슬 강아지").is_ok());
         assert!(password_policy("abc").is_err());
+        assert!(password_policy("correct hors").is_ok()); // 12 characters
+        assert!(password_policy("correct hor").is_err()); // 11
+        assert!(password_policy("다람쥐 헌 쳇바퀴에 타고파").is_ok());
     }
     #[test]
     fn password_change_failure_stages_preserve_recoverability() {

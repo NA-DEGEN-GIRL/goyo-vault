@@ -402,9 +402,27 @@ impl App {
         if edit == 0 || b == 0 {
             return Ok(());
         }
+        let show = unsafe { GetWindowLongPtrW(b, -21) } != theme::EYE_ON;
+        self.set_shown(edit, b, show)?;
+        unsafe {
+            // Keep typing where the user left off.
+            SetFocus(edit);
+        }
+        Ok(())
+    }
+    /// Masks every password shown with the eye button. Never moves focus,
+    /// so it is safe while another app is being activated.
+    fn mask_passwords(&self) {
+        for (button, field) in PEEK_FIELDS {
+            let (edit, b) = (self.handle(field), self.handle(button));
+            if edit != 0 && b != 0 && unsafe { GetWindowLongPtrW(b, -21) } == theme::EYE_ON {
+                let _ = self.set_shown(edit, b, false); // masking cannot fail
+            }
+        }
+    }
+    fn set_shown(&self, edit: Hwnd, b: Hwnd, show: bool) -> crypto::Result<()> {
         let original = EDIT_PROC.get().copied();
         unsafe {
-            let show = GetWindowLongPtrW(b, -21) != theme::EYE_ON;
             let mask = if show { 0 } else { '•' as usize };
             CallWindowProcW(original, edit, 0xcc, mask, 0);
             if show {
@@ -430,8 +448,6 @@ impl App {
             SetWindowTextW(b, wide(name).as_ptr());
             InvalidateRect(b, null(), 0);
             InvalidateRect(edit, null(), 1);
-            // Keep typing where the user left off.
-            SetFocus(edit);
         }
         Ok(())
     }
@@ -711,7 +727,7 @@ impl App {
         }
         if create {
             let half = (AW - 16) / 2;
-            self.password_field(PASS, "비밀번호 · 16자 이상", AX, y, half);
+            self.password_field(PASS, "비밀번호 · 12자 이상", AX, y, half);
             self.password_field(CONFIRM, "비밀번호 확인", AX + half + 16, y, half);
             // Enrollment card (see ENROLL): QR, setup key and frame are painted.
             let strong = self.font_of(|t| t.strong);
@@ -945,7 +961,7 @@ impl App {
             22,
         );
         self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 160, AW);
-        self.password_field(PASS, "새 비밀번호 · 16자 이상", AX, 232, AW);
+        self.password_field(PASS, "새 비밀번호 · 12자 이상", AX, 232, AW);
         self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
         self.field(OTP, "새 Google OTP 6자리", "", AX, 376, 180, true);
         self.note(
@@ -1018,6 +1034,18 @@ impl App {
         self.screen = self.home();
         if self.screen == Screen::Welcome {
             self.status.clear();
+        }
+    }
+    /// Another app became active. An open vault locks. Before unlocking
+    /// there is nothing to lock, so a half-filled form (a new vault whose OTP
+    /// is being enrolled, a restore) stays for the user to come back to; shown
+    /// passwords are masked, and the idle timeout and Windows session lock
+    /// still clear everything.
+    fn deactivated(&mut self) {
+        if self.session.is_some() {
+            self.lock("다른 앱으로 전환되어 잠갔습니다.", false);
+        } else {
+            self.mask_passwords();
         }
     }
     fn lock(&mut self, why: &str, clear_clipboard: bool) {
@@ -1749,7 +1777,7 @@ impl App {
             for (i, (name, about)) in [
                 ("금고 파일", "암호화된 항목\n(.goyo)"),
                 ("열쇠 파일", "금고와 따로 보관\n(.goyokey)"),
-                ("비밀번호", "16자 이상의\n긴 문장"),
+                ("비밀번호", "12자 이상의\n긴 문장"),
                 ("휴대폰 OTP", "Google\nAuthenticator"),
             ]
             .into_iter()
@@ -2089,10 +2117,11 @@ fn drain_pending(h: Hwnd) {
             }
             return;
         }
-        a.lock(
-            "화면 또는 시스템 세션 변경으로 잠갔습니다.",
-            pending & 6 != 0,
-        );
+        if pending & 6 == 0 {
+            a.deactivated(); // only an app switch arrived while busy
+        } else {
+            a.lock("화면 또는 시스템 세션 변경으로 잠갔습니다.", true);
+        }
         if pending & 4 != 0 {
             a.closing = true;
         }
@@ -2252,7 +2281,7 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
             }
             0x1c if w == 0 => {
                 if !app.closing {
-                    app.lock("다른 앱으로 전환되어 잠갔습니다.", false);
+                    app.deactivated();
                 }
                 true
             }
@@ -2625,6 +2654,22 @@ mod tests {
             app.timer();
             assert!(app.read(PASS).unwrap().is_empty() && !app.auth_dirty);
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
+            // Switching apps mid-enrollment keeps the new vault form and its
+            // OTP secret; only the shown password is masked again.
+            app.screen = Screen::Create;
+            app.provision = Some(Provision::new().unwrap());
+            app.build();
+            let code = app.provision.as_ref().unwrap().setup_code();
+            SetWindowTextW(app.handle(PASS), wide("synthetic enrollment").as_ptr());
+            app.command(PEEK_PASS, 0).unwrap();
+            app.deactivated();
+            assert!(app.screen == Screen::Create);
+            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            assert_eq!(&*app.read(PASS).unwrap(), "synthetic enrollment");
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
+            app.provision = None;
+            app.screen = Screen::Login;
+            app.build();
             assert!(app.command(CANCEL, 0).is_err());
             assert!(app.screen == Screen::Login);
             for value in ["W".repeat(8192), "M".repeat(400), "한글😀".repeat(100)] {
@@ -2737,6 +2782,20 @@ mod tests {
                 let b = cell.borrow();
                 let a = b.as_ref().unwrap();
                 assert!(a.read(PASS).unwrap().is_empty() && !a.auth_dirty);
+                assert!(a.screen == Screen::Login);
+                SetWindowTextW(a.handle(PASS), wide("synthetic kept").as_ptr());
+            });
+            // A deferred app switch with nothing unlocked keeps typed input.
+            APP.with(|cell| {
+                let _borrow = cell.borrow_mut();
+                assert_eq!(window_proc(h, 0x1c, 0, 0), 0);
+                assert_eq!(PENDING_EVENTS.with(Cell::get), 1);
+            });
+            drain_pending(h);
+            APP.with(|cell| {
+                let b = cell.borrow();
+                let a = b.as_ref().unwrap();
+                assert_eq!(&*a.read(PASS).unwrap(), "synthetic kept");
                 assert!(a.screen == Screen::Login);
             });
             APP.with(|cell| {
