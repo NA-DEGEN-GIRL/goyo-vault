@@ -80,6 +80,8 @@ const CARD_W: i32 = 464;
 const HINT: (i32, i32, i32, i32) = (CARD_X, 372, CARD_W, 40);
 /// Dark/light segmented switch in the top-right corner of every screen.
 const THEME_SWITCH: (i32, i32, i32, i32) = (704, 21, 132, 36);
+/// OTP enrollment card on Create: QR on the left, instructions and key right.
+const ENROLL: (i32, i32, i32, i32) = (AX, 374, AW, 210);
 /// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
 const LOGIN_LINKS: (i32, i32, i32, i32) = (AX, 500, AW, 1);
 #[derive(Clone, Copy, PartialEq)]
@@ -634,36 +636,39 @@ impl App {
             let half = (AW - 16) / 2;
             self.field(PASS, "비밀번호 · 16자 이상", "", AX, y, half, true);
             self.field(CONFIRM, "비밀번호 확인", "", AX + half + 16, y, half, true);
-            // Enrollment card; the frame and setup key are painted.
+            // Enrollment card (see ENROLL): QR, setup key and frame are painted.
             let strong = self.font_of(|t| t.strong);
+            let (cx, cy, cw, _) = ENROLL;
+            let (rx, rw) = (cx + 180, cw - 196);
             self.text(
                 0,
                 "휴대폰 OTP 등록",
-                (AX + 20, 390, AW - 40, 22),
+                (rx, cy + 14, rw, 22),
                 strong,
                 TONE_TEXT,
                 0,
             );
             self.note(
-                "Google Authenticator → + → 설정 키 입력 → 시간 기준\r\n계정 이름은 '고요 금고'로 정하고 아래 키를 입력하세요.",
-                AX + 20,
-                416,
-                AW - 40,
+                "Google Authenticator → + → QR 코드 스캔\r\nOTP 앱 안의 스캐너로만 찍고, 사진으로 남기지 마세요.",
+                rx,
+                cy + 40,
+                rw,
                 40,
             );
+            self.note("스캔이 안 되면 '설정 키 입력'에:", rx, cy + 84, rw, 18);
             self.note(
-                "등록 키는 이 화면에서만 표시합니다. 휴대폰·등록 키를 잃으면 접근할 수 없습니다.",
-                AX + 20,
-                512,
-                AW - 40,
-                36,
+                "QR·등록 키는 이 화면에서만 보입니다. 휴대폰을 잃으면 금고를 열 수 없으니\r\nOTP 앱의 백업 기능을 켜 두거나 등록 키를 종이에 적어 안전하게 보관하세요.",
+                cx + 16,
+                cy + 172,
+                cw - 32,
+                34,
             );
-            self.field(OTP, "앱에 표시된 6자리", "", AX, 566, 180, true);
+            self.field(OTP, "앱에 표시된 6자리", "", AX, 600, 180, true);
             self.button(
                 SUBMIT,
                 "등록 확인 · 금고 만들기",
                 AX + 196,
-                588,
+                622,
                 AW - 196,
                 40,
                 theme::PRIMARY,
@@ -1522,24 +1527,74 @@ impl App {
             if self.screen == Screen::Create
                 && let Some(provision) = &self.provision
             {
-                let card = self.r(AX, 374, AW, 176);
-                theme::round(dc, &card, self.px(12), Some(p.bg), Some(p.border));
-                let key = self.r(AX + 20, 462, AW - 40, 44);
-                theme::round(dc, &key, self.px(8), Some(p.surface), None);
-                // Groups of four are easier to type; Authenticator ignores the spaces.
-                let raw = provision.setup_code();
-                let mut grouped = Zeroizing::new(String::with_capacity(raw.len() * 2));
-                for (i, c) in raw.chars().enumerate() {
-                    if i > 0 && i % 4 == 0 {
-                        grouped.push(' ');
-                    }
-                    grouped.push(c);
-                }
-                theme::text(dc, &grouped, &key, code, p.text, DT_CENTER | LINE);
+                self.draw_enrollment(dc, provision, &p, code);
             }
             if self.screen == Screen::Vault {
                 self.draw_detail(dc, small, title);
             }
+        }
+    }
+    /// QR for authenticator apps plus the same key as text for manual entry.
+    unsafe fn draw_enrollment(
+        &self,
+        dc: isize,
+        provision: &Provision,
+        p: &theme::Palette,
+        code: isize,
+    ) {
+        let (cx, cy, cw, ch) = ENROLL;
+        unsafe {
+            theme::round(
+                dc,
+                &self.r(cx, cy, cw, ch),
+                self.px(12),
+                Some(p.bg),
+                Some(p.border),
+            );
+            // Black on white in both themes: scanners expect dark modules on light.
+            let tile = self.r(cx + 16, cy + 16, 148, 148);
+            theme::round(dc, &tile, self.px(8), Some(theme::rgb(255, 255, 255)), None);
+            let uri = provision.setup_uri();
+            if let Ok(qr) = goyo_vault::qr::encode(uri.as_bytes()) {
+                // Whole pixels per module keep edges sharp; 4-module quiet zone.
+                let span = goyo_vault::qr::SIZE as i32 + 8;
+                let side = tile.right - tile.left;
+                let m = (side / span).max(1);
+                let left = tile.left + (side - m * span) / 2 + 4 * m;
+                let top = tile.top + (side - m * span) / 2 + 4 * m;
+                let ink = CreateSolidBrush(theme::rgb(0, 0, 0));
+                for y in 0..goyo_vault::qr::SIZE {
+                    for x in 0..goyo_vault::qr::SIZE {
+                        if qr.dark(x, y) {
+                            let (x, y) = (x as i32, y as i32);
+                            let r = Rect {
+                                left: left + x * m,
+                                top: top + y * m,
+                                right: left + (x + 1) * m,
+                                bottom: top + (y + 1) * m,
+                            };
+                            FillRect(dc, &r, ink);
+                        }
+                    }
+                }
+                DeleteObject(ink);
+            }
+            // Two lines of four groups; authenticator apps ignore the spaces.
+            let (rx, rw) = (cx + 180, cw - 196);
+            let key = self.r(rx, cy + 106, rw, 58);
+            theme::round(dc, &key, self.px(8), Some(p.surface), None);
+            let raw = provision.setup_code();
+            let mut grouped = Zeroizing::new(String::with_capacity(raw.len() * 2));
+            for (i, c) in raw.chars().enumerate() {
+                if i > 0 && i % 16 == 0 {
+                    grouped.push('\n');
+                } else if i > 0 && i % 4 == 0 {
+                    grouped.push(' ');
+                }
+                grouped.push(c);
+            }
+            let inner = theme::inset(&key, 0, self.px(5));
+            theme::text(dc, &grouped, &inner, code, p.text, DT_CENTER | DT_NOPREFIX);
         }
     }
     unsafe fn draw_welcome(&self, dc: isize, p: &theme::Palette) {
@@ -2571,6 +2626,14 @@ mod tests {
     #[test]
     #[ignore]
     fn ui_preview() {
+        /// Focus moving between this test and the desktop would trigger the
+        /// app-switch lock mid-capture and close the sample vault.
+        unsafe extern "system" fn preview_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+            if m == 0x1c {
+                return 0;
+            }
+            unsafe { window_proc(h, m, w, l) }
+        }
         #[link(name = "user32")]
         unsafe extern "system" {
             fn PrintWindow(h: Hwnd, dc: isize, flags: u32) -> i32;
@@ -2605,7 +2668,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        fn capture(h: Hwnd, path: &std::path::Path) {
+        /// Client area as top-down 32-bit pixels plus the BITMAPINFOHEADER.
+        fn grab(h: Hwnd) -> ([u8; 44], Vec<u8>) {
             unsafe {
                 let mut c = Rect::default();
                 GetClientRect(h, &mut c);
@@ -2614,8 +2678,6 @@ mod tests {
                 let mem = CreateCompatibleDC(screen);
                 let bmp = CreateCompatibleBitmap(screen, w, hh);
                 let old = SelectObject(mem, bmp);
-                // GDI batches drawing per thread; flush it and let DWM compose
-                // before reading the window, or labels can be missing.
                 GdiFlush();
                 DwmFlush();
                 assert_ne!(PrintWindow(h, mem, 3), 0);
@@ -2637,17 +2699,36 @@ mod tests {
                     0,
                 );
                 assert_eq!(rows, hh);
-                let mut file = b"BM".to_vec();
-                file.extend((54 + pixels.len() as u32).to_le_bytes());
-                file.extend([0u8; 4]);
-                file.extend(54u32.to_le_bytes());
-                file.extend(&info[..40]);
-                file.extend(&pixels);
-                std::fs::write(path, file).unwrap();
                 DeleteObject(bmp);
                 DeleteDC(mem);
                 ReleaseDC(0, screen);
+                (info, pixels)
             }
+        }
+        /// DWM can hand back a frame with some labels not yet composed, so
+        /// keep grabbing until two frames agree (a blinking caret is allowed).
+        fn capture(h: Hwnd, path: &std::path::Path) {
+            let (info, mut pixels) = grab(h);
+            for _ in 0..20 {
+                pump();
+                let (_, next) = grab(h);
+                let changed = pixels
+                    .chunks(4)
+                    .zip(next.chunks(4))
+                    .filter(|(a, b)| a[..3] != b[..3])
+                    .count();
+                pixels = next;
+                if changed < 200 {
+                    break;
+                }
+            }
+            let mut file = b"BM".to_vec();
+            file.extend((54 + pixels.len() as u32).to_le_bytes());
+            file.extend([0u8; 4]);
+            file.extend(54u32.to_le_bytes());
+            file.extend(&info[..40]);
+            file.extend(&pixels);
+            std::fs::write(path, file).unwrap();
         }
         fn base32_decode(s: &str) -> Vec<u8> {
             let (mut acc, mut bits, mut out) = (0u32, 0u32, vec![]);
@@ -2732,7 +2813,7 @@ mod tests {
             let name = wide("GoyoPreviewWindow");
             let wc = WndClass {
                 style: 3,
-                proc: Some(window_proc),
+                proc: Some(preview_proc),
                 cls_extra: 0,
                 wnd_extra: 0,
                 instance,

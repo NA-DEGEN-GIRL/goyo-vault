@@ -51,11 +51,12 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 
 1. Check where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder. Keeping the key file somewhere else, such as a USB drive, is safer.
 2. Enter a **password** twice. It needs at least 16 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one.
-3. In Google Authenticator tap **+ → Enter a setup key**. Use `Goyo Vault` as the account name, the setup key shown on screen as the key, and **Time based**.
+3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
 4. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
 
 > [!IMPORTANT]
-> The setup key is shown only on this screen. In case you lose your phone, turn on Authenticator's own backup or write the setup key on paper and keep it somewhere safe.
+> - Scan the QR **only with the scanner inside your OTP app.** Pointing an ordinary camera or Google Lens at it, or taking a photo, can leave the secret in your photo library or in the cloud.
+> - The QR and setup key are shown only on this screen. In case you lose your phone, turn on Authenticator's own backup or write the setup key on paper and keep it somewhere safe.
 
 ### 3. Save an entry
 
@@ -139,6 +140,7 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 - Values copied by the app are excluded from Win+V history and cloud sync and marked so that clipboard managers honouring the convention do not record them. If another program holds the clipboard, clearing is retried, and closing waits until it succeeds. A forced kill or a system shutdown cannot guarantee this cleanup.
 - Switching apps locks the vault but keeps a just-copied value for the rest of its 15 seconds so you can paste it. Manual lock, screen lock and sleep clear it immediately. Content another app put on the clipboard in the meantime is left alone.
 - Capture exclusion only covers capture paths that Windows supports.
+- The enrollment QR is drawn straight to the window by a built-in encoder. No image file is written, no outside service is used, and the intermediate buffers holding the secret are wiped with `zeroize`.
 
 **Process hardening**
 - At start-up the app disables dynamic code, legacy extension points, non-system fonts and remote or low-integrity image loads, **loads only Microsoft-signed DLLs** and **forbids child processes**. Third-party IMEs, third-party shell extensions in the file dialog and DLLs injected at run time therefore do not run inside the app.

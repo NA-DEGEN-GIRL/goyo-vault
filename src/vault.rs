@@ -69,6 +69,18 @@ impl Provision {
     pub fn setup_code(&self) -> Zeroizing<String> {
         otp::base32(self.otp.as_slice())
     }
+    /// Key URI for authenticator apps; SHA-1, 6 digits and 30 s are defaults.
+    pub fn setup_uri(&self) -> Zeroizing<String> {
+        const HEAD: &str = "otpauth://totp/Goyo%20Vault?secret=";
+        const TAIL: &str = "&issuer=Goyo%20Vault";
+        let code = self.setup_code();
+        // Sized up front so the secret is never left behind by a reallocation.
+        let mut uri = Zeroizing::new(String::with_capacity(HEAD.len() + code.len() + TAIL.len()));
+        uri.push_str(HEAD);
+        uri.push_str(&code);
+        uri.push_str(TAIL);
+        uri
+    }
     pub fn finish(
         &self,
         vault: &Path,
