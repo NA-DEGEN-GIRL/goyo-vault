@@ -2586,7 +2586,6 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         && matches!(
             m,
             0x100..=0x109 | 0x111 | 0x113 | 0x2b | 0x133..=0x138 | 0x201..=0x20e
-                | 0x211 | 0x212 | 0x231 | 0x232
                 | DRAIN_EVENTS
                 | INPUT_ERROR
                 | PASTE_CLEARED
@@ -2594,14 +2593,11 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
     {
         return 0;
     }
-    // Message boxes, file dialogs and the move/menu loops dispatch posted
-    // messages without accept_queued. The main window gets no real click
-    // meanwhile, so a command or click then is a fake.
-    match m {
-        0x211 | 0x231 => set_modal_loop(true), // WM_ENTERMENULOOP, WM_ENTERSIZEMOVE
-        0x212 | 0x232 => set_modal_loop(false), // WM_EXITMENULOOP, WM_EXITSIZEMOVE
-        0x111 | 0x201 if in_modal() => return 0,
-        _ => {}
+    // While a message box, file dialog, move loop or menu runs, the main
+    // window gets no real click, so a command or click then is a fake (e.g. a
+    // posted click on a button, which the button itself turns into a command).
+    if matches!(m, 0x111 | 0x201) && in_modal() {
+        return 0;
     }
     // Theme messages never borrow APP, so controls keep their look while busy.
     if m == 0x14 {
@@ -2922,27 +2918,48 @@ fn create_window(instance: isize, class: &[u16]) -> Hwnd {
     }
 }
 /// Filters posted messages. The app never posts commands, clicks, list or
-/// edit operations, text, activation or modal-loop notices to itself, so
-/// those come from another program. Keyboard and mouse-button input is real
-/// only while one of the app's windows is in front; otherwise it was posted by
-/// someone else.
+/// edit operations, text or activation to itself, so those come from another
+/// program. Of posted system commands only the taskbar's close, minimize and
+/// restore are taken (a posted "move" would start a move loop). Keyboard and
+/// mouse-button input is real only while one of the app's windows is in
+/// front; otherwise it was posted by someone else.
 fn accept_queued(h: Hwnd, msg: &Msg) -> bool {
     let ours = msg.hwnd != 0 && (msg.hwnd == h || unsafe { IsChild(h, msg.hwnd) } != 0);
     if !ours {
         return true;
     }
     let m = msg.message;
-    if matches!(
-        m,
-        0x0c | 0x1c | 0x2b | 0x111 | 0xb0..=0xda | 0xf0..=0xf8 | 0x180..=0x1b2
-            | 0x211 | 0x212 | 0x231 | 0x232
-    ) {
+    if matches!(m, 0x0c | 0x1c | 0x2b | 0x111 | 0xb0..=0xda | 0xf0..=0xf8 | 0x180..=0x1b2) {
         return false;
+    }
+    if m == 0x112 {
+        return matches!(msg.wparam & 0xfff0, 0xf060 | 0xf020 | 0xf120); // SC_CLOSE, SC_MINIMIZE, SC_RESTORE
     }
     if (0x100..=0x109).contains(&m) || (0x201..=0x20e).contains(&m) {
         return is_foreground(h);
     }
     true
+}
+thread_local! {
+    static FILTERED_WINDOW: Cell<Hwnd> = const { Cell::new(0) };
+}
+/// Applies accept_queued to every message this thread takes from its queue,
+/// including inside message boxes, file dialogs, move loops and menus, which
+/// run their own message loops. A refused message becomes WM_NULL.
+unsafe extern "system" fn queue_filter(code: i32, w: usize, l: isize) -> isize {
+    if code >= 0 && l != 0 {
+        let h = FILTERED_WINDOW.with(Cell::get);
+        let msg = unsafe { &mut *(l as *mut Msg) };
+        if h != 0 && !accept_queued(h, msg) {
+            msg.message = 0;
+        }
+    }
+    unsafe { CallNextHookEx(0, code, w, l) }
+}
+/// Installs queue_filter for this thread (WH_GETMESSAGE, no DLL involved).
+fn filter_queue(h: Hwnd) -> isize {
+    FILTERED_WINDOW.with(|f| f.set(h));
+    unsafe { SetWindowsHookExW(3, queue_filter, 0, GetCurrentThreadId()) }
 }
 /// Owner-drawn buttons report DLGC_BUTTON only, so IsDialogMessage would turn
 /// Enter into IDOK. Click the focused button instead, like a native push button.
@@ -3016,10 +3033,11 @@ fn main() {
         if SetWindowDisplayAffinity(h, 0x11) == 0
             || WTSRegisterSessionNotification(h, 0) == 0
             || suspend == 0
+            || filter_queue(h) == 0
         {
             startup_error(
                 h,
-                "캡처 차단 또는 세션 잠금 감시를 설정할 수 없어 종료합니다.",
+                "캡처 차단, 세션 잠금 감시 또는 메시지 필터를 설정할 수 없어 종료합니다.",
             );
             DestroyWindow(h);
             return;
@@ -3056,7 +3074,7 @@ fn main() {
             }
             if ok {
                 println!(
-                    "PASS: process mitigations, process and thread access, no DLL beside the exe, Windows version, capture exclusion, session and sleep notifications, local session, debugger check, timer, RDSEED, input scope, IME exclusion"
+                    "PASS: process mitigations, process and thread access, no DLL beside the exe, Windows version, capture exclusion, session and sleep notifications, message filter, local session, debugger check, timer, RDSEED, input scope, IME exclusion"
                 );
             } else {
                 std::process::exit(1);
@@ -3916,12 +3934,31 @@ mod tests {
             });
             pump_until(&results);
             assert_eq!(results.join().unwrap(), [0; 5]);
-            // Inside a message box or the move loop, posted commands skip
-            // accept_queued; window_proc itself refuses them then.
-            set_modal_loop(true);
-            assert_eq!(window_proc(h, 0x111, THEME_LIGHT as usize, 0), 0);
-            set_modal_loop(false);
+            // Message boxes, file dialogs and move loops run message loops
+            // that never call accept_queued; the queue filter covers them.
+            let hook = filter_queue(h);
+            assert_ne!(hook, 0);
+            let drain = || {
+                let mut msg = Msg::default();
+                while PeekMessageW(&mut msg, 0, 0, 0, 1) != 0 {
+                    DispatchMessageW(&msg);
+                }
+            };
+            PostMessageW(h, 0x111, THEME_LIGHT as usize, 0);
+            PostMessageW(peek, 0xf5, 0, 0); // BM_CLICK
+            drain();
+            // The modal state comes from the app's own dialog calls and from
+            // Windows, so posted "loop ended" notices cannot switch it off.
+            modal(|| {
+                PostMessageW(h, 0x212, 0, 0); // WM_EXITMENULOOP
+                PostMessageW(h, 0x232, 0, 0); // WM_EXITSIZEMOVE
+                drain();
+                assert!(in_modal());
+                assert_eq!(window_proc(h, 0x111, THEME_LIGHT as usize, 0), 0);
+            });
             assert!(!in_modal());
+            UnhookWindowsHookEx(hook);
+            FILTERED_WINDOW.with(|f| f.set(0));
             APP.with(|cell| {
                 let b = cell.borrow();
                 let a = b.as_ref().unwrap();
@@ -3934,11 +3971,24 @@ mod tests {
                     message,
                     ..Msg::default()
                 };
-                for m in [0x111, 0xf5, 0x0c, 0x1c, 0x2b, 0x186, 0xd6, 0x231, 0x232] {
+                for m in [0x111, 0xf5, 0x0c, 0x1c, 0x2b, 0x186, 0xd6] {
                     assert!(!accept_queued(
                         h,
                         &posted(if m == 0x111 { h } else { pass }, m)
                     ));
+                }
+                // A posted SC_MOVE would start a move loop; the taskbar's
+                // close, minimize and restore still work.
+                let syscommand = |command: usize| Msg {
+                    hwnd: h,
+                    message: 0x112,
+                    wparam: command,
+                    ..Msg::default()
+                };
+                assert!(!accept_queued(h, &syscommand(0xf010)));
+                assert!(!accept_queued(h, &syscommand(0xf012)));
+                for allowed in [0xf060, 0xf020, 0xf120] {
+                    assert!(accept_queued(h, &syscommand(allowed)));
                 }
                 // Input counts only while the app is in front. Whether the
                 // hidden test window is depends on how the test was started.

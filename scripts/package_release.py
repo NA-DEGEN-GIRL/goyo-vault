@@ -2,10 +2,11 @@
 import hashlib, json, os, pathlib, shutil, subprocess, sys, zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
 # RUSTFLAGS (or a per-target CARGO_TARGET_<triple>_RUSTFLAGS / CARGO_BUILD_RUSTFLAGS)
-# would silently replace the hardening flags in .cargo/config.toml.
-for name, value in os.environ.items():
-    if value and (name.upper() in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')
-                  or (name.upper().startswith('CARGO_') and name.upper().endswith('RUSTFLAGS'))):
+# would silently replace the hardening flags in .cargo/config.toml. Set but
+# empty counts too: Cargo then uses no flags at all.
+for name in os.environ:
+    if name.upper() in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS') or (
+            name.upper().startswith('CARGO_') and name.upper().endswith('RUSTFLAGS')):
         sys.exit(f'Refusing to package with {name} set: it would drop the hardening flags.')
 # Build only committed sources, so a release always matches a commit.
 inputs = ['src', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo', 'assets']

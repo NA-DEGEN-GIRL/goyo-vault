@@ -132,6 +132,15 @@ unsafe extern "system" {
     pub fn IsDialogMessageW(h: Hwnd, m: *mut Msg) -> i32;
     pub fn ShowWindow(h: Hwnd, n: i32) -> i32;
     pub fn IsWindowVisible(h: Hwnd) -> i32;
+    pub fn SetWindowsHookExW(
+        id: i32,
+        proc: unsafe extern "system" fn(i32, usize, isize) -> isize,
+        module: isize,
+        thread: u32,
+    ) -> isize;
+    pub fn UnhookWindowsHookEx(hook: isize) -> i32;
+    pub fn CallNextHookEx(hook: isize, code: i32, w: usize, l: isize) -> isize;
+    fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     pub fn UpdateWindow(h: Hwnd) -> i32;
     pub fn DestroyWindow(h: Hwnd) -> i32;
     pub fn PostQuitMessage(code: i32);
@@ -368,28 +377,39 @@ pub fn is_foreground(h: Hwnd) -> bool {
             && pid == GetCurrentProcessId()
     }
 }
+#[repr(C)]
+struct GuiThreadInfo {
+    size: u32,
+    flags: u32,
+    active: Hwnd,
+    focus: Hwnd,
+    capture: Hwnd,
+    menu_owner: Hwnd,
+    move_size: Hwnd,
+    caret: Hwnd,
+    caret_rect: Rect,
+}
 thread_local! {
     static MODAL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
-/// True while a message box, file dialog or move/menu loop runs. Those loops
-/// dispatch posted messages without the app's filter, and the main window
-/// cannot receive real clicks meanwhile, so commands must be ignored.
+/// True while a message box, file dialog, move/size loop or menu runs. The
+/// main window gets no real click meanwhile, so commands must be ignored.
+/// Decided from the app's own dialog calls and from Windows' thread state,
+/// never from messages, which another program could post.
 pub fn in_modal() -> bool {
     MODAL.with(|m| m.get() != 0)
+        || unsafe {
+            let mut info: GuiThreadInfo = std::mem::zeroed();
+            info.size = size_of::<GuiThreadInfo>() as u32;
+            // GUI_INMOVESIZE | GUI_INMENUMODE | GUI_SYSTEMMENUMODE | GUI_POPUPMENUMODE
+            GetGUIThreadInfo(GetCurrentThreadId(), &mut info) != 0 && info.flags & 0x1e != 0
+        }
 }
-pub fn set_modal_loop(entering: bool) {
-    MODAL.with(|m| {
-        m.set(if entering {
-            m.get() + 1
-        } else {
-            m.get().saturating_sub(1)
-        })
-    });
-}
-fn modal<T>(f: impl FnOnce() -> T) -> T {
-    set_modal_loop(true);
+/// Runs a message box or file dialog; see in_modal.
+pub fn modal<T>(f: impl FnOnce() -> T) -> T {
+    MODAL.with(|m| m.set(m.get() + 1));
     let result = f();
-    set_modal_loop(false);
+    MODAL.with(|m| m.set(m.get() - 1));
     result
 }
 
