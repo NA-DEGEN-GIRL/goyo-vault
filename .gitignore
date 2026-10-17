@@ -1,0 +1,12 @@
+/target/
+/dist/
+*.goyo
+*.goyokey
+*.goyolock
+*.goyotmp
+/test-output/
+goyo-vault.theme
+# Local review tooling tied to one developer machine's MCP configuration.
+/scripts/mcp_client.py
+/scripts/mcp-*.json
+/scripts/prepare_review.py

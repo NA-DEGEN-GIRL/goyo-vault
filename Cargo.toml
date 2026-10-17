@@ -1,0 +1,31 @@
+[package]
+name = "goyo-vault"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Offline Windows vault with a separately encrypted key file"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NA-DEGEN-GIRL/goyo-vault"
+readme = "README.md"
+
+[dependencies]
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.8.2", features = ["alloc"] }
+hmac = { version = "=0.12.1", default-features = false }
+sha1 = { version = "=0.10.6", default-features = false }
+sha2 = { version = "=0.10.9", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
+chacha20 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
+poly1305 = { version = "=0.8.0", default-features = false, features = ["zeroize"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = true
+
+[profile.test]
+opt-level = 2
+

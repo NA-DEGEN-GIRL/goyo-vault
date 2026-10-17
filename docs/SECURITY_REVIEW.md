@@ -1,0 +1,77 @@
+# 검토 기록
+
+## 의존성 선정
+
+- `chacha20poly1305 0.10.1`: RustCrypto, 순수 Rust. 프로젝트는 NCC Group 감사 이력을 공개합니다. 과거 라이브러리 감사가 현재 앱 전체 또는 모든 후속 버전을 보증하지는 않습니다. https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/#security-notes
+- `argon2 0.5.3`: RustCrypto Argon2id 구현. 공개 구현과 명세·테스트를 검토하며, 이 버전의 독립 감사 완료를 주장하지 않습니다. https://docs.rs/argon2/0.5.3/argon2/
+- `hmac 0.12.1`, `sha1 0.10.6`, `sha2 0.10.9`: RustCrypto의 OTP HMAC 및 난수 컨디셔닝. SHA-1은 TOTP HMAC에만 사용.
+- `zeroize 1.8.2`: 민감한 Rust 버퍼와 Argon2 메모리 소거. 복사 방지·잠긴 메모리·커널 보호 기능과 동일하지 않음.
+- `subtle 2.6.1`: OTP 비교에 사용. 런타임 조작/바이너리 패치를 막지는 않음.
+- 전이 의존성은 Cargo.lock 고정. RNG 기본 기능을 꺼 Windows RNG 호출 경로를 제외. `rand_core`가 암호화 라이브러리의 타입 의존성으로 남아도 `OsRng`는 호출하지 않음.
+
+## 보안 테스트와 리뷰
+
+2026-10-16, Windows x64 / rustc 1.98.1 환경에서 검증했습니다. 전문 감사·침투 테스트·하드웨어 인증을 완료했다고 주장하지 않습니다.
+
+- 내부 독립 에이전트 2명: 암호화·저장, Windows UI·보안 흐름을 각각 읽기 전용 검토. 발견 사항 수정 후 재검토. 마지막으로 표준 Enter/Escape 명령 매핑 권고까지 반영했습니다.
+- 사용자 요청에 따라 `llm-analysis` MCP의 `delegate_analysis`를 통해 **claude-opus-5-5** 검토를 총 3회 받았습니다. 전체 소스 최초 검토 → 수정본 전체 재검토 → 마지막 UI 수정사항 집중 검토 순서입니다. 최초 원문은 `OPUS_INITIAL.md`, 두 번째는 `OPUS_FOLLOWUP.md`, 마지막은 `OPUS_FINAL.md`입니다. 각 MCP 응답 JSON(`opus-review-*.json`)도 보존했습니다. 검토 요청에 쓴 MCP 호출 스크립트는 개발 PC 설정에 묶여 있어 공개 저장소에는 넣지 않았습니다. 마지막 답변은 검토 범위에서 미해결 조치 사항과 즉각적인 회귀를 발견하지 못했다고 밝혔습니다. 이는 앱 전체의 무결점 인증이 아닙니다.
+- 초기 검토의 일반 마스킹이 Rust 타입·테스트 숫자 일부를 변형한 제한이 있었습니다. 수정본 검토에는 사용자 정보가 없는 소스·가짜 테스트 데이터만 선별하여 정확한 원문을 제공했습니다.
+- (2026-10-16 기준) 자동 테스트 총 17개 통과(라이브러리 13개, UI 4개). 2026-10-17 변경 후 수치는 아래 절을 보세요. AEAD 변조·잘린 파일·인증된 악성 구조·OTP 표준 벡터/재사용·생성/저장/백업/복원·잘못된 비밀번호·비밀번호 변경 실패 단계·동시 세션·하드링크/ADS·UTF 입력·네이티브 컨트롤 보호·페이지 표시 폭·지연 잠금/종료를 검사했습니다. 이후 변경한 부분은 해당 테스트를 다시 실행했습니다.
+- Argon2id와 XChaCha20-Poly1305 고정 벡터를 각각 Python cryptography 및 PyNaCl/libsodium의 독립 결과와 대조했습니다.
+- `cargo clippy --all-targets --locked -- -D warnings` 통과.
+- OSV 질의로 Cargo.lock의 27개 레지스트리 패키지를 확인했으며 조회 당시 반환된 취약점은 0개입니다. 알려지지 않은 취약점까지 없다는 의미는 아닙니다. `dependency-audit.json`에 조회 시각·버전 기록.
+- 릴리스 실행 파일의 `--self-check` 통과: 프로세스 완화 정책, Windows 버전, 캡처 제외 속성, 로컬 세션·디버거 확인, 타이머·RDSEED 초기화, 실제 입력 컨트롤의 암호 입력 범위 및 IME 분리.
+- PE 헤더/직접 import 검사: `DependentLoadFlags=0x800`, CFG, Windows 암호화·난수 함수 직접 import 없음. 상세는 `binary-inspection.json`. 운영체제 DLL 내부 동작까지 추적한 검증은 아닙니다.
+
+## 주요 발견과 반영
+
+|발견|처리|
+|---|---|
+|하드링크 기반 저장의 USB 파일 시스템 제약|동일 폴더 MoveFileExW 교체, 전원 장애 한계 명시|
+|읽기 전용 원본 옆 잠금 파일 요구|복원 원본·열쇠는 읽기 스냅샷, 쓰기 대상만 잠금|
+|공유 열쇠의 오래된 백업/비밀번호 변경|현재 암호문과 세션 사본 비교 후 오래된 세션 거부|
+|모달 대화상자에서 타이머 정지|상태 borrow 밖에서 대화상자 실행, 종료 후 상태 재검증|
+|지연된 세션 잠금·종료|종류별 보류 이벤트와 독립 드레인, WTS 이벤트 확대|
+|클립보드 시퀀스 변화로 삭제 누락|소유자 기준 삭제, 점유 시 재시도, 정리까지 종료 대기|
+|긴 키 표시 잘림|실제 글꼴 폭 측정, 페이지 초기화·범위 보정|
+|여러 줄 키 잘림·메모 스타일 오류|여러 줄 편집, 붙여넣기 전체 길이/Unicode 검증|
+|초기 DLL 검색·최근 파일 흔적|시작 전 System32 검색 플래그, 파일창 최근 항목 추가 제외|
+|패스워드 변경 재인증 부재|현재 비밀번호와 새 OTP 요구, OTP 소비를 먼저 저장|
+|문자열 재할당·외부 변경 가능한 콜백 주소|미리 확보한 소거 버퍼·엄격한 UTF16, OnceLock 콜백|
+|화면 외 명령·Windows 난수 간접 사용|화면별 명령 제한, HashMap을 BTreeMap으로 교체|
+|종료 중 재진입으로 파괴된 창 재구성|WM_DESTROY 상태·IsWindow 확인, 종료 상태에서는 재구성 금지; 실제 창 프로시저 회귀 테스트|
+|비밀 텍스트의 입력기 학습 경로|텍스트 전달 전 암호 입력 범위 설정, 비밀/메모 IME 분리, 보호 실패 시 입력·저장 차단, 한계 안내|
+|입력 컨트롤의 외부 콜백/버퍼/마스크 변경|EM_SETWORDBREAKPROC·EM_SETHANDLE·EM_SETPASSWORDCHAR 차단|
+
+## 2026-10-17 변경: UI 개편과 보안 보강
+
+위 Opus 5.5 검토는 2026-10-16 버전 기준입니다. 아래 변경은 **외부 모델 검토를 받지 않았고**, 자동 테스트·clippy·`--self-check`·렌더링 미리보기로만 확인했습니다.
+
+|변경|내용·검증|
+|---|---|
+|화면 개편|흑백 미니멀 디자인, 다크(기본)·라이트 테마, 금고가 없을 때 시작 화면, 열기/새 금고/복원 화면 분리와 뒤로가기, 오류를 하단 상태줄에 표시. 화면별 명령 허용 목록은 새 화면에 맞춰 다시 정의|
+|붙여넣은 비밀값 정리|비밀번호·비밀정보 칸에 붙여넣은 뒤 클립보드 시퀀스가 그대로면 클립보드를 비움|
+|클립보드 관리 프로그램 제외 표시|복사 시 `ExcludeClipboardContentFromMonitorProcessing` 형식 추가(Win+V 기록·클라우드 제외는 기존 유지)|
+|프로세스 보호 추가|Microsoft 서명 DLL만 로드, 하위 프로세스 생성 금지, 시스템 외 글꼴 금지. 이 정책에서 파일 선택창이 열리고 하위 프로세스 생성이 막히는 것을 임시 테스트로 확인|
+|장치 이름 경로 거부|`CON`·`NUL`·`COM1` 등은 금고·열쇠·백업 이름으로 거부(회귀 테스트 추가)|
+|반복 비밀번호 거부|서로 다른 글자 6개 미만이면 새 비밀번호로 거부(회귀 테스트 추가). 기존 금고 열기에는 영향 없음|
+|빌드 경로 제거|`scripts/package_release.py`가 `--remap-path-prefix`로 빌드 PC의 사용자 폴더·프로젝트 경로를 실행 파일에서 지우고, 남아 있으면 패키징을 중단|
+|아이콘|`build.rs`가 `assets/goyo.ico`를 리소스로 직접 작성해 링크. 추가 crate 없음|
+
+- 자동 테스트 총 19개 통과(라이브러리 14개, UI 5개). 화면 미리보기 1개는 실제 창을 띄우므로 `--ignored`로만 실행합니다.
+- `cargo clippy --all-targets --locked -- -D warnings`, 릴리스 `--self-check` 통과.
+- 실제 창을 사람이 조작하는 수동 테스트는 이 변경분에 대해 수행하지 않았습니다.
+
+## 남은 검증 한계와 의도한 동작
+
+실제 비밀·사용자 클립보드를 사용하는 UI 자동화는 수행하지 않았습니다. 숨겨진 자체 테스트 창과 가짜 값으로 검증했습니다. 사용자 클립보드를 실제로 덮어쓰는 통합 테스트, 모든 캡처 프로그램·IME·셸 확장, FAT/exFAT 전원 차단, 장치별 물리 난수 검증은 수행하지 않았습니다. 실제 한국어 IME를 통한 제목/경로 입력은 수동 확인하지 않았으며, 암호 입력 범위 때문에 한글 입력이 제한될 수 있음을 README에 명시했습니다.
+
+클립보드 점유가 풀리지 않으면 종료가 대기할 수 있습니다. 이는 비밀이 남은 채 자동 종료하지 않기 위한 선택입니다. 다른 앱 전환 시 편집 중인 미저장 내용은 지웁니다. 파일창도 60초 잠금 대상입니다. 운영체제 메모리 사본·관리자/커널 공격·경로 메타데이터·암호화 임시 파일·오래된 백업/열쇠의 효력은 README에 설명한 한계가 유지됩니다.
+
+Windows 설정 검증 근거: [정적 DLL 검색 플래그](https://learn.microsoft.com/en-us/cpp/build/reference/dependentloadflag?view=msvc-170), [파일 선택창 플래그](https://learn.microsoft.com/en-us/windows/win32/api/commdlg/ns-commdlg-openfilenamew), [클립보드 시퀀스](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardsequencenumber), [입력 컨트롤 스타일](https://learn.microsoft.com/en-us/windows/win32/controls/edit-control-styles).
+
+입력기 설정 근거: [SetInputScope](https://learn.microsoft.com/en-us/windows/win32/api/inputscope/nf-inputscope-setinputscope), [ImmAssociateContextEx](https://learn.microsoft.com/en-us/windows/win32/api/imm/nf-imm-immassociatecontextex). 암호 입력 범위는 OS 서비스에 대한 힌트이며 완전한 격리 보장이 아닙니다.
+
+## 외부 검토로 전달하는 정보
+
+사용자가 요청한 Opus 5.5 검토에는 소스코드, Cargo 설정, 설계 문서와 가짜 테스트 데이터만 전달합니다. 실제 금고·열쇠·비밀번호·OTP, 환경 변수, 서비스 인증정보는 전달하지 않습니다.

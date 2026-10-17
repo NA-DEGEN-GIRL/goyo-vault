@@ -1,0 +1,141 @@
+{
+  "checked_at_utc": "2026-10-16T20:06:25.335333+00:00",
+  "source": "https://api.osv.dev/v1/querybatch",
+  "packages": [
+    {
+      "name": "aead",
+      "version": "0.5.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "argon2",
+      "version": "0.5.3",
+      "vulnerabilities": []
+    },
+    {
+      "name": "base64ct",
+      "version": "1.8.3",
+      "vulnerabilities": []
+    },
+    {
+      "name": "blake2",
+      "version": "0.10.6",
+      "vulnerabilities": []
+    },
+    {
+      "name": "block-buffer",
+      "version": "0.10.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.5",
+      "vulnerabilities": []
+    },
+    {
+      "name": "chacha20",
+      "version": "0.9.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "chacha20poly1305",
+      "version": "0.10.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "cipher",
+      "version": "0.4.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "cpufeatures",
+      "version": "0.2.17",
+      "vulnerabilities": []
+    },
+    {
+      "name": "crypto-common",
+      "version": "0.1.7",
+      "vulnerabilities": []
+    },
+    {
+      "name": "digest",
+      "version": "0.10.7",
+      "vulnerabilities": []
+    },
+    {
+      "name": "generic-array",
+      "version": "0.14.7",
+      "vulnerabilities": []
+    },
+    {
+      "name": "hmac",
+      "version": "0.12.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "inout",
+      "version": "0.1.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "libc",
+      "version": "0.2.190",
+      "vulnerabilities": []
+    },
+    {
+      "name": "opaque-debug",
+      "version": "0.3.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "password-hash",
+      "version": "0.5.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "poly1305",
+      "version": "0.8.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "rand_core",
+      "version": "0.6.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "sha1",
+      "version": "0.10.6",
+      "vulnerabilities": []
+    },
+    {
+      "name": "sha2",
+      "version": "0.10.9",
+      "vulnerabilities": []
+    },
+    {
+      "name": "subtle",
+      "version": "2.6.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "typenum",
+      "version": "1.20.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "universal-hash",
+      "version": "0.5.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "version_check",
+      "version": "0.9.5",
+      "vulnerabilities": []
+    },
+    {
+      "name": "zeroize",
+      "version": "1.8.2",
+      "vulnerabilities": []
+    }
+  ]
+}
