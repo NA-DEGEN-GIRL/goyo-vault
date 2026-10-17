@@ -157,6 +157,7 @@ unsafe extern "system" {
     pub fn InvalidateRect(h: Hwnd, r: *const Rect, erase: i32) -> i32;
     pub fn RedrawWindow(h: Hwnd, r: *const Rect, region: isize, flags: u32) -> i32;
     pub fn MessageBeep(kind: u32) -> i32;
+    pub fn GetForegroundWindow() -> Hwnd;
     pub fn LoadImageW(
         inst: isize,
         name: *const u16,

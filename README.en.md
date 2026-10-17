@@ -16,7 +16,7 @@
 - **Fully offline:** no network code, no server, account, sync or auto-update.
 - **Four things open a vault:** the vault file (`.goyo`), a separate key file (`.goyokey`), your password and a phone OTP.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
-- **Auto-lock** of an open vault after 60 seconds idle, when you switch to another app, lock the screen or the PC sleeps.
+- **Auto-lock** of an open vault after 60 seconds idle, after 30 seconds in another app, when you lock the screen or the PC sleeps.
 - **Screen-capture protection:** the window is excluded from ordinary screenshots and screen recordings.
 - **A single executable, no installer.** Dark and light themes.
 
@@ -74,7 +74,7 @@ Press **+ New entry (+ 새 항목)**, fill in name, type, secret and note, then 
 - Type the kind yourself or use the **password · seed phrase · private key · API key** buttons (비밀번호 · 니모닉 · 프라이빗키 · API 키).
 - Multi-line keys such as PEM files are kept exactly.
 - **Names are always visible in the list,** so never put a secret in the name.
-- For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. Switching to another app clears unsaved edits, so **copy what you want to paste before you open the editor.**
+- For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. You can copy a value in another app, but **come back within 30 seconds** to paste it; staying away longer locks the vault and clears unsaved edits.
 
 ### 4. View and copy
 
@@ -91,7 +91,9 @@ Pick an entry in the list to see it on the right.
 
 ![Open vault](docs/images/login.png)
 
-The vault locks itself after 60 seconds without use, when you switch to another app, lock the screen or the PC sleeps. **Lock (잠금)** locks it right away.
+The vault locks itself after 60 seconds without use, after 30 seconds in another app, when you lock the screen or the PC sleeps. **Lock (잠금)** locks it right away.
+
+A quick trip to another app (pasting a copied value, a screenshot tool) does not lock it. The moment you switch, though, **Show for 15 s**, **Allow copy**, any password you made visible and the **OTP backup** QR are hidden. The vault window never appears in screen captures anyway.
 
 Screens before a vault is open (open, new vault, restore) keep what you typed and the OTP setup QR when you switch to another app; only a password you made visible is hidden again. They are still cleared after the idle time (5 minutes for a new vault, 60 seconds otherwise) or when you lock Windows.
 
@@ -157,7 +159,7 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 - Input fields use the Windows password input scope, and the secret and note fields are detached from the IME. Depending on the input method, Korean may not be typeable in other fields either; paste instead. OS text services, third-party keyboards and voice input cannot be fully prevented from learning what you type. If input protection cannot be set up, that field and saving/unlocking are blocked.
 - The eye icon in a password field shows the text only when you press it. While shown, copying, reads by other programs, accessibility reads and screen capture stay blocked, and the IME stays off. Other programs still cannot unmask the field. Locking, the idle timeout and changing screens hide it again. It cannot stop someone looking over your shoulder.
 - Values copied by the app are excluded from Win+V history and cloud sync and marked so that clipboard managers honouring the convention do not record them. If another program holds the clipboard, clearing is retried, and closing waits until it succeeds. A forced kill or a system shutdown cannot guarantee this cleanup.
-- Switching apps locks the vault but keeps a just-copied value for the rest of its 15 seconds so you can paste it. Manual lock, screen lock and sleep clear it immediately. Content another app put on the clipboard in the meantime is left alone.
+- Switching apps keeps a just-copied value for the rest of its 15 seconds so you can paste it. Manual lock, screen lock and sleep clear it immediately. Content another app put on the clipboard in the meantime is left alone.
 - Capture exclusion only covers capture paths that Windows supports.
 - The enrollment QR is drawn straight to the window by a built-in encoder. No image file is written, no outside service is used, and the intermediate buffers holding the secret are wiped with `zeroize`.
 

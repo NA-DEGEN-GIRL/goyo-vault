@@ -72,6 +72,10 @@ const BACK: i32 = 126;
 const PEEK_PASS: i32 = 127;
 const PEEK_CONFIRM: i32 = 128;
 const PEEK_CURRENT: i32 = 129;
+/// An open vault locks once another app has had focus this long. Shorter
+/// trips (pasting a copied value, a screenshot tool's overlay) only hide
+/// what was shown; capture exclusion already keeps the window out of shots.
+const AWAY_LOCK: Duration = Duration::from_secs(30);
 const OTP_SETUP: i32 = 135;
 const PEEK_FIELDS: [(i32, i32); 3] = [
     (PEEK_PASS, PASS),
@@ -146,6 +150,8 @@ struct App {
     from_welcome: bool,
     /// OTP secret shown on OtpBackup after the password check.
     otp_setup: Option<OtpSetup>,
+    /// When another app took focus while a vault was open.
+    away_since: Option<Instant>,
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
@@ -187,6 +193,7 @@ impl App {
             input_failed: false,
             from_welcome: false,
             otp_setup: None,
+            away_since: None,
         }
     }
     fn px(&self, n: i32) -> i32 {
@@ -896,7 +903,7 @@ impl App {
         self.button(OTP_SETUP, "OTP 백업", 388, 642, 100, 34, theme::SECONDARY);
         self.text(
             0,
-            "60초 미사용·앱 전환·화면 잠금 시 자동 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
+            "60초 미사용·다른 앱 30초·화면 잠금 시 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
             (504, 640, 332, 38),
             small,
             TONE_MUTED,
@@ -953,7 +960,7 @@ impl App {
         self.label("메모", 40, 440, 400);
         self.input(NOTES, &values[3], (40, 462, 796, 100), false, true, 0);
         self.note(
-            "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n복사·잘라내기는 차단됩니다. 붙여넣을 값은 이 화면을 열기 전에 복사해 두세요.\r\n편집 중 내용이 화면에 보이며, 다른 앱으로 전환하면 저장하지 않은 내용은 삭제됩니다.",
+            "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n이 화면에서 복사·잘라내기는 막혀 있고 붙여넣기만 됩니다.\r\n편집 중 내용이 화면에 보입니다. 다른 앱에 30초 넘게 머무르면 잠기고 저장하지 않은 내용은 지워집니다.",
             40,
             574,
             796,
@@ -1022,7 +1029,7 @@ impl App {
                 22,
             );
             self.enrollment_labels(
-                "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n5분간 조작이 없거나 다른 앱으로 전환하면 금고가 잠깁니다.",
+                "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
             );
             self.button(CANCEL, "닫기", AX + AW - 160, 384, 160, 42, theme::PRIMARY);
             unsafe {
@@ -1115,12 +1122,31 @@ impl App {
     /// is being enrolled, a restore) stays for the user to come back to; shown
     /// passwords are masked, and the idle timeout and Windows session lock
     /// still clear everything.
+    /// Nothing revealed stays on screen while the user is elsewhere: shown
+    /// passwords are masked, the 15-second view and copy permission end and
+    /// the OTP QR closes. An open vault locks if the user stays away for
+    /// AWAY_LOCK (see timer).
     fn deactivated(&mut self) {
-        if self.session.is_some() {
-            self.lock("다른 앱으로 전환되어 잠갔습니다.", false);
-        } else {
-            self.mask_passwords();
+        self.mask_passwords();
+        if self.session.is_none() {
+            return;
         }
+        self.away_since.get_or_insert_with(Instant::now);
+        self.reset_copy();
+        if self.reveal_until.take().is_some() {
+            self.sync_detail();
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
+        if self.otp_setup.take().is_some() {
+            self.screen = Screen::Vault;
+            self.status = "다른 앱으로 전환되어 OTP 화면을 닫았습니다.".into();
+            self.build();
+        }
+    }
+    fn activated(&mut self) {
+        self.away_since = None;
     }
     fn lock(&mut self, why: &str, clear_clipboard: bool) {
         self.auth_dirty = false;
@@ -1130,6 +1156,7 @@ impl App {
         self.session = None;
         self.provision = None;
         self.otp_setup = None;
+        self.away_since = None;
         self.selected = None;
         self.editing = None;
         self.copy_until = None;
@@ -1621,6 +1648,14 @@ impl App {
         if self.session.is_some() || self.provision.is_some() || self.auth_dirty {
             if let Err(e) = check_environment(self.hwnd) {
                 self.lock(e, true);
+                return;
+            }
+            // A missed activation message must not lock a vault in use.
+            if unsafe { GetForegroundWindow() } == self.hwnd {
+                self.away_since = None;
+            }
+            if self.session.is_some() && self.away_since.is_some_and(|t| now - t >= AWAY_LOCK) {
+                self.lock("다른 앱에 30초 넘게 머물러 잠갔습니다.", false);
                 return;
             }
             // Scanning a QR or copying the key onto paper takes longer.
@@ -2411,6 +2446,10 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
                 }
                 true
             }
+            0x1c => {
+                app.activated();
+                true
+            }
             0x2b1 if matches!(w, 2 | 3 | 4 | 6 | 7 | 9) => {
                 app.lock("Windows 세션이 잠기거나 연결이 변경되어 잠갔습니다.", true);
                 true
@@ -2815,8 +2854,22 @@ mod tests {
             );
             app.command(SUBMIT, 0).unwrap();
             assert!(app.otp_setup.is_some());
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.copy_until = Some(Instant::now() + Duration::from_secs(30));
             app.deactivated();
-            assert!(app.session.is_none() && app.otp_setup.is_none());
+            assert!(app.session.is_some() && app.screen == Screen::Vault);
+            assert!(app.otp_setup.is_none() && app.reveal_until.is_none());
+            assert!(app.copy_until.is_none());
+            // Back within AWAY_LOCK: still open.
+            app.away_since = Some(Instant::now() - Duration::from_secs(20));
+            app.activated();
+            app.timer();
+            assert!(app.session.is_some());
+            // Away longer than AWAY_LOCK: locked.
+            app.deactivated();
+            app.away_since = Some(Instant::now() - AWAY_LOCK - Duration::from_secs(1));
+            app.timer();
+            assert!(app.session.is_none() && app.away_since.is_none());
             assert!(app.screen == Screen::Login);
             drop(app);
             DestroyWindow(h);

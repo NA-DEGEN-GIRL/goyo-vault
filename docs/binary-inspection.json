@@ -1,6 +1,6 @@
 {
-  "sha256": "025ef2068f544501acb6c8ce0c43200558eec8549c430317146841f966348634",
-  "bytes": 545792,
+  "sha256": "ee4618d7b6a30a06dc912f8ee8f39cb45f11fe13979adf26e932403bcc6fbed9",
+  "bytes": 546816,
   "machine": "0x8664",
   "dll_characteristics": "0xc160",
   "dependent_load_flags": "0x800",
@@ -29,6 +29,7 @@
       "GetWindowDisplayAffinity",
       "RegisterClipboardFormatW",
       "RedrawWindow",
+      "GetForegroundWindow",
       "EndPaint",
       "GetClientRect",
       "BeginPaint",
@@ -104,6 +105,7 @@
       "GetStartupInfoW",
       "SetUnhandledExceptionFilter",
       "UnhandledExceptionFilter",
+      "InitializeSListHead",
       "SetStdHandle",
       "GetFileType",
       "GetStringTypeW",
@@ -115,8 +117,8 @@
       "GetProcessHeap",
       "HeapFree",
       "UnlockFile",
-      "CloseHandle",
       "HeapSize",
+      "GetLastError",
       "LoadLibraryExW",
       "GetProcAddress",
       "GetCommandLineW",
@@ -151,7 +153,7 @@
       "lstrlenW",
       "GetCurrentProcessId",
       "CreateMutexA",
-      "ReleaseMutex",
+      "RtlVirtualUnwind",
       "WideCharToMultiByte",
       "FormatMessageW",
       "GetStdHandle",
@@ -180,23 +182,22 @@
       "FlsAlloc",
       "GetModuleHandleExW",
       "FlsSetValue",
-      "InitializeSListHead",
       "GetSystemTimeAsFileTime",
       "SetFilePointerEx",
       "SetEnvironmentVariableW",
-      "GetLastError",
-      "RtlVirtualUnwind"
+      "CloseHandle",
+      "ReleaseMutex"
     ],
     "ntdll.dll": [
-      "RtlGetVersion",
       "NtWriteFile",
-      "NtReadFile",
-      "RtlNtStatusToDosError"
+      "RtlGetVersion",
+      "RtlNtStatusToDosError",
+      "NtReadFile"
     ],
     "IMM32.dll": [
-      "ImmAssociateContextEx",
       "ImmReleaseContext",
-      "ImmGetContext"
+      "ImmGetContext",
+      "ImmAssociateContextEx"
     ],
     "dwmapi.dll": [
       "DwmIsCompositionEnabled",
@@ -214,9 +215,9 @@
       "WTSUnRegisterSessionNotification"
     ],
     "api-ms-win-core-synch-l1-2-0.dll": [
+      "WaitOnAddress",
       "WakeByAddressSingle",
-      "WakeByAddressAll",
-      "WaitOnAddress"
+      "WakeByAddressAll"
     ]
   }
 }
