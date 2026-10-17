@@ -57,7 +57,7 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 ![Create a vault](docs/images/create.png)
 
 1. Check where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder. Keeping the key file somewhere else, such as a USB drive, is safer.
-2. Enter a **password** twice. It needs at least 16 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one.
+2. Enter a **password** twice. It needs at least 16 characters, and passwords that just repeat a few characters are refused. A long sentence you can remember is better than a short complex one. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
 3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
 4. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
 
@@ -144,6 +144,7 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 
 **Screen, input and clipboard**
 - Input fields use the Windows password input scope, and the secret and note fields are detached from the IME. Depending on the input method, Korean may not be typeable in other fields either; paste instead. OS text services, third-party keyboards and voice input cannot be fully prevented from learning what you type. If input protection cannot be set up, that field and saving/unlocking are blocked.
+- The eye icon in a password field shows the text only when you press it. While shown, copying, reads by other programs, accessibility reads and screen capture stay blocked, and the IME stays off. Other programs still cannot unmask the field. Locking, the idle timeout and changing screens hide it again. It cannot stop someone looking over your shoulder.
 - Values copied by the app are excluded from Win+V history and cloud sync and marked so that clipboard managers honouring the convention do not record them. If another program holds the clipboard, clearing is retried, and closing waits until it succeeds. A forced kill or a system shutdown cannot guarantee this cleanup.
 - Switching apps locks the vault but keeps a just-copied value for the rest of its 15 seconds so you can paste it. Manual lock, screen lock and sleep clear it immediately. Content another app put on the clipboard in the meantime is left alone.
 - Capture exclusion only covers capture paths that Windows supports.

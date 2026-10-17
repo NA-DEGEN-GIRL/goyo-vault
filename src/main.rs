@@ -68,6 +68,15 @@ const NEXT: i32 = 123;
 const THEME_DARK: i32 = 124;
 const THEME_LIGHT: i32 = 125;
 const BACK: i32 = 126;
+/// Eye buttons inside the password fields, in the order of PEEK_FIELDS.
+const PEEK_PASS: i32 = 127;
+const PEEK_CONFIRM: i32 = 128;
+const PEEK_CURRENT: i32 = 129;
+const PEEK_FIELDS: [(i32, i32); 3] = [
+    (PEEK_PASS, PASS),
+    (PEEK_CONFIRM, CONFIRM),
+    (PEEK_CURRENT, CURRENT_PASS),
+];
 const PRESET: i32 = 130;
 const PRESET_LAST: i32 = PRESET + KIND_PRESETS.len() as i32 - 1;
 const STATUS: i32 = 299;
@@ -358,6 +367,74 @@ impl App {
         self.label(label, x, y, w);
         self.input(id, value, (x, y + 22, w, 40), password, false, 0);
     }
+    /// Masked field with an eye button that shows what was typed.
+    fn password_field(&mut self, id: i32, label: &str, x: i32, y: i32, w: i32) {
+        self.label(label, x, y, w);
+        self.input(id, "", (x, y + 22, w, 40), true, false, 36);
+        let peek = PEEK_FIELDS.iter().find(|(_, f)| *f == id).map(|(p, _)| *p);
+        if let Some(peek) = peek {
+            // Not a tab stop, so Tab still goes from password to the next field.
+            let b = self.ctrl(
+                peek,
+                "BUTTON",
+                "비밀번호 보기",
+                x + w - 38,
+                y + 26,
+                32,
+                32,
+                0xb,
+            );
+            unsafe {
+                SetWindowLongPtrW(b, -21, theme::EYE);
+            }
+        }
+    }
+    /// Shows or hides the typed password. This is the only way to change the
+    /// mask: edit_proc still drops EM_SETPASSWORDCHAR sent by anyone else.
+    /// Shown text stays behind the same protections as masked text (no
+    /// copy, no external WM_GETTEXT or accessibility read, capture exclusion),
+    /// and every rebuild (lock, idle timeout, screen change) masks it again.
+    fn peek(&mut self, button: i32) -> crypto::Result<()> {
+        let Some(&(_, field)) = PEEK_FIELDS.iter().find(|(p, _)| *p == button) else {
+            return Ok(());
+        };
+        let (edit, b) = (self.handle(field), self.handle(button));
+        if edit == 0 || b == 0 {
+            return Ok(());
+        }
+        let original = EDIT_PROC.get().copied();
+        unsafe {
+            let show = GetWindowLongPtrW(b, -21) != theme::EYE_ON;
+            let mask = if show { 0 } else { '•' as usize };
+            CallWindowProcW(original, edit, 0xcc, mask, 0);
+            if show {
+                // Clearing ES_PASSWORD hands the edit its IME context back, which
+                // would turn on Hangul input and let text services learn the
+                // password. Take it away again; if that fails, mask again.
+                ImmAssociateContextEx(edit, 0, 0);
+                let context = ImmGetContext(edit);
+                if context != 0 {
+                    ImmReleaseContext(edit, context);
+                }
+                if context != 0 || SetInputScope(edit, 31) != 0 {
+                    CallWindowProcW(original, edit, 0xcc, '•' as usize, 0);
+                    return Err("입력 보호를 확인할 수 없어 비밀번호를 표시하지 않았습니다.");
+                }
+            }
+            SetWindowLongPtrW(b, -21, if show { theme::EYE_ON } else { theme::EYE });
+            let name = if show {
+                "비밀번호 숨기기"
+            } else {
+                "비밀번호 보기"
+            };
+            SetWindowTextW(b, wide(name).as_ptr());
+            InvalidateRect(b, null(), 0);
+            InvalidateRect(edit, null(), 1);
+            // Keep typing where the user left off.
+            SetFocus(edit);
+        }
+        Ok(())
+    }
     fn path_field(&mut self, id: i32, browse: i32, label: &str, value: &str, y: i32) {
         self.label(label, AX, y, AW);
         self.input(id, value, (AX, y + 22, AW, 40), false, false, 64);
@@ -634,8 +711,8 @@ impl App {
         }
         if create {
             let half = (AW - 16) / 2;
-            self.field(PASS, "비밀번호 · 16자 이상", "", AX, y, half, true);
-            self.field(CONFIRM, "비밀번호 확인", "", AX + half + 16, y, half, true);
+            self.password_field(PASS, "비밀번호 · 16자 이상", AX, y, half);
+            self.password_field(CONFIRM, "비밀번호 확인", AX + half + 16, y, half);
             // Enrollment card (see ENROLL): QR, setup key and frame are painted.
             let strong = self.font_of(|t| t.strong);
             let (cx, cy, cw, _) = ENROLL;
@@ -674,7 +751,7 @@ impl App {
                 theme::PRIMARY,
             );
         } else {
-            self.field(PASS, "비밀번호", "", AX, y, AW - 196, true);
+            self.password_field(PASS, "비밀번호", AX, y, AW - 196);
             self.field(OTP, "Google OTP 6자리", "", AX + AW - 180, y, 180, true);
             y += 88;
             let submit = if restore {
@@ -867,9 +944,9 @@ impl App {
             AW,
             22,
         );
-        self.field(CURRENT_PASS, "현재 비밀번호", "", AX, 160, AW, true);
-        self.field(PASS, "새 비밀번호 · 16자 이상", "", AX, 232, AW, true);
-        self.field(CONFIRM, "새 비밀번호 확인", "", AX, 304, AW, true);
+        self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 160, AW);
+        self.password_field(PASS, "새 비밀번호 · 16자 이상", AX, 232, AW);
+        self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
         self.field(OTP, "새 Google OTP 6자리", "", AX, 376, 180, true);
         self.note(
             "현재 열쇠 파일만 갱신됩니다. 이전 열쇠와 이전 비밀번호로 이후 금고도 열 수 있습니다. 유출 대응용 키 교체가 아닙니다. 변경 후 새 열쇠 파일을 별도로 백업하세요.",
@@ -1170,6 +1247,7 @@ impl App {
                 self.build();
             }
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
+            PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT => self.peek(id)?,
             PRESET..=PRESET_LAST => unsafe {
                 let kind = self.handle(KIND);
                 let name = KIND_PRESETS[(id - PRESET) as usize];
@@ -1275,15 +1353,43 @@ impl App {
             Screen::Welcome => matches!(id, CREATE | RESTORE | OPEN),
             Screen::Login => matches!(
                 id,
-                CREATE | RESTORE | BACK | SUBMIT | BROWSE_V | BROWSE_K | VPATH | KPATH | PASS | OTP
+                CREATE
+                    | RESTORE
+                    | BACK
+                    | SUBMIT
+                    | BROWSE_V
+                    | BROWSE_K
+                    | VPATH
+                    | KPATH
+                    | PASS
+                    | PEEK_PASS
+                    | OTP
             ),
             Screen::Create => matches!(
                 id,
-                BACK | SUBMIT | BROWSE_V | BROWSE_K | VPATH | KPATH | PASS | CONFIRM | OTP
+                BACK | SUBMIT
+                    | BROWSE_V
+                    | BROWSE_K
+                    | VPATH
+                    | KPATH
+                    | PASS
+                    | CONFIRM
+                    | PEEK_PASS
+                    | PEEK_CONFIRM
+                    | OTP
             ),
             Screen::Restore => matches!(
                 id,
-                BACK | SUBMIT | BROWSE_V | BROWSE_K | BROWSE_D | VPATH | KPATH | DEST | PASS | OTP
+                BACK | SUBMIT
+                    | BROWSE_V
+                    | BROWSE_K
+                    | BROWSE_D
+                    | VPATH
+                    | KPATH
+                    | DEST
+                    | PASS
+                    | PEEK_PASS
+                    | OTP
             ),
             Screen::Vault => matches!(
                 id,
@@ -1304,7 +1410,17 @@ impl App {
                 id,
                 TITLE | KIND | SECRET | NOTES | SAVE | CANCEL | PRESET..=PRESET_LAST
             ),
-            Screen::Password => matches!(id, PASS | CONFIRM | CURRENT_PASS | OTP | SUBMIT | CANCEL),
+            Screen::Password => matches!(
+                id,
+                PASS | CONFIRM
+                    | CURRENT_PASS
+                    | PEEK_PASS
+                    | PEEK_CONFIRM
+                    | PEEK_CURRENT
+                    | OTP
+                    | SUBMIT
+                    | CANCEL
+            ),
         }
     }
     fn reset_copy(&mut self) {
@@ -2491,10 +2607,24 @@ mod tests {
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
             assert_eq!(SendMessageW(app.handle(PASS), 0xd0, 0, 0), 0);
             assert_eq!(SendMessageW(app.handle(PASS), 0xbc, 0, 0), 0);
+            // Eye button: unmasks for the user only; the other protections stay.
+            app.command(PEEK_PASS, 0).unwrap();
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), 0);
+            assert_eq!(&*app.read(PASS).unwrap(), "synthetic password only");
+            assert_eq!(GetWindowTextLengthW(app.handle(PASS)), 0);
+            assert_eq!(SendMessageW(app.handle(PASS), 0x301, 0, 0), 0);
+            assert_eq!(SendMessageW(app.handle(PASS), 0x3d, 0, -4), 0); // no accessibility object
+            assert_eq!(ImmGetContext(app.handle(PASS)), 0);
+            SendMessageW(app.handle(PASS), 0xcc, '*' as usize, 0); // still ignored
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), 0);
+            app.command(PEEK_PASS, 0).unwrap();
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
+            app.command(PEEK_PASS, 0).unwrap(); // left shown: the lock below must mask it
             app.command(PASS, 0x300).unwrap();
             app.activity = Instant::now() - Duration::from_secs(61);
             app.timer();
             assert!(app.read(PASS).unwrap().is_empty() && !app.auth_dirty);
+            assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
             assert!(app.command(CANCEL, 0).is_err());
             assert!(app.screen == Screen::Login);
             for value in ["W".repeat(8192), "M".repeat(400), "한글😀".repeat(100)] {
@@ -2899,6 +3029,14 @@ mod tests {
                     if file.ends_with("6-vault-revealed") {
                         a.copy_until = Some(Instant::now() + Duration::from_secs(30));
                         a.set_toggle(true);
+                    }
+                    if file.ends_with("9-password") {
+                        // One field shown with the eye button, one still masked.
+                        for id in [CURRENT_PASS, PASS] {
+                            let sample = secret_wide("example passphrase");
+                            SetWindowTextW(a.handle(id), sample.as_ptr());
+                        }
+                        a.peek(PEEK_CURRENT).unwrap();
                     }
                 });
                 pump();

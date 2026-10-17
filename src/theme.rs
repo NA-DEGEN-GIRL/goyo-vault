@@ -69,6 +69,9 @@ pub const TOGGLE_ON: isize = 8;
 pub const CHIP: isize = 9;
 /// Quiet text-only action for secondary navigation.
 pub const LINK: isize = 10;
+/// Password reveal toggle: eye while masked, struck-through eye while shown.
+pub const EYE: isize = 11;
+pub const EYE_ON: isize = 12;
 // Static label tones, stored the same way.
 pub const TONE_TEXT: isize = 0;
 pub const TONE_MUTED: isize = 1;
@@ -93,6 +96,8 @@ pub struct Theme {
     pub code: isize,
     /// Segoe Fluent Icons glyphs (Windows 11 system font).
     pub icon: isize,
+    /// The same icon font at control size.
+    pub glyph: isize,
     dark: Cell<bool>,
     background: Cell<isize>,
 }
@@ -125,6 +130,7 @@ impl Theme {
             title: font(22.0, 700, "맑은 고딕"),
             code: font(22.0, 400, "Consolas"),
             icon: font(28.0, 400, "Segoe Fluent Icons"),
+            glyph: font(16.0, 400, "Segoe Fluent Icons"),
             dark: Cell::new(true),
             background: Cell::new(unsafe { CreateSolidBrush(DARK.bg) }),
         }
@@ -146,6 +152,7 @@ impl Drop for Theme {
                 self.title,
                 self.code,
                 self.icon,
+                self.glyph,
                 self.background.get(),
             ] {
                 DeleteObject(h);
@@ -283,7 +290,12 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
         let n = GetWindowTextLengthW(d.item).clamp(0, 256) as usize;
         let mut buf = vec![0u16; n + 1];
         let got = GetWindowTextW(d.item, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
-        let label = String::from_utf16_lossy(&buf[..got]);
+        // Icon buttons keep a readable window text; the glyph is drawn instead.
+        let label = match variant {
+            EYE => "\u{E890}".to_owned(),    // Segoe Fluent Icons "View"
+            EYE_ON => "\u{ED1A}".to_owned(), // "Hide"
+            _ => String::from_utf16_lossy(&buf[..got]),
+        };
         let on_surface = matches!(variant, TAB | TAB_ON);
         fill(d.dc, &r, if on_surface { p.surface } else { p.bg });
         let mut flags = DT_CENTER | LINE;
@@ -334,6 +346,12 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                 (p.muted, t.body)
             }
             LINK => (if pressed { p.text } else { p.muted }, t.small),
+            EYE | EYE_ON => {
+                if pressed {
+                    round(d.dc, &r, radius, Some(p.surface), None);
+                }
+                (if pressed { p.text } else { p.muted }, t.glyph)
+            }
             CHIP => {
                 let h = r.bottom - r.top;
                 round(
