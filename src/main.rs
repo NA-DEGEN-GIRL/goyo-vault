@@ -5,7 +5,7 @@ mod theme;
 mod win;
 use goyo_vault::{
     crypto,
-    vault::{Entry, OtpSetup, Provision, Session, leftover_temp, vault_tag},
+    vault::{Entry, OtpSetup, Provision, Session, key_uses_otp, leftover_temp, vault_tag},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -83,6 +83,8 @@ const PEEK_CURRENT: i32 = 129;
 /// what was shown; capture exclusion already keeps the window out of shots.
 const AWAY_LOCK: Duration = Duration::from_secs(30);
 const OTP_SETUP: i32 = 135;
+/// Create: turns the optional OTP on or off.
+const OTP_TOGGLE: i32 = 136;
 const KEY_NOTE: i32 = 220;
 const PEEK_FIELDS: [(i32, i32); 3] = [
     (PEEK_PASS, PASS),
@@ -101,6 +103,8 @@ const CARD_W: i32 = 464;
 const HINT: (i32, i32, i32, i32) = (CARD_X, 372, CARD_W, 40);
 /// Dark/light segmented switch in the top-right corner of every screen.
 const THEME_SWITCH: (i32, i32, i32, i32) = (704, 21, 132, 36);
+/// Create with the OTP off: the painted card that offers it.
+const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
 /// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
 const LOGIN_LINKS: (i32, i32, i32, i32) = (AX, 500, AW, 1);
 #[derive(Clone, Copy, PartialEq)]
@@ -128,6 +132,9 @@ struct App {
     screen: Screen,
     session: Option<Session>,
     provision: Option<Provision>,
+    /// Create: the new vault will also ask for the phone's OTP. Off by
+    /// default; the provision keeps one OTP secret either way.
+    create_otp: bool,
     selected: Option<usize>,
     editing: Option<usize>,
     /// Folder of the executable; default home of new and restored vaults.
@@ -185,6 +192,7 @@ impl App {
             screen: Screen::Login,
             session: None,
             provision: None,
+            create_otp: false,
             selected: None,
             editing: None,
             vault_path: base.join("vault.goyo"),
@@ -200,7 +208,7 @@ impl App {
             clipboard: None,
             failed: 0,
             retry: Instant::now(),
-            status: "금고·열쇠 파일을 확인하고 비밀번호와 Google OTP를 입력하세요.".into(),
+            status: "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.".into(),
             page: 0,
             closing: false,
             auth_dirty: false,
@@ -447,6 +455,36 @@ impl App {
         }
         Ok(())
     }
+    /// Rebuilds the screen and puts back what was typed into `ids`.
+    fn rebuild_keeping(&mut self, ids: &[i32]) {
+        let kept: Vec<_> = ids.iter().map(|&id| (id, self.read(id))).collect();
+        let _ = self.paths();
+        self.build();
+        if self.input_failed {
+            return;
+        }
+        for (id, text) in kept {
+            if let Ok(text) = text {
+                unsafe {
+                    SetWindowTextW(self.handle(id), secret_wide(&text).as_ptr());
+                }
+            }
+        }
+    }
+    /// Login and Restore show the OTP field only for a key file that uses
+    /// one. When the chosen key file needs the other layout, rebuilds the
+    /// form keeping the typed password. True if the OTP field was added.
+    fn fit_otp_field(&mut self) -> bool {
+        if !matches!(self.screen, Screen::Login | Screen::Restore) {
+            return false;
+        }
+        let wanted = key_uses_otp(&self.key_path) == Some(true);
+        if wanted == (self.handle(OTP) != 0) {
+            return false;
+        }
+        self.rebuild_keeping(&[PASS]);
+        wanted
+    }
     /// Masks every password field, whatever its recorded state, and never
     /// moves focus, so it is safe while another app is being activated.
     fn mask_passwords(&mut self) {
@@ -650,10 +688,16 @@ impl App {
         let strong = self.font_of(|t| t.strong);
         let (cx, cy, cw, _) = self.enroll();
         let (rx, rw) = (cx + 180, cw - 196);
+        // Create keeps room for the "OTP 끄기" button at the top right.
+        let head = if self.screen == Screen::Create {
+            rw - 112
+        } else {
+            rw
+        };
         self.text(
             0,
             &format!("휴대폰 OTP 등록 · {tag}"),
-            (rx, cy + 14, rw, 22),
+            (rx, cy + 14, head, 22),
             strong,
             TONE_TEXT,
             0,
@@ -849,35 +893,89 @@ impl App {
             let half = (AW - 16) / 2;
             self.password_field(PASS, "비밀번호 · 12자 이상", AX, y, half);
             self.password_field(CONFIRM, "비밀번호 확인", AX + half + 16, y, half);
-            // Enrollment card: QR, setup key and frame are painted.
-            let tag = self.provision.as_ref().map(|p| p.tag()).unwrap_or_default();
-            self.enrollment_labels(
-                &tag,
-                "휴대폰을 잃으면 금고를 열 수 없으니 예비 기기에도 등록해 두세요.\r\n금고를 연 뒤 아래쪽 'OTP 백업'에서 이 QR을 다시 볼 수 있습니다.",
-            );
-            self.field(OTP, "앱에 표시된 6자리", "", AX, 600, 180, true);
-            self.button(
-                SUBMIT,
-                "등록 확인 · 금고 만들기",
-                AX + 196,
-                622,
-                AW - 196,
-                40,
-                theme::PRIMARY,
-            );
+            if self.create_otp {
+                // Enrollment card: QR, setup key and frame are painted.
+                let tag = self.provision.as_ref().map(|p| p.tag()).unwrap_or_default();
+                self.enrollment_labels(
+                    &tag,
+                    "휴대폰을 잃으면 금고를 열 수 없으니 예비 기기에도 등록해 두세요.\r\n금고를 연 뒤 아래쪽 'OTP 백업'에서 이 QR을 다시 볼 수 있습니다.",
+                );
+                let (cx, cy, cw, _) = self.enroll();
+                self.button(
+                    OTP_TOGGLE,
+                    "OTP 끄기",
+                    cx + cw - 104,
+                    cy + 10,
+                    88,
+                    30,
+                    theme::GHOST,
+                );
+                self.field(OTP, "앱에 표시된 6자리", "", AX, 600, 180, true);
+                self.button(
+                    SUBMIT,
+                    "등록 확인 · 금고 만들기",
+                    AX + 196,
+                    622,
+                    AW - 196,
+                    40,
+                    theme::PRIMARY,
+                );
+            } else {
+                // The OTP is optional; the card (painted frame) says what it adds.
+                let (cx, cy, cw, ch) = CREATE_OTP_CARD;
+                let strong = self.font_of(|t| t.strong);
+                self.text(
+                    0,
+                    "휴대폰 OTP · 선택 사항",
+                    (cx + 20, cy + 18, cw - 180, 22),
+                    strong,
+                    TONE_TEXT,
+                    0,
+                );
+                self.button(
+                    OTP_TOGGLE,
+                    "OTP 사용",
+                    cx + cw - 132,
+                    cy + 14,
+                    116,
+                    32,
+                    theme::SECONDARY,
+                );
+                self.note(
+                    "켜면 금고를 열 때마다 휴대폰 OTP 앱의 6자리도 입력합니다.\r\n비밀번호를 엿본 사람이 이 PC에서 여는 것을 막아 줍니다.\r\n금고·열쇠 파일을 복사해 간 사람은 막지 못하니, 열쇠 파일은 따로 보관하세요.",
+                    cx + 20,
+                    cy + 52,
+                    cw - 40,
+                    60,
+                );
+                self.button(
+                    SUBMIT,
+                    "금고 만들기",
+                    AX,
+                    cy + ch + 20,
+                    AW,
+                    46,
+                    theme::PRIMARY,
+                );
+            }
         } else {
             self.refresh_key_note();
-            self.password_field(PASS, "비밀번호", AX, y, AW - 196);
-            let source = if restore {
-                &self.backup_path
-            } else {
-                &self.vault_path
-            };
-            let caption = match vault_tag(source) {
-                Some(tag) => format!("OTP 6자리 · {tag}"),
-                None => "Google OTP 6자리".into(),
-            };
-            self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
+            // Only a key file that uses an OTP gets the OTP field; a key
+            // chosen later is handled by fit_otp_field.
+            let otp = key_uses_otp(&self.key_path) == Some(true);
+            self.password_field(PASS, "비밀번호", AX, y, if otp { AW - 196 } else { AW });
+            if otp {
+                let source = if restore {
+                    &self.backup_path
+                } else {
+                    &self.vault_path
+                };
+                let caption = match vault_tag(source) {
+                    Some(tag) => format!("OTP 6자리 · {tag}"),
+                    None => "Google OTP 6자리".into(),
+                };
+                self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
+            }
             y += 88;
             let submit = if restore {
                 "확인 · 새 파일로 복원"
@@ -995,7 +1093,9 @@ impl App {
         self.button(BACKUP, "금고 백업", 40, 642, 100, 34, theme::SECONDARY);
         self.button(KEYBACKUP, "열쇠 백업", 148, 642, 100, 34, theme::SECONDARY);
         self.button(CHANGE, "비밀번호 변경", 256, 642, 124, 34, theme::SECONDARY);
-        self.button(OTP_SETUP, "OTP 백업", 388, 642, 100, 34, theme::SECONDARY);
+        if self.session.as_ref().is_some_and(Session::uses_otp) {
+            self.button(OTP_SETUP, "OTP 백업", 388, 642, 100, 34, theme::SECONDARY);
+        }
         self.text(
             0,
             "60초 미사용·다른 앱 30초·화면 잠금 시 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
@@ -1067,11 +1167,28 @@ impl App {
             SetFocus(self.handle(TITLE));
         }
     }
+    /// Top of the painted note card on Password, below the OTP field if any.
+    fn password_card_y(&self) -> i32 {
+        if self.session.as_ref().is_some_and(Session::uses_otp) {
+            456
+        } else {
+            384
+        }
+    }
     fn build_password(&mut self) {
         let title = self.font_of(|t| t.title);
         self.text(0, "비밀번호 변경", (AX, 80, AW, 34), title, TONE_TEXT, 0);
+        let otp = self
+            .session
+            .as_ref()
+            .filter(|s| s.uses_otp())
+            .map(|s| s.tag());
         self.note(
-            "현재 비밀번호와 새 OTP 번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다.",
+            if otp.is_some() {
+                "현재 비밀번호와 새 OTP 번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다."
+            } else {
+                "현재 비밀번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다."
+            },
             AX,
             118,
             AW,
@@ -1080,15 +1197,22 @@ impl App {
         self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 160, AW);
         self.password_field(PASS, "새 비밀번호 · 12자 이상", AX, 232, AW);
         self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
-        let caption = match self.session.as_ref() {
-            Some(s) => format!("새 OTP 6자리 · {}", s.tag()),
-            None => "새 Google OTP 6자리".into(),
-        };
-        self.field(OTP, &caption, "", AX, 376, 180, true);
+        if let Some(tag) = otp {
+            self.field(
+                OTP,
+                &format!("새 OTP 6자리 · {tag}"),
+                "",
+                AX,
+                376,
+                180,
+                true,
+            );
+        }
+        let y = self.password_card_y();
         self.note(
             "현재 열쇠 파일만 갱신됩니다. 이전 열쇠와 이전 비밀번호로 이후 금고도 열 수 있습니다. 유출 대응용 키 교체가 아닙니다. 변경 후 새 열쇠 파일을 별도로 백업하세요.",
             AX + 18,
-            470,
+            y + 14,
             AW - 36,
             54,
         );
@@ -1096,7 +1220,7 @@ impl App {
             CANCEL,
             "취소",
             AX + AW - 268,
-            556,
+            y + 100,
             100,
             42,
             theme::SECONDARY,
@@ -1105,7 +1229,7 @@ impl App {
             SUBMIT,
             "비밀번호 변경",
             AX + AW - 160,
-            556,
+            y + 100,
             160,
             42,
             theme::PRIMARY,
@@ -1410,6 +1534,11 @@ impl App {
             }
             _ => {}
         }
+        // A key file typed in by path may be one that uses an OTP: ask for
+        // the code instead of failing the authentication.
+        if self.fit_otp_field() {
+            return Err("이 열쇠 파일은 OTP를 씁니다. 휴대폰 OTP 앱의 6자리도 입력하세요.");
+        }
         if self.screen == Screen::Create && pass.as_str() != self.read(CONFIRM)?.as_str() {
             return Err("비밀번호 확인이 일치하지 않습니다.");
         }
@@ -1427,7 +1556,8 @@ impl App {
                     .provision
                     .as_ref()
                     .ok_or("새 금고 등록을 다시 시작하세요.")?;
-                provision.finish(&self.new_vault_path, &self.new_key_path, &pass, &otp)
+                let code = self.create_otp.then_some(otp.as_str());
+                provision.finish(&self.new_vault_path, &self.new_key_path, &pass, code)
             }
             Screen::Restore => Session::restore(
                 &self.backup_path,
@@ -1448,14 +1578,22 @@ impl App {
                 self.dest_path = PathBuf::new();
                 save_paths(&s.path, &s.key_path);
                 let warning = placement_warning(&s.path, &s.key_path);
+                let uses_otp = s.uses_otp();
                 self.session = Some(s);
                 self.provision = None;
+                self.create_otp = false;
                 self.failed = 0;
                 self.screen = Screen::Vault;
-                let first = if screen == Screen::Create {
-                    "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요."
-                } else {
-                    "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다."
+                let first = match (screen == Screen::Create, uses_otp) {
+                    (true, true) => {
+                        "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요."
+                    }
+                    (true, false) => {
+                        "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요."
+                    }
+                    _ => {
+                        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다."
+                    }
                 };
                 self.status = match warning {
                     Some(w) => {
@@ -1543,6 +1681,7 @@ impl App {
                 // idle timeout still drop it.
                 if id == CREATE && self.provision.is_none() {
                     self.provision = Some(Provision::new()?);
+                    self.create_otp = false;
                 }
                 self.copy_until = None;
                 self.reveal_until = None;
@@ -1581,6 +1720,27 @@ impl App {
                 self.otp_setup = None;
                 self.screen = Screen::OtpBackup;
                 self.build();
+            }
+            OTP_TOGGLE => {
+                self.create_otp = !self.create_otp;
+                self.status = if self.create_otp {
+                    "휴대폰 OTP 앱으로 QR을 등록하고, 앱에 표시된 6자리를 입력하세요."
+                } else {
+                    "OTP 없이 비밀번호와 열쇠 파일로 여는 금고를 만듭니다."
+                }
+                .into();
+                // Same OTP secret either way, so a QR already scanned stays valid.
+                self.rebuild_keeping(&[PASS, CONFIRM]);
+                let next = if self.read(PASS)?.is_empty() {
+                    PASS
+                } else if self.create_otp {
+                    OTP
+                } else {
+                    SUBMIT
+                };
+                unsafe {
+                    SetFocus(self.handle(next));
+                }
             }
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
             PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT => self.peek(id)?,
@@ -1687,6 +1847,9 @@ impl App {
         if matches!(id, THEME_DARK | THEME_LIGHT) {
             return true;
         }
+        if id == OTP_SETUP && !self.session.as_ref().is_some_and(Session::uses_otp) {
+            return false;
+        }
         match self.screen {
             Screen::Welcome => matches!(id, CREATE | RESTORE | OPEN),
             Screen::Login => matches!(
@@ -1706,6 +1869,7 @@ impl App {
             Screen::Create => matches!(
                 id,
                 BACK | SUBMIT
+                    | OTP_TOGGLE
                     | BROWSE_V
                     | BROWSE_K
                     | VPATH
@@ -1986,8 +2150,18 @@ impl App {
                     theme::fill(dc, &self.r(x, y, w, h), p.border);
                 }
                 Screen::Password => {
-                    let card = self.r(AX, 456, AW, 80);
+                    let card = self.r(AX, self.password_card_y(), AW, 80);
                     theme::round(dc, &card, self.px(10), Some(p.bg), Some(p.border));
+                }
+                Screen::Create if !self.create_otp => {
+                    let (x, y, w, h) = CREATE_OTP_CARD;
+                    theme::round(
+                        dc,
+                        &self.r(x, y, w, h),
+                        self.px(12),
+                        Some(p.bg),
+                        Some(p.border),
+                    );
                 }
                 _ => {}
             }
@@ -2002,6 +2176,7 @@ impl App {
                 theme::round(dc, &r, self.px(8), Some(p.bg), Some(border));
             }
             if self.screen == Screen::Create
+                && self.create_otp
                 && let Some(provision) = &self.provision
             {
                 if self.inactive {
@@ -2121,7 +2296,7 @@ impl App {
             theme::round(dc, &card, self.px(12), None, Some(p.border));
             theme::text(
                 dc,
-                "금고를 열 때 필요한 네 가지",
+                "금고를 열 때 필요한 것",
                 &self.r(AX + 20, 486, AW - 40, 20),
                 small,
                 p.muted,
@@ -2132,7 +2307,7 @@ impl App {
                 ("금고 파일", "암호화된 항목\n(.goyo)"),
                 ("열쇠 파일", "금고와 따로 보관\n(.goyokey)"),
                 ("비밀번호", "12자 이상의\n긴 문장"),
-                ("휴대폰 OTP", "Google\nAuthenticator"),
+                ("휴대폰 OTP", "선택 사항\n켠 금고만 필요"),
             ]
             .into_iter()
             .enumerate()
@@ -2410,10 +2585,14 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                 } else {
                     s.backup_key(&p)?;
                 }
-                a.status(if id == BACKUP {
-                    "금고 백업을 저장했습니다. 열쇠 파일, 비밀번호, OTP도 필요합니다."
-                } else {
-                    "암호화된 열쇠를 백업했습니다. 금고와 분리하여 보관하세요."
+                a.status(match (id == BACKUP, s.uses_otp()) {
+                    (true, true) => {
+                        "금고 백업을 저장했습니다. 열 때 열쇠 파일, 비밀번호, OTP도 필요합니다."
+                    }
+                    (true, false) => {
+                        "금고 백업을 저장했습니다. 열 때 열쇠 파일과 비밀번호도 필요합니다."
+                    }
+                    _ => "암호화된 열쇠를 백업했습니다. 금고와 분리하여 보관하세요.",
                 });
             }
             _ => {
@@ -2427,6 +2606,10 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                 *a.path_slot(field) = p;
                 unsafe {
                     SetWindowTextW(a.handle(field), text.as_ptr());
+                }
+                // The change notice arrived while the state was busy.
+                if !(field == KPATH && a.fit_otp_field()) {
+                    a.refresh_key_note();
                 }
             }
         }
@@ -3222,7 +3405,7 @@ mod tests {
                 &dir.join("vault.goyo"),
                 &dir.join("vault.goyokey"),
                 password,
-                &code,
+                Some(&code),
             )
             .unwrap()
     }
@@ -3243,6 +3426,93 @@ mod tests {
             }
         }
         out
+    }
+    /// The OTP is optional and off by default. Switching it keeps the typed
+    /// passwords and the enrollment secret; a vault made without it opens
+    /// with the password alone and offers no OTP backup. A key file that uses
+    /// an OTP, typed in by path, gets the OTP field instead of a failed login.
+    #[test]
+    fn optional_otp_create_and_open() {
+        let dir = std::env::temp_dir().join(format!(
+            "goyo-optional-otp-{:x}",
+            u64::from_le_bytes(*crypto::random::<8>().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let pass = "synthetic optional otp passphrase";
+        unsafe {
+            SetProcessDPIAware();
+            let h = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide("Goyo optional OTP test").as_ptr(),
+                0x00ca0000,
+                0,
+                0,
+                900,
+                800,
+                0,
+                0,
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.home_dir = dir.clone();
+            app.vault_path = dir.join("vault.goyo");
+            app.key_path = dir.join("vault.goyokey");
+            app.screen = app.home();
+            app.build();
+            app.command(CREATE, 0).unwrap();
+            assert!(app.screen == Screen::Create && !app.create_otp);
+            assert_eq!(app.handle(OTP), 0);
+            let code = app.provision.as_ref().unwrap().setup_code();
+            for id in [PASS, CONFIRM] {
+                SetWindowTextW(app.handle(id), wide(pass).as_ptr());
+            }
+            app.command(OTP_TOGGLE, 0).unwrap();
+            assert!(app.create_otp && app.handle(OTP) != 0);
+            assert_eq!(GetFocus(), app.handle(OTP));
+            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            app.command(OTP_TOGGLE, 0).unwrap();
+            assert!(!app.create_otp && app.handle(OTP) == 0);
+            for id in [PASS, CONFIRM] {
+                assert_eq!(&*app.read(id).unwrap(), pass);
+            }
+            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            app.command(SUBMIT, 0).unwrap();
+            assert!(app.screen == Screen::Vault);
+            assert!(!app.session.as_ref().unwrap().uses_otp());
+            assert_eq!(app.handle(OTP_SETUP), 0);
+            assert!(!app.allows(OTP_SETUP));
+            app.command(CHANGE, 0).unwrap();
+            assert!(app.screen == Screen::Password && app.handle(OTP) == 0);
+            app.command(CANCEL, 0).unwrap();
+            // Opens again with the password alone.
+            app.lock("synthetic lock", true);
+            assert!(app.screen == Screen::Login && app.handle(OTP) == 0);
+            SetWindowTextW(app.handle(PASS), wide(pass).as_ptr());
+            app.command(SUBMIT, 0).unwrap();
+            assert!(app.session.is_some());
+            app.lock("synthetic lock", true);
+            // An OTP vault chosen by typing its paths: the first try asks for
+            // the code, keeps the password and is not a failed attempt.
+            let other = dir.join("otp");
+            std::fs::create_dir(&other).unwrap();
+            drop(synthetic_session(&other, pass));
+            let other_vault = wide(&other.join("vault.goyo").to_string_lossy());
+            let other_key = wide(&other.join("vault.goyokey").to_string_lossy());
+            SetWindowTextW(app.handle(VPATH), other_vault.as_ptr());
+            SetWindowTextW(app.handle(KPATH), other_key.as_ptr());
+            SetWindowTextW(app.handle(PASS), wide(pass).as_ptr());
+            assert!(app.command(SUBMIT, 0).unwrap_err().contains("OTP"));
+            assert!(app.handle(OTP) != 0 && app.failed == 0);
+            assert_eq!(&*app.read(PASS).unwrap(), pass);
+            assert!(app.session.is_none());
+            drop(app);
+            DestroyWindow(h);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn otp_backup_needs_password_and_closes_with_lock() {
@@ -3681,7 +3951,7 @@ mod tests {
                 &temp.join("vault.goyo"),
                 &temp.join("vault.goyokey"),
                 "synthetic preview password",
-                &code,
+                Some(&code),
             )
             .unwrap();
         for (title, kind, value, notes) in [
@@ -3757,6 +4027,7 @@ mod tests {
                 ("0-welcome", Screen::Welcome),
                 ("1-login", Screen::Login),
                 ("2-create", Screen::Create),
+                ("2-create-otp", Screen::Create),
                 ("3-restore", Screen::Restore),
                 ("4-vault", Screen::Vault),
                 ("5-vault-selected", Screen::Vault),
@@ -3788,7 +4059,7 @@ mod tests {
                     a.screen = screen;
                     // Status lines as the real app shows them on each screen.
                     a.status = match screen {
-                        Screen::Login => "금고·열쇠 파일을 확인하고 비밀번호와 Google OTP를 입력하세요.",
+                        Screen::Login => "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.",
                         Screen::Vault => "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다.",
                         _ => "",
                     }
@@ -3799,6 +4070,7 @@ mod tests {
                     if screen == Screen::Create {
                         a.provision = Some(Provision::new().unwrap());
                     }
+                    a.create_otp = file.ends_with("2-create-otp");
                     if screen == Screen::Vault && a.session.is_none() {
                         a.session = session.take();
                     }

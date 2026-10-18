@@ -10,7 +10,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// Key file with the TOTP secret: the app also asks for the phone's code.
 const KEY_MAGIC: &[u8; 8] = b"GOYOKE01";
+/// Key file without one: password and key file only.
+const KEY_MAGIC_NO_OTP: &[u8; 8] = b"GOYOKE02";
 const DATA_MAGIC: &[u8; 8] = b"GOYOVA01";
 pub const MAX_FILE: usize = 8 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 1000;
@@ -71,6 +74,19 @@ pub fn vault_tag(path: &Path) -> Option<String> {
     File::open(path).ok()?.read_exact(&mut head).ok()?;
     (&head[..8] == DATA_MAGIC).then(|| tag(head[8..24].try_into().unwrap()))
 }
+/// Whether the key file at `path` asks for an OTP code, from its plaintext
+/// magic. None if it is missing or not a key file. Only decides which fields
+/// the screen shows: the magic is authenticated, so the real decision is made
+/// after decryption.
+pub fn key_uses_otp(path: &Path) -> Option<bool> {
+    let mut head = [0u8; 8];
+    File::open(path).ok()?.read_exact(&mut head).ok()?;
+    match &head {
+        KEY_MAGIC => Some(true),
+        KEY_MAGIC_NO_OTP => Some(false),
+        _ => None,
+    }
+}
 /// The TOTP secret in the forms an authenticator app accepts.
 pub struct OtpSetup {
     id: [u8; 16],
@@ -130,15 +146,22 @@ impl Provision {
     pub fn tag(&self) -> String {
         tag(&self.id)
     }
+    /// Writes the new vault and key file. With `Some(code)` the vault uses
+    /// the OTP and the code must come from the phone that scanned the QR;
+    /// with None it opens with the password and key file alone.
     pub fn finish(
         &self,
         vault: &Path,
         key_path: &Path,
         password: &str,
-        input: &str,
+        input: Option<&str>,
     ) -> Result<Session> {
         password_policy(password)?;
-        let last = otp::verify(self.otp.as_slice(), input, otp::now()?, None)?;
+        let last = match input {
+            Some(input) => otp::verify(self.otp.as_slice(), input, otp::now()?, None)?,
+            None => 0,
+        };
+        let otp = input.map(|_| boxed(&self.otp));
         let vault = normalized(vault)?;
         let key_path = normalized(key_path)?;
         distinct(&vault, &key_path)?;
@@ -146,13 +169,13 @@ impl Provision {
             return Err("새 금고와 열쇠 파일은 기존 파일을 덮어쓸 수 없습니다.");
         }
         let locks = vec![FileLock::acquire(&vault)?];
-        let key_bytes = encode_key(&self.id, &self.key, &self.otp, password)?;
+        let key_bytes = encode_key(&self.id, &self.key, otp.as_deref(), password)?;
         let mut session = Session {
             path: vault,
             key_path,
             id: self.id,
             key: boxed(&self.key),
-            otp: boxed(&self.otp),
+            otp,
             last,
             entries: Vec::new(),
             key_bytes,
@@ -239,7 +262,7 @@ fn predictable(s: &str) -> bool {
 }
 pub fn password_policy(s: &str) -> Result<()> {
     // Argon2id slows each guess, but a stolen key file can still be guessed
-    // offline without limit (the OTP does not take part in decryption), so
+    // offline without limit (an OTP never takes part in decryption), so
     // length is what keeps the password out of reach.
     if s.chars().count() < MIN_PASSWORD || s.len() > 1024 {
         return Err(
@@ -270,7 +293,9 @@ pub struct Session {
     pub key_path: PathBuf,
     id: [u8; 16],
     key: Box<Key>,
-    otp: Box<Zeroizing<[u8; 20]>>,
+    /// None when the vault opens without an OTP code.
+    otp: Option<Box<Zeroizing<[u8; 20]>>>,
+    /// Last accepted OTP time step; always 0 without an OTP.
     last: u64,
     pub entries: Vec<Entry>,
     key_bytes: Vec<u8>,
@@ -296,7 +321,7 @@ impl Session {
         input: &str,
         destination: Option<&Path>,
     ) -> Result<Self> {
-        if password.len() > 1024 || input.len() != 6 || !input.bytes().all(|b| b.is_ascii_digit()) {
+        if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
         let source = normalized(vault)?;
@@ -310,11 +335,18 @@ impl Session {
             Vec::new()
         };
         let key_bytes = read_bounded(&key_path, 1024)?;
+        // A malformed code fails before the slow key derivation.
+        if key_bytes.starts_with(KEY_MAGIC) && !otp_format(input) {
+            return Err(AUTH_ERROR);
+        }
         let (id, key, otp) = decode_key(&key_bytes, password)?;
         let data = read_bounded(&source, MAX_FILE)?;
         let (last, entries) = decode_data(&id, &key, &data)?;
-        let step =
-            otp::verify(otp.as_slice(), input, otp::now()?, Some(last)).map_err(|_| AUTH_ERROR)?;
+        let step = match &otp {
+            Some(secret) => otp::verify(secret.as_slice(), input, otp::now()?, Some(last))
+                .map_err(|_| AUTH_ERROR)?,
+            None => last,
+        };
         let path = if let Some(dest) = destination {
             let dest = normalized(dest)?;
             distinct(&dest, &key_path)?;
@@ -340,7 +372,10 @@ impl Session {
         };
         // Persist the consumed OTP before exposing any secret. Backup rollback
         // and modified clients cannot be prevented by this local watermark.
-        atomic_write(&s.path, &s.encode()?, destination.is_none())?;
+        // Without an OTP an unlock changes nothing, so only a restore writes.
+        if destination.is_some() || s.otp.is_some() {
+            atomic_write(&s.path, &s.encode()?, destination.is_none())?;
+        }
         Ok(s)
     }
     fn encode(&self) -> Result<Vec<u8>> {
@@ -400,27 +435,33 @@ impl Session {
         let _lock = FileLock::acquire(&path)?;
         atomic_write(&path, &self.key_bytes, false)
     }
+    /// Whether this vault asks for an OTP code when it opens.
+    pub fn uses_otp(&self) -> bool {
+        self.otp.is_some()
+    }
     /// The TOTP secret again, to enroll a spare phone or app before the
     /// current one is lost. Storing it as a vault entry would not help: the
-    /// vault cannot be opened without the OTP. The vault is already open with
-    /// all four factors, but the password is asked again so a window left
-    /// open does not hand out the second factor.
+    /// vault cannot be opened without the OTP. The vault is already open, but
+    /// the password is asked again so a window left open does not hand out
+    /// the OTP.
     pub fn otp_setup(&self, password: &str) -> Result<OtpSetup> {
+        let otp = self.otp.as_ref().ok_or("이 금고는 OTP를 쓰지 않습니다.")?;
         if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
         let _verified = decode_key(&self.key_bytes, password)?;
         Ok(OtpSetup {
             id: self.id,
-            otp: boxed(&self.otp),
+            otp: boxed(otp),
         })
     }
     pub fn tag(&self) -> String {
         tag(&self.id)
     }
+    /// `input` is the phone's current code; ignored without an OTP.
     pub fn change_password(&mut self, current: &str, password: &str, input: &str) -> Result<()> {
         password_policy(password)?;
-        if current.len() > 1024 || input.len() != 6 || !input.bytes().all(|b| b.is_ascii_digit()) {
+        if current.len() > 1024 || (self.otp.is_some() && !otp_format(input)) {
             return Err(AUTH_ERROR);
         }
         let _lock = FileLock::acquire(&self.key_path)?;
@@ -428,9 +469,12 @@ impl Session {
             return Err("열쇠 파일이 다른 곳에서 변경되었습니다. 잠근 뒤 다시 여세요.");
         }
         let _verified = decode_key(&self.key_bytes, current)?;
-        let step = otp::verify(self.otp.as_slice(), input, otp::now()?, Some(self.last))
-            .map_err(|_| AUTH_ERROR)?;
-        let bytes = encode_key(&self.id, &self.key, &self.otp, password)?;
+        let step = match &self.otp {
+            Some(secret) => otp::verify(secret.as_slice(), input, otp::now()?, Some(self.last))
+                .map_err(|_| AUTH_ERROR)?,
+            None => self.last,
+        };
+        let bytes = encode_key(&self.id, &self.key, self.otp.as_deref(), password)?;
         let previous = self.last;
         self.last = step;
         if let Err(e) = self.save() {
@@ -443,36 +487,65 @@ impl Session {
     }
 }
 
-fn encode_key(id: &[u8; 16], key: &[u8; 32], otp: &[u8; 20], password: &str) -> Result<Vec<u8>> {
+fn otp_format(input: &str) -> bool {
+    input.len() == 6 && input.bytes().all(|b| b.is_ascii_digit())
+}
+/// GOYOKE01 (148 bytes) holds the data key and the TOTP secret, GOYOKE02
+/// (128 bytes) the data key only. The magic is part of the authenticated
+/// header, so one kind cannot be passed off as the other.
+fn encode_key(
+    id: &[u8; 16],
+    key: &[u8; 32],
+    otp: Option<&Zeroizing<[u8; 20]>>,
+    password: &str,
+) -> Result<Vec<u8>> {
     let salt = crypto::random::<32>()?;
     let nonce = crypto::random::<24>()?;
     let wrapping = crypto::derive(password.as_bytes(), &salt)?;
     let mut header = Vec::with_capacity(148);
-    header.extend_from_slice(KEY_MAGIC);
+    header.extend_from_slice(if otp.is_some() {
+        KEY_MAGIC
+    } else {
+        KEY_MAGIC_NO_OTP
+    });
     header.extend_from_slice(id);
     header.extend_from_slice(salt.as_slice());
     header.extend_from_slice(nonce.as_slice());
     let mut plain = Zeroizing::new([0u8; 52]);
     plain[..32].copy_from_slice(key);
-    plain[32..].copy_from_slice(otp);
-    let ciphertext = crypto::seal(&wrapping, &nonce, &header, plain.as_slice())?;
+    let used = match otp {
+        Some(secret) => {
+            plain[32..].copy_from_slice(secret.as_slice());
+            52
+        }
+        None => 32,
+    };
+    let ciphertext = crypto::seal(&wrapping, &nonce, &header, &plain[..used])?;
     header.extend_from_slice(&ciphertext);
     Ok(header)
 }
-type KeyMaterial = ([u8; 16], Box<Key>, Box<Zeroizing<[u8; 20]>>);
+type KeyMaterial = ([u8; 16], Box<Key>, Option<Box<Zeroizing<[u8; 20]>>>);
 fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
-    if data.len() != 148 || &data[..8] != KEY_MAGIC {
-        return Err(AUTH_ERROR);
-    }
+    let with_otp = match (data.len(), data.get(..8)) {
+        (148, Some(m)) if m == KEY_MAGIC => true,
+        (128, Some(m)) if m == KEY_MAGIC_NO_OTP => false,
+        _ => return Err(AUTH_ERROR),
+    };
     let id = data[8..24].try_into().unwrap();
     let salt = data[24..56].try_into().unwrap();
     let nonce = data[56..80].try_into().unwrap();
     let wrapping = crypto::derive(password.as_bytes(), salt)?;
     let plain = crypto::open(&wrapping, nonce, &data[..80], &data[80..])?;
+    if plain.len() != if with_otp { 52 } else { 32 } {
+        return Err(AUTH_ERROR);
+    }
     let mut key: Box<Key> = Box::default();
     key.copy_from_slice(&plain[..32]);
-    let mut otp: Box<Zeroizing<[u8; 20]>> = Box::default();
-    otp.copy_from_slice(&plain[32..]);
+    let otp = with_otp.then(|| {
+        let mut otp: Box<Zeroizing<[u8; 20]>> = Box::default();
+        otp.copy_from_slice(&plain[32..]);
+        otp
+    });
     Ok((id, key, otp))
 }
 fn encode_data(id: &[u8; 16], key: &[u8; 32], last: u64, entries: &[Entry]) -> Result<Vec<u8>> {
@@ -804,9 +877,11 @@ mod workflow_tests {
         let p = Provision::new().unwrap();
         let current = otp::code(p.otp.as_slice(), otp::now().unwrap() / 30, 6);
         let input = format!("{current:06}");
-        assert!(p.finish(&v, &k, "short", &input).is_err());
+        assert!(p.finish(&v, &k, "short", Some(&input)).is_err());
         assert!(!v.exists() && !k.exists());
-        let mut s = p.finish(&v, &k, pass, &input).unwrap();
+        let mut s = p.finish(&v, &k, pass, Some(&input)).unwrap();
+        assert!(s.uses_otp() && fs::read(&k).unwrap().len() == 148);
+        assert_eq!(key_uses_otp(&k), Some(true));
         let setup = s.otp_setup(pass).unwrap();
         assert_eq!(setup.code(), p.setup_code());
         assert!(setup.uri().contains(p.setup_code().as_str()));
@@ -879,6 +954,60 @@ mod workflow_tests {
         assert!(Session::unlock(&restored, &k, changed, &input).is_err()); // consumed OTP
     }
     #[test]
+    fn vault_without_otp() {
+        let t = Temp::new();
+        let v = t.file("vault.goyo");
+        let k = t.file("key.goyokey");
+        let b = t.file("backup.goyo");
+        let restored = t.file("restored.goyo");
+        let pass = "a long synthetic password";
+        let changed = "another synthetic password";
+        let p = Provision::new().unwrap();
+        let mut s = p.finish(&v, &k, pass, None).unwrap();
+        assert!(!s.uses_otp());
+        assert_eq!(key_uses_otp(&k), Some(false));
+        assert_eq!(fs::read(&k).unwrap().len(), 128);
+        assert_eq!(
+            s.otp_setup(pass).err(),
+            Some("이 금고는 OTP를 쓰지 않습니다.")
+        );
+        s.put(None, entry("no otp secret")).unwrap();
+        s.backup(&b).unwrap();
+        // Any code, or none, is ignored when the vault has no OTP.
+        s.change_password(pass, changed, "").unwrap();
+        assert!(
+            decode_key(&fs::read(&k).unwrap(), changed)
+                .unwrap()
+                .2
+                .is_none()
+        );
+        assert_eq!(key_uses_otp(&k), Some(false));
+        drop(s);
+        let before = fs::read(&v).unwrap();
+        assert_eq!(Session::unlock(&v, &k, pass, "").err(), Some(AUTH_ERROR));
+        let s = Session::unlock(&v, &k, changed, "").unwrap();
+        assert_eq!(&*s.entries[0].secret, "no otp secret");
+        // Opening again is fine (no code to consume), and nothing was rewritten.
+        drop(s);
+        let s = Session::unlock(&v, &k, changed, "123456").unwrap();
+        drop(s);
+        assert_eq!(fs::read(&v).unwrap(), before);
+        let rs = Session::restore(&b, &k, &restored, changed, "").unwrap();
+        assert_eq!(&*rs.entries[0].secret, "no otp secret");
+        drop(rs);
+        // An OTP vault still needs its code, before any key derivation.
+        let q = Provision::new().unwrap();
+        let (v2, k2) = (t.file("otp.goyo"), t.file("otp.goyokey"));
+        let code = format!(
+            "{:06}",
+            otp::code(q.otp.as_slice(), otp::now().unwrap() / 30, 6)
+        );
+        drop(q.finish(&v2, &k2, pass, Some(&code)).unwrap());
+        assert_eq!(Session::unlock(&v2, &k2, pass, "").err(), Some(AUTH_ERROR));
+        assert_eq!(key_uses_otp(&t.file("missing.goyokey")), None);
+        assert_eq!(key_uses_otp(&v), None);
+    }
+    #[test]
     fn restore_needs_no_sidecars_next_to_inputs() {
         let t = Temp::new();
         let src = t.file("readonly-backup.goyo");
@@ -886,7 +1015,7 @@ mod workflow_tests {
         let out = t.file("new.goyo");
         let p = Provision::new().unwrap();
         let pass = "readonly test password";
-        fs::write(&key, encode_key(&p.id, &p.key, &p.otp, pass).unwrap()).unwrap();
+        fs::write(&key, encode_key(&p.id, &p.key, Some(&p.otp), pass).unwrap()).unwrap();
         fs::write(
             &src,
             encode_data(&p.id, &p.key, 0, &[entry("saved")]).unwrap(),
@@ -994,7 +1123,7 @@ mod workflow_tests {
             "{:06}",
             otp::code(p.otp.as_slice(), otp::now().unwrap() / 30, 6)
         );
-        let mut s = p.finish(&v, &k, pass, &input).unwrap();
+        let mut s = p.finish(&v, &k, pass, Some(&input)).unwrap();
         s.last = 0;
         let before_key = fs::read(&k).unwrap();
         let before_vault = fs::read(&v).unwrap();
@@ -1109,14 +1238,29 @@ mod tests {
     }
     #[test]
     fn key_password_and_tamper() {
-        let bytes = encode_key(&[1; 16], &[2; 32], &[3; 20], "long-test-password").unwrap();
+        let secret = Zeroizing::new([3; 20]);
+        let bytes = encode_key(&[1; 16], &[2; 32], Some(&secret), "long-test-password").unwrap();
         let (_, key, otp) = decode_key(&bytes, "long-test-password").unwrap();
         assert_eq!(**key, [2; 32]);
-        assert_eq!(**otp, [3; 20]);
+        assert_eq!(**otp.unwrap(), [3; 20]);
         assert!(decode_key(&bytes, "wrong-password").is_err());
-        let mut bad = bytes;
+        let mut bad = bytes.clone();
         bad[8] ^= 1;
         assert!(decode_key(&bad, "long-test-password").is_err());
+        // Without an OTP: 128 bytes, data key only.
+        let plain = encode_key(&[1; 16], &[2; 32], None, "long-test-password").unwrap();
+        assert_eq!((plain.len(), &plain[..8]), (128, &b"GOYOKE02"[..]));
+        let (_, key, otp) = decode_key(&plain, "long-test-password").unwrap();
+        assert!(**key == [2; 32] && otp.is_none());
+        // Neither kind passes as the other: the magic is authenticated, and
+        // a relabelled or truncated file is refused.
+        let mut relabelled = bytes.clone();
+        relabelled[..8].copy_from_slice(b"GOYOKE02");
+        assert!(decode_key(&relabelled, "long-test-password").is_err());
+        assert!(decode_key(&relabelled[..128], "long-test-password").is_err());
+        let mut relabelled = plain;
+        relabelled[..8].copy_from_slice(b"GOYOKE01");
+        assert!(decode_key(&relabelled, "long-test-password").is_err());
     }
     #[test]
     fn storage_lock_and_overwrite() {

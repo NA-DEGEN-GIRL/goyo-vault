@@ -14,7 +14,7 @@
 ## What it does
 
 - **Fully offline:** no network code, no server, account, sync or auto-update.
-- **The app asks for four things:** the vault file (`.goyo`), a separate key file (`.goyokey`), your password and a phone OTP. The OTP is checked by the app only, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
+- **Opening a vault takes** the vault file (`.goyo`), a separate key file (`.goyokey`) and your password. You can add a phone OTP if you want (off by default). Only the two files and the password take part in decryption, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
 - **Auto-lock** of an open vault after 60 seconds idle (2 minutes on the OTP backup screen), after 30 seconds in another app, when you lock the screen, the PC sleeps or Windows shuts down.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
@@ -23,7 +23,7 @@
 ## Requirements
 
 - Windows 11, 64-bit, on a CPU with the RDSEED instruction. Most Intel CPUs from the 5th generation (Broadwell) on and all AMD Ryzen CPUs have it.
-- A TOTP app on your phone: Google Authenticator, or any app that uses the same standard (TOTP, 6 digits, 30 seconds).
+- (Only if you turn on the OTP) a TOTP app on your phone: Google Authenticator, or any app that uses the same standard (TOTP, 6 digits, 30 seconds).
 
 ## Install
 
@@ -38,6 +38,8 @@
 ### Updating
 
 Extract the new ZIP **to the same place, overwriting the old files.** Only the program and documents change; the vault (`.goyo`), key (`.goyokey`) and theme setting in that folder stay. Back up the vault and key first.
+
+Every vault made before 0.5.0 uses an OTP and still opens as before. A vault made **without an OTP** in 0.5.0 or later does not open in 0.4.x or earlier.
 
 > [!NOTE]
 > ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault elsewhere (다른 위치에 있는 금고 열기)**.
@@ -62,8 +64,17 @@ Switch between **Dark (다크)** and **Light (라이트)** in the top-right corn
 
 1. Choose where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder, so the key caption warns in red. **Pick another place for the key, such as a USB drive, with Browse (찾기).** In the same folder, anyone who copies the folder only has to guess the password. The app remembers the last vault and key it opened (`goyo-vault.paths`), so a key on a USB drive does not need browsing every time.
 2. Enter a **password** twice. It needs at least 12 characters; repeated characters and passwords made only of common words, keyboard walks or number runs (`password1234`, `qwerty123456`, `1q2w3e4r5t6y`) are refused. For seed phrases or private keys use **4–6 unrelated words**. Words from common-password lists such as `dragon` or `sunshine` do not count, so pick uncommon ones. The check only filters the obvious; passing it does not make a password safe. If the key file is stolen, a common password falls to one GPU within a day; four random words are out of reach. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
-3. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. Each vault gets its own entry name, such as `Goyo Vault (3FA2-C1D0)`; the same name appears above the OTP field when you open the vault, so with several vaults you can pick the right code. While you are in another app the QR and key are hidden, and **Back (뒤로)** keeps the same QR when you return. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
-4. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
+3. The **phone OTP (휴대폰 OTP)** is optional and off by default. Press **Create vault (금고 만들기)** and you are done.
+
+#### Turning on the OTP
+
+![Create a vault with the OTP on](docs/images/create-otp.png)
+
+With the OTP on, opening the vault also asks for the 6-digit code from your phone's OTP app. That stops someone who saw your password from opening the vault with this app on this PC, but not someone who copied the vault and key files (see [Please read](#please-read)). Losing the phone without an OTP backup locks you out, so turn it on only if that risk is worth it to you. **The choice is made when the vault is created and cannot be changed later.**
+
+1. Press **Use OTP (OTP 사용)** to show the QR. The passwords you typed stay; **Turn off OTP (OTP 끄기)** switches back.
+2. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. Each vault gets its own entry name, such as `Goyo Vault (3FA2-C1D0)`; the same name appears above the OTP field when you open the vault, so with several vaults you can pick the right code. While you are in another app the QR and key are hidden, and **Back (뒤로)** keeps the same QR when you return. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
+3. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
 
 > [!IMPORTANT]
 > - Scan the QR **only with the scanner inside your OTP app.** Pointing an ordinary camera or Google Lens at it, or taking a photo, can leave the secret in your photo library or in the cloud.
@@ -101,7 +112,7 @@ A quick trip to another app (pasting a copied value, a screenshot tool) does not
 
 Screens before a vault is open (open, new vault, restore) keep what you typed and the OTP setup QR when you switch to another app; only a password you made visible is hidden again. They are still cleared after the idle time (5 minutes for a new vault, 60 seconds otherwise) or when you lock Windows.
 
-To open it again, enter your password and a **new** OTP code. A code that was already used is refused, so if you just opened the vault, wait for the next code on your phone. If you moved the vault or key file, pick it with **Browse (찾기)**.
+To open it again, enter your password. If you moved the vault or key file, pick it with **Browse (찾기)**. For a vault with the OTP on, an OTP field appears to match the chosen key file; enter a **new** code. A code that was already used is refused, so if you just opened the vault, wait for the next code on your phone.
 
 ### 6. Back up and restore
 
@@ -119,17 +130,17 @@ Use the buttons at the bottom of the vault screen.
 
 ![Restore from backup](docs/images/restore.png)
 
-To restore, press **Restore from backup (백업에서 복원)** on the first-start or open screen. Choose the backup and the key file, enter your password and OTP, and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
+To restore, press **Restore from backup (백업에서 복원)** on the first-start or open screen. Choose the backup and the key file, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
 ### 7. Change the password
 
-**Change password (비밀번호 변경)** on the vault screen asks for the current password, the new one and a fresh OTP, then re-encrypts the key file. **Back up the key again** afterwards.
+**Change password (비밀번호 변경)** on the vault screen asks for the current password and the new one (and a fresh OTP code if the vault uses one), then re-encrypts the key file. **Back up the key again** afterwards.
 
 ### 8. OTP backup (in case you lose your phone)
 
 ![OTP backup](docs/images/otp-backup.png)
 
-Press **OTP backup (OTP 백업)** at the bottom of the vault screen and enter your current password to see the same QR and setup key as when you created the vault. Add it to a spare phone or another OTP app and it shows the same codes as your phone, so you can still open the vault if the phone is lost. Writing the setup key on paper and keeping it somewhere safe works too.
+Only vaults with the OTP on have this. Press **OTP backup (OTP 백업)** at the bottom of the vault screen and enter your current password to see the same QR and setup key as when you created the vault. Add it to a spare phone or another OTP app and it shows the same codes as your phone, so you can still open the vault if the phone is lost. Writing the setup key on paper and keeping it somewhere safe works too.
 
 > [!NOTE]
 > Saving the setup key as an entry inside the vault is not a backup: the vault needs the OTP to open, so after losing the phone you could not get that entry out. Move it to another device or to paper **before** the phone is gone.
@@ -143,9 +154,9 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 ## Please read
 
 - **Keep the key file separate. This matters most.** With vault and key in the same folder (the default) or in the same cloud account, whoever takes both only has to keep guessing the password, without any OTP. The app warns about such placements in red.
-- **There is no recovery.** Lose the vault file, the key file, the password or the OTP and this app cannot open the vault. There is no way around it. Prepare for a lost phone with **OTP backup**.
+- **There is no recovery.** Lose the vault file, the key file or the password (or the OTP, if you turned it on) and this app cannot open the vault. There is no way around it. With the OTP on, prepare for a lost phone with **OTP backup**.
 - **Do not delete `.goyotmp` files carelessly.** If power fails or a USB stick is pulled during a save, a temporary file such as `vault.goyo.<digits>.goyotmp` may be all that is left. It can be the only copy; rename it back. The app points this out when the main file is missing.
-- **The OTP is an extra check inside this app.** Someone with both files and your password can decrypt the vault without it. The real extra protection against stolen files is keeping the key file elsewhere.
+- **The OTP is an extra check inside this app, so it is off by default.** An OTP code changes every 30 seconds and cannot serve as an encryption key, and to check codes the app has to keep the same OTP secret as your phone in the key file. So someone with both files and your password can decrypt the vault without the OTP. What the OTP stops is someone who knows your password opening the vault with this app on this PC. The real extra protection against stolen files is keeping the key file elsewhere.
 - **Changing the password does not revoke old key copies.** An old key copy plus the old password still opens later versions of the vault. If you suspect a leak, destroy old copies yourself.
 - **Anything you copy can be read by other programs.** Copy only when needed. When you paste into a password or secret field, the app clears the clipboard right away, but it cannot erase what the source app left behind (for example in Win+V history).
 - **It cannot protect an infected PC.** A keylogger records the password, and malware running as you can copy the vault and key or replace the program. Malware with administrator rights, kernel attacks and a camera pointed at the screen are also out of reach. Use a hardware wallet for large holdings.
@@ -157,7 +168,7 @@ Choose dark or light in the top-right corner. The choice is stored as just `dark
 
 **Cryptography**
 - **XChaCha20-Poly1305** from RustCrypto: 256-bit key, 192-bit nonce, 128-bit tag. Data and headers are authenticated.
-- **Argon2id v1.3** with 256 MiB memory, 3 passes and parallelism 1 derives the key-file encryption key from the password. The key file holds a random data key and the OTP secret.
+- **Argon2id v1.3** with 256 MiB memory, 3 passes and parallelism 1 derives the key-file encryption key from the password. The key file holds a random data key, plus the OTP secret for vaults with the OTP on.
 - Randomness comes from the CPU's **RDSEED** conditioned with SHA-512. Windows CNG, DPAPI, BCrypt random and `getrandom` are not used. The CPU, firmware and any hypervisor are trusted; simple sanity checks do not certify the hardware.
 - The file format is documented in [docs/FORMAT.md](docs/FORMAT.md).
 
