@@ -1,10 +1,11 @@
-고요 금고 · Goyo Vault 0.5.2
+고요 금고 · Goyo Vault 0.6.0
 
 1. ZIP 전체를 나만 쓰고 동기화되지 않는 폴더(예: C:\Users\내이름\GoyoVault)에 푸세요.
    ZIP 안·임시 폴더, OneDrive가 백업하는 문서·바탕 화면, C:\ 바로 아래는 피하세요.
    실행 전에 PowerShell의 Get-FileHash로 ZIP의 SHA-256이 릴리스 설명과 같은지 확인하세요.
 2. goyo-vault.exe를 실행하고 '새 금고 만들기'를 누르세요.
    (서명되지 않은 프로그램이라 SmartScreen 경고가 나오면 '추가 정보 → 실행')
+   오른쪽 위 '한국어 | English'로 화면 언어를 바꿀 수 있습니다. (English: START-HERE.txt)
 3. 서로 관계없는 단어 4~6개로 된 긴 비밀번호를 정하세요. dragon·sunshine처럼 흔한
    비밀번호 목록에 있는 단어는 빼고 고르세요.
 4. 휴대폰 OTP는 기본 꺼짐이지만 켜 두기를 권장합니다. 켜면 비밀번호가 새어도 휴대폰

@@ -43,9 +43,9 @@ version = metadata['packages'][next(i for i,p in enumerate(metadata['packages'])
 # vault and key files that live next to the executable.
 folder = root/'dist'/'GoyoVault'
 folder.mkdir(parents=True, exist_ok=True)
-files = ['README.md','README.en.md','시작하기.txt','LICENSE-MIT','LICENSE-APACHE','docs/FORMAT.md','docs/SECURITY_REVIEW.md',
+files = ['README.md','README.en.md','시작하기.txt','START-HERE.txt','LICENSE-MIT','LICENSE-APACHE','docs/FORMAT.md','docs/SECURITY_REVIEW.md',
          'docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json']
-files += sorted(p.relative_to(root).as_posix() for p in (root/'docs/images').glob('*.png'))
+files += sorted(p.relative_to(root).as_posix() for p in (root/'docs/images').rglob('*.png'))
 if (root/'docs/OPUS_FINAL.md').exists(): files.append('docs/OPUS_FINAL.md')
 archive_files = []
 exe = folder/'goyo-vault.exe'

@@ -1,5 +1,6 @@
 //! Minimal Win32 UI/clipboard/defense bindings. Cryptography never calls Win32.
 #![allow(non_snake_case, dead_code)]
+use crate::i18n::tr;
 use std::{ffi::c_void, mem::size_of, path::PathBuf};
 use zeroize::Zeroizing;
 pub type Hwnd = isize;
@@ -244,6 +245,7 @@ unsafe extern "system" {
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    pub fn GetUserDefaultUILanguage() -> u16;
     pub fn GetModuleHandleW(name: *const u16) -> isize;
     pub fn IsDebuggerPresent() -> i32;
     pub fn CheckRemoteDebuggerPresent(proc: isize, present: *mut i32) -> i32;
@@ -468,27 +470,37 @@ pub fn clipboard_text(h: Hwnd) -> std::result::Result<Pasted, &'static str> {
 }
 pub fn message(h: Hwnd, s: &str) {
     modal(|| unsafe {
-        MessageBoxW(h, wide(s).as_ptr(), wide("고요 금고").as_ptr(), 0x40);
+        MessageBoxW(
+            h,
+            wide(tr(s)).as_ptr(),
+            wide(tr("고요 금고")).as_ptr(),
+            0x40,
+        );
     });
 }
 pub fn confirm(h: Hwnd, s: &str) -> bool {
     modal(|| unsafe {
-        MessageBoxW(h, wide(s).as_ptr(), wide("고요 금고").as_ptr(), 0x124) == 6
+        MessageBoxW(
+            h,
+            wide(tr(s)).as_ptr(),
+            wide(tr("고요 금고")).as_ptr(),
+            0x124,
+        ) == 6
     })
 }
 pub fn dialog(h: Hwnd, save: bool, key: bool) -> Option<PathBuf> {
     let mut file = vec![0u16; 32768];
-    let filter = wide(if key {
+    let filter = wide(tr(if key {
         "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0"
     } else {
         "고요 금고/백업 (*.goyo)\0*.goyo\0모든 파일\0*.*\0"
-    });
+    }));
     let ext = wide(if key { "goyokey" } else { "goyo" });
-    let title = wide(if save {
+    let title = wide(tr(if save {
         "새 파일 이름을 선택하세요 (기존 파일 덮어쓰기 금지)"
     } else {
         "파일 선택"
-    });
+    }));
     let mut o: OpenFile = unsafe { std::mem::zeroed() };
     o.size = size_of::<OpenFile>() as u32;
     o.owner = h;

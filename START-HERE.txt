@@ -1,0 +1,56 @@
+Goyo Vault 0.6.0
+
+1. Extract the whole ZIP to a folder only you use that is not synced
+   (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
+   folders, Documents/Desktop backed up by OneDrive, and folders directly under C:\.
+   Before running it, check with PowerShell's Get-FileHash that the ZIP's SHA-256
+   matches the release notes.
+2. Run goyo-vault.exe and press 'Create a new vault'.
+   (The program is unsigned; if SmartScreen warns, choose 'More info -> Run anyway'.)
+   Switch the language with '한국어 | English' in the top-right corner.
+3. Choose a long password of 4-6 unrelated words. Leave out words from common
+   password lists such as dragon or sunshine.
+4. The phone OTP is off by default, but turning it on is recommended. With it on, a
+   leaked password cannot open the vault in this app without your phone. It does not
+   stop someone who copied the files, and losing the phone without an OTP backup
+   locks you out.
+   To turn it on, press 'Turn on OTP', scan the QR with Google Authenticator
+   (+ -> Scan a QR code) and confirm with the 6-digit code. It cannot be changed later.
+   (Scan only inside the OTP app and never take a photo. If scanning fails, choose
+    + -> Enter a setup key -> Time based and type the key shown.
+    In case you lose your phone: after opening the vault, use 'OTP backup' to enroll
+    a spare device.)
+5. First try it with fake values: save an entry -> back up vault -> back up key -> restore.
+
+Requirements: Windows 11 x64, a CPU with RDSEED.
+On the first start the default files are vault.goyo and vault.goyokey next to the program.
+Updating: extract the new ZIP over the old one; the vault and key files in the
+GoyoVault folder stay.
+Opening a vault takes both files and the password (and the phone OTP if turned on).
+There is no recovery of any kind.
+Since 0.5.0, vaults made without an OTP do not open in 0.4.x or earlier.
+Most important: keep the key file away from the vault (a USB stick, for example). In the
+same folder, whoever takes the folder only has to guess your password, OTP or not.
+The app warns in red.
+There is no automatic backup. Do it yourself:
+  - Vault backup: after adding or changing entries (especially a new seed phrase)
+  - Key backup: once right after creating the vault, and after every password change
+  - OTP backup: once right after creating the vault, if the OTP is on (spare phone or paper)
+  - Password: the app cannot recover it; remember it or store it safely
+Keep vault backups and key backups on different drives, and try a restore now and then.
+
+An open vault locks after more than 30 seconds in another app.
+Anything shown and the copy permission are hidden the moment you switch.
+The create and restore screens keep what you typed when you switch apps
+(cleared after 5 minutes / 60 seconds of inactivity).
+If you copy a value from another app while editing, paste it within 30 seconds.
+The secret and notes fields block input methods (IME); paste text that needs one.
+To copy a value from the vault, turn on 'Allow copy' first.
+A copied value is wiped from the clipboard after 15 seconds.
+Changing the password does not revoke old key copies.
+
+This is a development release. It has AI reviews and automated tests but no
+professional security audit. It cannot make an infected Windows safe or stop every
+form of capture.
+Full guide and limits: README.en.md (한국어: README.md)
+Review notes (in Korean): docs/SECURITY_REVIEW.md

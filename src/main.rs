@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 compile_error!("Goyo Vault requires Windows x64.");
+mod i18n;
 mod theme;
 mod win;
 use goyo_vault::{
     crypto,
     vault::{Entry, OtpSetup, Provision, Session, key_uses_otp, leftover_temp, vault_tag},
 };
+use i18n::{fill, tr};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -85,6 +87,9 @@ const AWAY_LOCK: Duration = Duration::from_secs(30);
 const OTP_SETUP: i32 = 135;
 /// Create: turns the optional OTP on or off.
 const OTP_TOGGLE: i32 = 136;
+/// Language switch next to the theme switch.
+const LANG_KO: i32 = 137;
+const LANG_EN: i32 = 138;
 const KEY_NOTE: i32 = 220;
 const PEEK_FIELDS: [(i32, i32); 3] = [
     (PEEK_PASS, PASS),
@@ -103,6 +108,8 @@ const CARD_W: i32 = 464;
 const HINT: (i32, i32, i32, i32) = (CARD_X, 372, CARD_W, 40);
 /// Dark/light segmented switch in the top-right corner of every screen.
 const THEME_SWITCH: (i32, i32, i32, i32) = (704, 21, 132, 36);
+/// 한국어 | English, left of the theme switch.
+const LANG_SWITCH: (i32, i32, i32, i32) = (554, 21, 146, 36);
 /// Create with the OTP off: the painted card that recommends it.
 const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
 /// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
@@ -176,7 +183,7 @@ struct App {
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
-        let (scale, font) = theme::with(|t| (t.scale, t.body)).unwrap_or((1.0, 0));
+        let (scale, font) = theme::with(|t| (t.scale, t.body())).unwrap_or((1.0, 0));
         let base = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_owned()))
@@ -263,7 +270,7 @@ impl App {
             CreateWindowExW(
                 0,
                 wide(class).as_ptr(),
-                secret_wide(text).as_ptr(),
+                secret_wide(if class == "EDIT" { text } else { tr(text) }).as_ptr(),
                 0x50000000 | style,
                 self.px(x),
                 self.px(y),
@@ -280,7 +287,7 @@ impl App {
         }
         unsafe {
             // No redraw yet: owner-drawn and toned controls get their style next.
-            SendMessageW(hwnd, 0x30, self.font as usize, 0);
+            SendMessageW(hwnd, 0x30, self.font_of(|t| t.body()) as usize, 0);
         }
         self.children.push(hwnd);
         if id != 0 {
@@ -307,11 +314,11 @@ impl App {
         h
     }
     fn label(&mut self, text: &str, x: i32, y: i32, w: i32) {
-        let small = self.font_of(|t| t.small);
+        let small = self.font_of(|t| t.small());
         self.text(0, text, (x, y, w, 20), small, TONE_MUTED, 0);
     }
     fn note(&mut self, text: &str, x: i32, y: i32, w: i32, h: i32) {
-        let small = self.font_of(|t| t.small);
+        let small = self.font_of(|t| t.small());
         self.text(0, text, (x, y, w, h), small, TONE_MUTED, 0);
     }
     #[allow(clippy::too_many_arguments)] // Native control geometry follows Win32.
@@ -524,7 +531,7 @@ impl App {
             } else {
                 "비밀번호 보기"
             };
-            SetWindowTextW(b, wide(name).as_ptr());
+            SetWindowTextW(b, wide(tr(name)).as_ptr());
             InvalidateRect(b, null(), 0);
             InvalidateRect(edit, null(), 1);
         }
@@ -566,13 +573,13 @@ impl App {
                     TONE_MUTED
                 },
             );
-            SetWindowTextW(h, wide(text).as_ptr());
+            SetWindowTextW(h, wide(tr(text)).as_ptr());
             InvalidateRect(h, null(), 1);
         }
     }
     fn path_field(&mut self, id: i32, browse: i32, label: &str, value: &str, y: i32) {
         // The key caption is addressable: refresh_key_note rewrites it.
-        let small = self.font_of(|t| t.small);
+        let small = self.font_of(|t| t.small());
         let caption = if id == KPATH { KEY_NOTE } else { 0 };
         self.text(caption, label, (AX, y, AW, 20), small, TONE_MUTED, 0);
         self.input(id, value, (AX, y + 22, AW, 40), false, false, 64);
@@ -642,7 +649,7 @@ impl App {
         unsafe {
             // Tone first: setting the text repaints the label.
             SetWindowLongPtrW(h, -21, tone);
-            SetWindowTextW(h, wide(text).as_ptr());
+            SetWindowTextW(h, wide(tr(text)).as_ptr());
             InvalidateRect(h, null(), 1);
         }
     }
@@ -685,7 +692,7 @@ impl App {
     }
     /// Labels of the OTP card; the frame, QR and key are painted.
     fn enrollment_labels(&mut self, tag: &str, footer: &str) {
-        let strong = self.font_of(|t| t.strong);
+        let strong = self.font_of(|t| t.strong());
         let (cx, cy, cw, _) = self.enroll();
         let (rx, rw) = (cx + 180, cw - 196);
         // Create keeps room for the "OTP 끄기" button at the top right.
@@ -696,7 +703,7 @@ impl App {
         };
         self.text(
             0,
-            &format!("휴대폰 OTP 등록 · {tag}"),
+            &fill("휴대폰 OTP 등록 · {tag}", &[&tag]),
             (rx, cy + 14, head, 22),
             strong,
             TONE_TEXT,
@@ -762,7 +769,7 @@ impl App {
             Screen::Password => self.build_password(),
             Screen::OtpBackup => self.build_otp_backup(),
         }
-        let small = self.font_of(|t| t.small);
+        let small = self.font_of(|t| t.small());
         let status = self.status.clone();
         let tone = std::mem::replace(&mut self.status_tone, TONE_MUTED);
         self.text(STATUS, &status, (40, 690, 796, 40), small, tone, 0);
@@ -774,6 +781,15 @@ impl App {
         {
             let variant = if on { theme::TAB_ON } else { theme::TAB };
             self.button(id, name, x + 2 + i as i32 * 65, y + 2, 63, 32, variant);
+        }
+        let english = i18n::english();
+        let (x, y, _, _) = LANG_SWITCH;
+        for (i, (id, name, on)) in [(LANG_KO, "한국어", !english), (LANG_EN, "English", english)]
+            .into_iter()
+            .enumerate()
+        {
+            let variant = if on { theme::TAB_ON } else { theme::TAB };
+            self.button(id, name, x + 2 + i as i32 * 73, y + 2, 71, 32, variant);
         }
         self.theme_scrollbars();
         unsafe {
@@ -811,6 +827,25 @@ impl App {
             RedrawWindow(self.hwnd, null(), 0, 0x1 | 0x4 | 0x80 | 0x400);
         }
         save_theme(dark);
+    }
+    /// Switches the interface language. The screen is rebuilt with the new
+    /// captions; typed passwords, codes and entry fields are put back.
+    fn set_language(&mut self, english: bool) {
+        if english == i18n::english() {
+            return;
+        }
+        i18n::set_english(english);
+        save_language(english);
+        self.status_tone = unsafe { GetWindowLongPtrW(self.handle(STATUS), -21) };
+        let typed: Vec<i32> = [PASS, CONFIRM, OTP, CURRENT_PASS, TITLE, KIND, SECRET, NOTES]
+            .into_iter()
+            .filter(|&id| self.handle(id) != 0)
+            .collect();
+        self.rebuild_keeping(&typed);
+        let button = if english { LANG_EN } else { LANG_KO };
+        unsafe {
+            SetFocus(self.handle(button));
+        }
     }
     /// Empty state: nothing to unlock yet, so no unlock form. The badge,
     /// heading and the "what you need" card are painted.
@@ -857,7 +892,7 @@ impl App {
         let vault_path = vault_path.to_string_lossy().into_owned();
         let key_path = key_path.to_string_lossy().into_owned();
         let dest_path = self.dest_path.to_string_lossy().into_owned();
-        let title = self.font_of(|t| t.title);
+        let title = self.font_of(|t| t.title());
         let heading = match mode {
             Screen::Create => "새 금고 만들기",
             Screen::Restore => "백업에서 복원",
@@ -963,7 +998,7 @@ impl App {
                     &self.vault_path
                 };
                 let caption = match vault_tag(source) {
-                    Some(tag) => format!("OTP 6자리 · {tag}"),
+                    Some(tag) => fill("OTP 6자리 · {tag}", &[&tag]),
                     None => "Google OTP 6자리".into(),
                 };
                 self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
@@ -1016,12 +1051,12 @@ impl App {
         }
     }
     fn build_vault(&mut self) {
-        let small = self.font_of(|t| t.small);
-        self.button(LOCK, "잠금", 612, 22, 84, 34, theme::SECONDARY);
+        let small = self.font_of(|t| t.small());
+        self.button(LOCK, "잠금", 462, 22, 84, 34, theme::SECONDARY);
         let count = self.session.as_ref().map_or(0, |s| s.entries.len());
         self.text(
             0,
-            &format!("항목 {count}개"),
+            &fill("항목 {count}개", &[&count]),
             (40, 90, 150, 22),
             small,
             TONE_MUTED,
@@ -1075,23 +1110,23 @@ impl App {
         self.button(EDIT, "수정", 676, 104, 64, 32, theme::GHOST);
         self.button(DELETE, "삭제", 748, 104, 64, 32, theme::DANGER_GHOST);
         self.button(REVEAL, "15초 보기", CARD_X, 322, 104, 36, theme::SECONDARY);
-        self.button(TOGGLE, "복사 허용", 464, 322, 124, 36, theme::TOGGLE);
-        self.button(COPY, "복사", 596, 322, 88, 36, theme::PRIMARY);
+        self.button(TOGGLE, "복사 허용", 464, 322, 136, 36, theme::TOGGLE);
+        self.button(COPY, "복사", 608, 322, 88, 36, theme::PRIMARY);
         unsafe {
             EnableWindow(self.handle(COPY), 0);
         }
         self.button(PREVIOUS, "‹", 728, 322, 40, 36, theme::GHOST);
         self.button(NEXT, "›", 772, 322, 40, 36, theme::GHOST);
-        self.button(BACKUP, "금고 백업", 40, 642, 100, 34, theme::SECONDARY);
-        self.button(KEYBACKUP, "열쇠 백업", 148, 642, 100, 34, theme::SECONDARY);
-        self.button(CHANGE, "비밀번호 변경", 256, 642, 124, 34, theme::SECONDARY);
+        self.button(BACKUP, "금고 백업", 40, 642, 112, 34, theme::SECONDARY);
+        self.button(KEYBACKUP, "열쇠 백업", 160, 642, 104, 34, theme::SECONDARY);
+        self.button(CHANGE, "비밀번호 변경", 272, 642, 140, 34, theme::SECONDARY);
         if self.session.as_ref().is_some_and(Session::uses_otp) {
-            self.button(OTP_SETUP, "OTP 백업", 388, 642, 100, 34, theme::SECONDARY);
+            self.button(OTP_SETUP, "OTP 백업", 420, 642, 104, 34, theme::SECONDARY);
         }
         self.text(
             0,
             "60초 미사용·다른 앱 30초·화면 잠금 시 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
-            (504, 640, 332, 38),
+            (536, 640, 300, 38),
             small,
             TONE_MUTED,
             2,
@@ -1102,7 +1137,7 @@ impl App {
         }
     }
     fn build_edit(&mut self) {
-        let title = self.font_of(|t| t.title);
+        let title = self.font_of(|t| t.title());
         let heading = if self.editing.is_some() {
             "항목 수정"
         } else {
@@ -1116,14 +1151,15 @@ impl App {
         {
             [
                 Zeroizing::new(e.title.to_string()),
-                Zeroizing::new(e.kind.to_string()),
+                // Built-in types such as "니모닉" follow the interface language.
+                Zeroizing::new(tr(&e.kind).to_string()),
                 Zeroizing::new(e.secret.to_string()),
                 Zeroizing::new(e.notes.to_string()),
             ]
         } else {
             [
                 Zeroizing::new(String::new()),
-                Zeroizing::new(KIND_PRESETS[0].into()),
+                Zeroizing::new(tr(KIND_PRESETS[0]).into()),
                 Zeroizing::new(String::new()),
                 Zeroizing::new(String::new()),
             ]
@@ -1168,7 +1204,7 @@ impl App {
         }
     }
     fn build_password(&mut self) {
-        let title = self.font_of(|t| t.title);
+        let title = self.font_of(|t| t.title());
         self.text(0, "비밀번호 변경", (AX, 80, AW, 34), title, TONE_TEXT, 0);
         let otp = self
             .session
@@ -1192,7 +1228,7 @@ impl App {
         if let Some(tag) = otp {
             self.field(
                 OTP,
-                &format!("새 OTP 6자리 · {tag}"),
+                &fill("새 OTP 6자리 · {tag}", &[&tag]),
                 "",
                 AX,
                 376,
@@ -1233,7 +1269,7 @@ impl App {
     /// Shows the OTP QR again so a spare phone or app can be enrolled while
     /// the current one still works. Asks for the password first.
     fn build_otp_backup(&mut self) {
-        let title = self.font_of(|t| t.title);
+        let title = self.font_of(|t| t.title());
         self.text(0, "OTP 백업", (AX, 80, AW, 34), title, TONE_TEXT, 0);
         if self.otp_setup.is_some() {
             self.note(
@@ -1308,7 +1344,7 @@ impl App {
             } else {
                 "15초 보기"
             };
-            SetWindowTextW(self.handle(REVEAL), wide(reveal).as_ptr());
+            SetWindowTextW(self.handle(REVEAL), wide(tr(reveal)).as_ptr());
             let focus = GetFocus();
             for (id, show) in [
                 (EDIT, entry.is_some()),
@@ -1735,11 +1771,12 @@ impl App {
                 }
             }
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
+            LANG_KO | LANG_EN => self.set_language(id == LANG_EN),
             PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT => self.peek(id)?,
             PRESET..=PRESET_LAST => unsafe {
                 let kind = self.handle(KIND);
                 let name = KIND_PRESETS[(id - PRESET) as usize];
-                SetWindowTextW(kind, wide(name).as_ptr());
+                SetWindowTextW(kind, wide(tr(name)).as_ptr());
                 SendMessageW(kind, 0xcd, 0, 0);
                 SetFocus(self.handle(SECRET));
                 InvalidateRect(self.hwnd, null(), 0);
@@ -1836,7 +1873,7 @@ impl App {
         {
             return false;
         }
-        if matches!(id, THEME_DARK | THEME_LIGHT) {
+        if matches!(id, THEME_DARK | THEME_LIGHT | LANG_KO | LANG_EN) {
             return true;
         }
         if id == OTP_SETUP && !self.session.as_ref().is_some_and(Session::uses_otp) {
@@ -2022,20 +2059,19 @@ impl App {
         let left = |t: Instant| t.saturating_duration_since(now).as_millis().div_ceil(1000);
         let mut lines = vec![];
         if let Some(t) = self.reveal_until {
-            lines.push(format!("{}초 뒤 다시 가려집니다.", left(t)));
+            lines.push(fill("{}초 뒤 다시 가려집니다.", &[&left(t)]));
         }
         if let Some(t) = self.copy_until {
-            lines.push(format!("복사 허용 중 · {}초 안에 복사하세요.", left(t)));
+            lines.push(fill("복사 허용 중 · {}초 안에 복사하세요.", &[&left(t)]));
         } else if let Some((_, t)) = self.clipboard {
             lines.push(if t > now {
-                format!("복사한 값을 {}초 뒤 클립보드에서 지웁니다.", left(t))
+                fill("복사한 값을 {}초 뒤 클립보드에서 지웁니다.", &[&left(t)])
             } else {
-                "클립보드를 지우는 중입니다.".into()
+                tr("클립보드를 지우는 중입니다.").into()
             });
         }
         if lines.is_empty() {
-            "복사하려면 먼저 '복사 허용'을 켜세요.
-복사한 값은 앱을 전환해도 15초간 유지된 뒤 지워집니다."
+            tr("복사하려면 먼저 '복사 허용'을 켜세요.\n복사한 값은 앱을 전환해도 15초간 유지된 뒤 지워집니다.")
                 .into()
         } else {
             lines.join("\n")
@@ -2087,31 +2123,31 @@ impl App {
         }
     }
     unsafe fn draw_screen(&self, dc: isize) {
-        let Some((title, small, code)) = theme::with(|t| (t.title, t.small, t.code)) else {
+        let Some((title, small, code)) = theme::with(|t| (t.title(), t.small(), t.code)) else {
             return;
         };
         let p = theme::palette();
         unsafe {
             // Brand and lock state.
-            let brand = "고요 금고";
+            let brand = tr("고요 금고");
             theme::text(dc, brand, &self.r(40, 22, 200, 34), title, p.text, LINE);
             let open = self.session.as_ref();
             let state = match open {
-                Some(s) => format!(
+                Some(s) => fill(
                     "열림 · {}",
-                    s.path
+                    &[&s.path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
+                        .unwrap_or_default()],
                 ),
-                None => "잠김".into(),
+                None => tr("잠김").into(),
             };
             let x = self.px(40) + theme::text_width(dc, brand, title) + self.px(14);
             let width = theme::text_width(dc, &state, small) + self.px(32);
             let pill = Rect {
                 left: x,
                 top: self.px(28),
-                right: (x + width).min(self.px(596)),
+                right: (x + width).min(self.px(LANG_SWITCH.0 - 108)),
                 bottom: self.px(50),
             };
             theme::round(dc, &pill, self.px(11), Some(p.surface), None);
@@ -2127,14 +2163,15 @@ impl App {
             label.left += self.px(22);
             label.right -= self.px(8);
             theme::text(dc, &state, &label, small, p.muted, LINE);
-            let (sx, sy, sw, sh) = THEME_SWITCH;
-            theme::round(
-                dc,
-                &self.r(sx, sy, sw, sh),
-                self.px(9),
-                Some(p.surface),
-                None,
-            );
+            for (sx, sy, sw, sh) in [THEME_SWITCH, LANG_SWITCH] {
+                theme::round(
+                    dc,
+                    &self.r(sx, sy, sw, sh),
+                    self.px(9),
+                    Some(p.surface),
+                    None,
+                );
+            }
             match self.screen {
                 Screen::Welcome => self.draw_welcome(dc, &p),
                 Screen::Login if self.handle(CREATE) != 0 => {
@@ -2181,7 +2218,7 @@ impl App {
     /// Create with the OTP off: an accent frame, the heading and a "권장"
     /// badge, painted so the badge can sit right after the heading.
     unsafe fn draw_otp_offer(&self, dc: isize, p: &theme::Palette, small: isize) {
-        let Some(strong) = theme::with(|t| t.strong) else {
+        let Some(strong) = theme::with(|t| t.strong()) else {
             return;
         };
         let (x, y, w, h) = CREATE_OTP_CARD;
@@ -2193,7 +2230,7 @@ impl App {
                 Some(p.bg),
                 Some(p.accent),
             );
-            let heading = "휴대폰 OTP로 한 번 더 잠그기";
+            let heading = tr("휴대폰 OTP로 한 번 더 잠그기");
             theme::text(
                 dc,
                 heading,
@@ -2206,11 +2243,11 @@ impl App {
             let badge = Rect {
                 left,
                 top: self.px(y + 22),
-                right: left + theme::text_width(dc, "권장", small) + self.px(18),
+                right: left + theme::text_width(dc, tr("권장"), small) + self.px(18),
                 bottom: self.px(y + 42),
             };
             theme::round(dc, &badge, self.px(10), None, Some(p.accent));
-            theme::text(dc, "권장", &badge, small, p.accent, DT_CENTER | LINE);
+            theme::text(dc, tr("권장"), &badge, small, p.accent, DT_CENTER | LINE);
         }
     }
     /// While another app is in front the card shows no QR and no key.
@@ -2221,7 +2258,7 @@ impl App {
             theme::round(dc, &tile, self.px(8), Some(p.surface), None);
             theme::text(
                 dc,
-                "창을 선택하면\nQR이 다시 보입니다",
+                tr("창을 선택하면\nQR이 다시 보입니다"),
                 &tile,
                 small,
                 p.muted,
@@ -2290,7 +2327,7 @@ impl App {
     }
     unsafe fn draw_welcome(&self, dc: isize, p: &theme::Palette) {
         let Some((title, small, strong, icon)) =
-            theme::with(|t| (t.title, t.small, t.strong, t.icon))
+            theme::with(|t| (t.title(), t.small(), t.strong(), t.icon))
         else {
             return;
         };
@@ -2300,11 +2337,13 @@ impl App {
             theme::round(dc, &badge, self.px(16), Some(p.surface), None);
             // Segoe Fluent Icons "Lock".
             theme::text(dc, "\u{E72E}", &badge, icon, p.text, DT_CENTER | LINE);
-            let heading = "아직 저장된 금고가 없습니다";
+            let heading = tr("아직 저장된 금고가 없습니다");
             theme::text(dc, heading, &self.r(AX, 194, AW, 36), title, p.text, center);
             theme::text(
                 dc,
-                "비밀번호·니모닉·프라이빗키를 암호화해 이 PC에 보관합니다.\n처음 사용한다면 새 금고를 만드세요.",
+                tr(
+                    "비밀번호·니모닉·프라이빗키를 암호화해 이 PC에 보관합니다.\n처음 사용한다면 새 금고를 만드세요.",
+                ),
                 &self.r(AX, 236, AW, 44),
                 small,
                 p.muted,
@@ -2314,7 +2353,7 @@ impl App {
             theme::round(dc, &card, self.px(12), None, Some(p.border));
             theme::text(
                 dc,
-                "금고를 열 때 필요한 것",
+                tr("금고를 열 때 필요한 것"),
                 &self.r(AX + 20, 486, AW - 40, 20),
                 small,
                 p.muted,
@@ -2331,7 +2370,7 @@ impl App {
             .enumerate()
             {
                 let x = AX + 20 + i as i32 * column;
-                let number = format!("{}  {name}", i + 1);
+                let number = format!("{}  {}", i + 1, tr(name));
                 theme::text(
                     dc,
                     &number,
@@ -2343,7 +2382,7 @@ impl App {
                 let wrap = DT_WORDBREAK | DT_NOPREFIX;
                 theme::text(
                     dc,
-                    about,
+                    tr(about),
                     &self.r(x, 546, column - 8, 54),
                     small,
                     p.muted,
@@ -2353,18 +2392,18 @@ impl App {
         }
     }
     unsafe fn draw_detail(&self, dc: isize, small: isize, title: isize) {
-        let body = self.font;
+        let body = self.font_of(|t| t.body());
         let p = theme::palette();
         unsafe {
             let card = self.r(324, 82, 512, 542);
             theme::round(dc, &card, self.px(12), Some(p.bg), Some(p.border));
             let Some(e) = self.entry() else {
                 let empty = self.session.as_ref().is_none_or(|s| s.entries.is_empty());
-                let message = if empty {
+                let message = tr(if empty {
                     "아직 저장된 항목이 없습니다.\n'+ 새 항목'으로 첫 비밀정보를 추가하세요."
                 } else {
                     "왼쪽 목록에서 항목을 선택하세요."
-                };
+                });
                 let r = self.r(CARD_X, 320, CARD_W, 60);
                 theme::text(
                     dc,
@@ -2384,11 +2423,12 @@ impl App {
                 p.text,
                 LINE,
             );
-            let kind: &str = if e.kind.is_empty() {
+            // Built-in types such as "니모닉" show in the interface language.
+            let kind = tr(if e.kind.is_empty() {
                 "종류 없음"
             } else {
                 &e.kind
-            };
+            });
             let chip_w = (theme::text_width(dc, kind, small) + self.px(24)).min(self.px(CARD_W));
             let chip = Rect {
                 left: self.px(CARD_X),
@@ -2401,7 +2441,7 @@ impl App {
             theme::fill(dc, &self.r(CARD_X, 184, CARD_W, 1), p.border);
             theme::text(
                 dc,
-                "비밀정보",
+                tr("비밀정보"),
                 &self.r(CARD_X, 198, 200, 20),
                 small,
                 p.muted,
@@ -2419,11 +2459,11 @@ impl App {
                         theme::text(dc, &pages[index], &secret_rect, body, p.text, wrap);
                         if pages.len() > 1 {
                             let r = self.r(612, 198, 200, 20);
-                            let n = format!("{} / {} 페이지", index + 1, pages.len());
+                            let n = fill("{} / {} 페이지", &[&(index + 1), &pages.len()]);
                             theme::text(dc, &n, &r, small, p.muted, DT_RIGHT | LINE);
                         }
                     }
-                    Err(err) => theme::text(dc, err, &secret_rect, body, p.danger, wrap),
+                    Err(err) => theme::text(dc, tr(err), &secret_rect, body, p.danger, wrap),
                 }
             } else {
                 let r = self.r(CARD_X + 16, 224, 430, 84);
@@ -2434,7 +2474,7 @@ impl App {
             theme::fill(dc, &self.r(CARD_X, 428, CARD_W, 1), p.border);
             theme::text(
                 dc,
-                "메모",
+                tr("메모"),
                 &self.r(CARD_X, 442, 200, 20),
                 small,
                 p.muted,
@@ -2442,12 +2482,12 @@ impl App {
             );
             let notes = self.r(CARD_X, 468, CARD_W, 132);
             if e.notes.is_empty() {
-                theme::text(dc, "메모 없음", &notes, body, p.faint, wrap);
+                theme::text(dc, tr("메모 없음"), &notes, body, p.faint, wrap);
             } else if revealed {
                 let flags = wrap | DT_EDITCONTROL | DT_END_ELLIPSIS;
                 theme::text(dc, &e.notes, &notes, body, p.text, flags);
             } else {
-                let hidden = "가려짐 · 보기를 누르면 비밀정보와 함께 표시됩니다.";
+                let hidden = tr("가려짐 · 보기를 누르면 비밀정보와 함께 표시됩니다.");
                 theme::text(dc, hidden, &notes, small, p.muted, wrap);
             }
         }
@@ -2458,7 +2498,7 @@ impl App {
             if dc == 0 {
                 return Err("화면 글자 크기를 측정할 수 없습니다.");
             }
-            let previous = SelectObject(dc, self.font);
+            let previous = SelectObject(dc, self.font_of(|t| t.body()));
             let result = secret_pages(text, self.px(430), |line| {
                 let w = secret_wide(line);
                 let mut size = Size::default();
@@ -2993,6 +3033,36 @@ fn load_theme() -> bool {
         .and_then(|f| f.take(16).read_to_end(&mut buf).ok());
     !(read.is_some() && buf.trim_ascii() == b"light")
 }
+/// "en" or "ko" next to the exe. Without it: the Windows display language.
+fn language_file() -> Option<PathBuf> {
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join("goyo-vault.lang"),
+    )
+}
+fn load_language() -> bool {
+    use std::io::Read;
+    if cfg!(test) {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let read = language_file()
+        .and_then(|p| std::fs::File::open(p).ok())
+        .and_then(|f| f.take(16).read_to_end(&mut buf).ok());
+    match (read, buf.trim_ascii()) {
+        (Some(_), b"en") => true,
+        (Some(_), b"ko") => false,
+        // LANG_KOREAN is 0x12.
+        _ => (unsafe { GetUserDefaultUILanguage() } & 0x3ff) != 0x12,
+    }
+}
+fn save_language(english: bool) {
+    if let Some(p) = language_file() {
+        write_setting(&p, if english { b"en" } else { b"ko" });
+    }
+}
 fn save_theme(dark: bool) {
     if let Some(p) = theme_file() {
         write_setting(&p, if dark { b"dark" } else { b"light" });
@@ -3219,6 +3289,7 @@ fn main() {
         }
         if !self_check {
             theme::set_dark(load_theme());
+            i18n::set_english(load_language());
         }
         let h = create_window(instance, &name);
         if h == 0 {
@@ -3412,64 +3483,207 @@ mod tests {
         std::fs::remove_file(dir.join("vault.goyo")).unwrap();
         std::fs::remove_dir(&dir).unwrap();
     }
-    /// Every label's text fits its box at this machine's DPI: a STATIC clips
-    /// whatever does not fit, so a cut-off line would go unnoticed. Labels on
-    /// the OTP card end clear of its painted border. The status line is also
-    /// checked against every long message in the source.
-    #[test]
-    fn labels_fit_their_boxes() {
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn GetClassNameW(h: Hwnd, name: *mut u16, n: i32) -> i32;
+    /// Puts the interface back in Korean when a test that switched to
+    /// English ends, even by a failed assertion.
+    struct KoreanAfter;
+    impl Drop for KoreanAfter {
+        fn drop(&mut self) {
+            i18n::set_english(false);
         }
-        unsafe fn needed(h: Hwnd, text: &str) -> (i32, i32) {
-            unsafe {
-                let mut r = Rect::default();
-                GetClientRect(h, &mut r);
-                let dc = GetDC(h);
-                let old = SelectObject(dc, SendMessageW(h, 0x31, 0, 0)); // WM_GETFONT
-                let mut calc = Rect {
-                    left: 0,
-                    top: 0,
-                    right: r.right,
-                    bottom: 0,
-                };
-                let s = wide(text);
-                // DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS | DT_NOPREFIX
-                DrawTextW(dc, s.as_ptr(), -1, &mut calc, 0x400 | 0x10 | 0x40 | 0x800);
-                SelectObject(dc, old);
-                ReleaseDC(h, dc);
-                (calc.bottom, r.bottom)
-            }
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetClassNameW(h: Hwnd, name: *mut u16, n: i32) -> i32;
+    }
+    fn class_of(h: Hwnd) -> String {
+        let mut class = [0u16; 16];
+        let n = unsafe { GetClassNameW(h, class.as_mut_ptr(), 16) }.max(0) as usize;
+        String::from_utf16_lossy(&class[..n])
+    }
+    fn caption(h: Hwnd) -> String {
+        let mut buf = vec![0u16; 2048];
+        let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), 2048) }.max(0) as usize;
+        String::from_utf16_lossy(&buf[..n])
+    }
+    fn has_korean(s: &str) -> bool {
+        s.chars().any(|c| {
+            ('\u{ac00}'..='\u{d7a3}').contains(&c) || ('\u{3131}'..='\u{318e}').contains(&c)
+        })
+    }
+    /// Text painted by draw_screen (not child controls), from an off-screen DC.
+    unsafe fn painted(app: &App) -> Vec<String> {
+        unsafe {
+            theme::PAINTED.with(|p| p.borrow_mut().clear());
+            let screen = GetDC(app.hwnd);
+            let dc = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, 1600, 1400);
+            ReleaseDC(app.hwnd, screen);
+            let old = SelectObject(dc, bmp);
+            app.draw_screen(dc);
+            SelectObject(dc, old);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            theme::PAINTED.with(|p| p.take())
         }
-        let dir = std::env::temp_dir().join(format!(
-            "goyo-fit-{:x}",
-            u64::from_le_bytes(*crypto::random::<8>().unwrap())
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let session = synthetic_session(&dir, "synthetic layout password");
-        let mut failures = vec![];
+    }
+    /// Builds every screen with synthetic data and calls `visit` on each:
+    /// first run, open, restore, create with and without the OTP, the vault
+    /// empty and with a shown entry, edit, password change, OTP backup with
+    /// and without the QR.
+    unsafe fn each_screen(dir: &std::path::Path, visit: &mut dyn FnMut(&mut App, &str)) {
+        let mut session = synthetic_session(dir, "synthetic layout password");
         unsafe {
             SetProcessDPIAware();
             let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
             assert_ne!(h, 0);
             let mut app = App::new(h);
-            app.home_dir = dir.clone();
+            app.home_dir = dir.to_owned();
             app.vault_path = session.path.clone();
             app.key_path = session.key_path.clone();
-            let mut check = |app: &App, name: &str| {
+            for (screen, name) in [
+                (Screen::Welcome, "welcome"),
+                (Screen::Login, "login"),
+                (Screen::Restore, "restore"),
+            ] {
+                app.screen = screen;
+                app.build();
+                visit(&mut app, name);
+            }
+            app.provision = Some(Provision::new().unwrap());
+            for otp in [false, true] {
+                app.screen = Screen::Create;
+                app.create_otp = otp;
+                app.build();
+                visit(&mut app, if otp { "create-otp" } else { "create" });
+            }
+            app.provision = None;
+            app.screen = Screen::Vault;
+            app.session = Some(session);
+            app.build();
+            visit(&mut app, "vault-empty");
+            session = app.session.take().unwrap();
+            // "니모닉" is a built-in type, so its chip follows the language.
+            let entry = Entry::new(
+                "GitHub".into(),
+                "니모닉".into(),
+                "synthetic secret".into(),
+                String::new(),
+            )
+            .unwrap();
+            session.put(None, entry).unwrap();
+            app.session = Some(session);
+            app.selected = Some(0);
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.build();
+            visit(&mut app, "vault-shown");
+            app.reveal_until = None;
+            app.copy_until = Some(Instant::now() + Duration::from_secs(15));
+            app.build();
+            visit(&mut app, "vault-copy");
+            app.copy_until = None;
+            for (screen, name) in [
+                (Screen::Edit, "edit"),
+                (Screen::Password, "password"),
+                (Screen::OtpBackup, "otp-backup"),
+            ] {
+                app.screen = screen;
+                app.build();
+                visit(&mut app, name);
+            }
+            app.otp_setup = Some(
+                app.session
+                    .as_ref()
+                    .unwrap()
+                    .otp_setup("synthetic layout password")
+                    .unwrap(),
+            );
+            app.build();
+            visit(&mut app, "otp-backup-qr");
+            app.otp_setup = None;
+            drop(app);
+            DestroyWindow(h);
+        }
+    }
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "goyo-{name}-{:x}",
+            u64::from_le_bytes(*crypto::random::<8>().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+    /// Every label's text fits its box at this machine's DPI, in both
+    /// languages: a STATIC clips whatever does not fit and an owner-drawn
+    /// button cuts its caption, so a cut-off line would go unnoticed. Labels
+    /// on the OTP card end clear of its painted border, and every message
+    /// fits the status line.
+    #[test]
+    fn labels_fit_their_boxes() {
+        let _korean = KoreanAfter;
+        unsafe fn measure(h: Hwnd, font: isize, text: &str, width: i32, flags: u32) -> Rect {
+            unsafe {
+                let dc = GetDC(h);
+                let old = SelectObject(dc, font);
+                let mut calc = Rect {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: 0,
+                };
+                let s = wide(text);
+                DrawTextW(dc, s.as_ptr(), -1, &mut calc, 0x400 | 0x800 | flags); // DT_CALCRECT | DT_NOPREFIX
+                SelectObject(dc, old);
+                ReleaseDC(h, dc);
+                calc
+            }
+        }
+        let mut failures = vec![];
+        for english in [false, true] {
+            i18n::set_english(english);
+            let dir = test_dir("fit");
+            let language = if english { "en" } else { "ko" };
+            let mut check = |app: &mut App, name: &str| unsafe {
                 for &child in &app.children {
-                    let mut class = [0u16; 16];
-                    let n = GetClassNameW(child, class.as_mut_ptr(), 16).max(0) as usize;
-                    if String::from_utf16_lossy(&class[..n]) != "Static" {
+                    let class = class_of(child);
+                    let text = caption(child);
+                    let mut r = Rect::default();
+                    GetClientRect(child, &mut r);
+                    if class == "Static" {
+                        // DT_WORDBREAK | DT_EXPANDTABS
+                        let font = SendMessageW(child, 0x31, 0, 0); // WM_GETFONT
+                        let need = measure(child, font, &text, r.right, 0x10 | 0x40).bottom;
+                        if need > r.bottom {
+                            failures.push(format!(
+                                "{language} {name}: needs {need}px, has {}px: {text:?}",
+                                r.bottom
+                            ));
+                        }
+                    } else if class == "Button" {
+                        let variant = GetWindowLongPtrW(child, -21);
+                        if matches!(variant, theme::EYE | theme::EYE_ON) {
+                            continue;
+                        }
+                        let font = theme::with(|t| match variant {
+                            theme::PRIMARY | theme::ACCENT | theme::TAB_ON => t.strong(),
+                            theme::LINK | theme::CHIP => t.small(),
+                            _ => t.body(),
+                        })
+                        .unwrap();
+                        let pad = match variant {
+                            theme::TOGGLE | theme::TOGGLE_ON => app.px(52),
+                            theme::LINK => 0,
+                            _ => app.px(12),
+                        };
+                        let need = measure(child, font, &text, 0, 0x20).right + pad; // DT_SINGLELINE
+                        if need > r.right {
+                            failures.push(format!(
+                                "{language} {name}: button needs {need}px, has {}px: {text:?}",
+                                r.right
+                            ));
+                        }
                         continue;
-                    }
-                    let mut buf = vec![0u16; 2048];
-                    let n = GetWindowTextW(child, buf.as_mut_ptr(), 2048).max(0) as usize;
-                    let text = String::from_utf16_lossy(&buf[..n]);
-                    let (need, have) = needed(child, &text);
-                    if need > have {
-                        failures.push(format!("{name}: needs {need}px, has {have}px: {text:?}"));
+                    } else {
+                        continue;
                     }
                     let card =
                         (app.provision.is_some() && app.create_otp) || app.otp_setup.is_some();
@@ -3491,73 +3705,209 @@ mod tests {
                         MapWindowPoints(0, app.hwnd, pts.as_mut_ptr(), 2);
                         let inside = pts[0].y >= frame.top && pts[0].y < frame.bottom;
                         if inside && pts[1].y > frame.bottom - app.px(8) {
-                            failures.push(format!("{name}: touches the card border: {text:?}"));
+                            failures.push(format!(
+                                "{language} {name}: touches the card border: {text:?}"
+                            ));
+                        }
+                    }
+                }
+                // Every one-line message in the status line.
+                if name == "vault-empty" {
+                    let status = app.handle(STATUS);
+                    let font = SendMessageW(status, 0x31, 0, 0);
+                    let mut r = Rect::default();
+                    GetClientRect(status, &mut r);
+                    for &(ko, _) in i18n::EN {
+                        let text = tr(ko);
+                        if text.contains('\n') {
+                            continue;
+                        }
+                        let need = measure(status, font, text, r.right, 0x10 | 0x40).bottom;
+                        if need > r.bottom {
+                            failures.push(format!(
+                                "{language} status: needs {need}px, has {}px: {text:?}",
+                                r.bottom
+                            ));
                         }
                     }
                 }
             };
-            for screen in [Screen::Welcome, Screen::Login, Screen::Restore] {
-                app.screen = screen;
-                app.build();
-                check(&app, "pre-unlock");
-            }
-            app.provision = Some(Provision::new().unwrap());
-            for otp in [false, true] {
-                app.screen = Screen::Create;
-                app.create_otp = otp;
-                app.build();
-                check(&app, if otp { "create-otp" } else { "create" });
-            }
-            app.provision = None;
-            app.session = Some(session);
-            for screen in [
-                Screen::Vault,
-                Screen::Edit,
-                Screen::Password,
-                Screen::OtpBackup,
-            ] {
-                app.screen = screen;
-                app.build();
-                check(&app, "unlocked");
-            }
-            app.otp_setup = Some(
-                app.session
-                    .as_ref()
-                    .unwrap()
-                    .otp_setup("synthetic layout password")
-                    .unwrap(),
-            );
-            app.build();
-            check(&app, "otp-backup-qr");
-            // Every long Korean message in the source, in the status line.
-            app.otp_setup = None;
-            app.screen = Screen::Vault;
-            app.build();
-            let status = app.handle(STATUS);
-            for source in [
-                include_str!("main.rs"),
-                include_str!("vault.rs"),
-                include_str!("crypto.rs"),
-            ] {
-                for literal in source.split('"').skip(1).step_by(2) {
-                    let korean = literal
-                        .chars()
-                        .filter(|c| ('\u{ac00}'..='\u{d7a3}').contains(c))
-                        .count();
-                    if korean < 25 || literal.contains("\\r\\n") || literal.contains("\\n") {
-                        continue;
-                    }
-                    let (need, have) = needed(status, literal);
-                    if need > have {
-                        failures.push(format!("status: needs {need}px, has {have}px: {literal:?}"));
+            unsafe { each_screen(&dir, &mut check) };
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+    /// Korean string literals in a source file, outside tests and comments.
+    fn korean_literals(source: &str) -> Vec<String> {
+        let mut out = vec![];
+        let mut it = source.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '/' if it.peek() == Some(&'/') => {
+                    for c in it.by_ref() {
+                        if c == '\n' {
+                            break;
+                        }
                     }
                 }
+                // A char literal ('"', '\'') or a lifetime.
+                '\'' => {
+                    let mut look = it.clone();
+                    match look.next() {
+                        Some('\\') => {
+                            it.next();
+                            for c in it.by_ref() {
+                                if c == '\'' {
+                                    break;
+                                }
+                            }
+                        }
+                        Some(_) if look.next() == Some('\'') => {
+                            it.next();
+                            it.next();
+                        }
+                        _ => {}
+                    }
+                }
+                '"' => {
+                    let mut s = String::new();
+                    while let Some(c) = it.next() {
+                        match c {
+                            '"' => break,
+                            '\\' => match it.next() {
+                                Some('n') => s.push('\n'),
+                                Some('r') => s.push('\r'),
+                                Some('t') => s.push('\t'),
+                                Some('0') => s.push('\0'),
+                                Some('u') => {
+                                    it.next(); // {
+                                    let hex: String =
+                                        it.by_ref().take_while(|c| *c != '}').collect();
+                                    s.push(
+                                        char::from_u32(u32::from_str_radix(&hex, 16).unwrap())
+                                            .unwrap(),
+                                    );
+                                }
+                                Some('\n') => {
+                                    while it.peek().is_some_and(|c| c.is_whitespace()) {
+                                        it.next();
+                                    }
+                                }
+                                Some(c) => s.push(c),
+                                None => {}
+                            },
+                            c => s.push(c),
+                        }
+                    }
+                    if has_korean(&s) {
+                        out.push(s);
+                    }
+                }
+                _ => {}
             }
+        }
+        out
+    }
+    /// Every Korean text in the program has an English entry, and in English
+    /// no screen shows Korean, whether in a control or painted.
+    #[test]
+    fn english_is_complete() {
+        let _korean = KoreanAfter;
+        let main = include_str!("main.rs");
+        let main = &main[..main.find("#[cfg(test)]\nmod tests").unwrap()];
+        let mut missing = vec![];
+        for source in [
+            main,
+            include_str!("win.rs"),
+            include_str!("theme.rs"),
+            include_str!("vault.rs"),
+            include_str!("crypto.rs"),
+            include_str!("otp.rs"),
+        ] {
+            let code = source.split("#[cfg(test)]").next().unwrap();
+            for text in korean_literals(code) {
+                if !i18n::EN.iter().any(|(ko, _)| *ko == text)
+                    && !i18n::KEEP.contains(&text.as_str())
+                {
+                    missing.push(text);
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "no English for:\n{}",
+            missing.join("\n")
+        );
+        for (ko, en) in i18n::EN {
+            assert!(!has_korean(en), "untranslated: {ko:?}");
+        }
+        i18n::set_english(true);
+        let dir = test_dir("english");
+        let mut shown = vec![];
+        let mut visit = |app: &mut App, name: &str| unsafe {
+            for &child in &app.children {
+                if matches!(class_of(child).as_str(), "Static" | "Button") {
+                    shown.push((name.to_owned(), caption(child)));
+                }
+            }
+            for text in painted(app) {
+                shown.push((name.to_owned(), text));
+            }
+        };
+        unsafe { each_screen(&dir, &mut visit) };
+        let _ = std::fs::remove_dir_all(&dir);
+        let korean: Vec<_> = shown
+            .iter()
+            .filter(|(_, text)| has_korean(text) && !i18n::KEEP.contains(&text.as_str()))
+            .map(|(screen, text)| format!("{screen}: {text:?}"))
+            .collect();
+        assert!(
+            korean.is_empty(),
+            "Korean in English mode:\n{}",
+            korean.join("\n")
+        );
+        // The painted chip of a built-in type follows the language too.
+        assert!(
+            shown
+                .iter()
+                .any(|(s, t)| s == "vault-shown" && t == "Seed phrase")
+        );
+    }
+    /// Switching the language keeps what was typed and the screen's state.
+    #[test]
+    fn language_switch_keeps_input() {
+        let _korean = KoreanAfter;
+        let dir = test_dir("switch");
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.home_dir = dir.clone();
+            app.vault_path = dir.join("vault.goyo");
+            app.key_path = dir.join("vault.goyokey");
+            app.screen = app.home();
+            app.build();
+            app.command(CREATE, 0).unwrap();
+            let code = app.provision.as_ref().unwrap().setup_code();
+            SetWindowTextW(app.handle(PASS), wide("synthetic switch password").as_ptr());
+            app.command(LANG_EN, 0).unwrap();
+            assert!(i18n::english() && app.screen == Screen::Create);
+            assert_eq!(caption(app.handle(SUBMIT)), "Create vault without OTP");
+            assert_eq!(&*app.read(PASS).unwrap(), "synthetic switch password");
+            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            assert_eq!(GetWindowLongPtrW(app.handle(LANG_EN), -21), theme::TAB_ON);
+            // The status line follows the language; its Korean source is kept.
+            app.status("수동으로 잠갔습니다.");
+            assert_eq!(caption(app.handle(STATUS)), "Locked.");
+            app.command(LANG_KO, 0).unwrap();
+            assert!(!i18n::english());
+            assert_eq!(caption(app.handle(STATUS)), "수동으로 잠갔습니다.");
+            assert_eq!(&*app.read(PASS).unwrap(), "synthetic switch password");
             drop(app);
             DestroyWindow(h);
         }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
     /// Synthetic vault on disk with a fresh OTP code that opens it.
     fn synthetic_session(dir: &std::path::Path, password: &str) -> Session {
@@ -3867,7 +4217,7 @@ mod tests {
                     value
                 );
                 let dc = GetDC(h);
-                let previous = SelectObject(dc, app.font);
+                let previous = SelectObject(dc, app.font_of(|t| t.body()));
                 for page in &pages {
                     assert!(page.lines().count() <= 2);
                     for line in page.lines() {
@@ -4107,6 +4457,11 @@ mod tests {
         }
         let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-output/ui-preview");
         std::fs::create_dir_all(&out).unwrap();
+        // GOYO_PREVIEW_LANG=en renders the English interface to en-*.bmp.
+        let english = std::env::var("GOYO_PREVIEW_LANG").is_ok_and(|v| v == "en");
+        let _korean = KoreanAfter;
+        i18n::set_english(english);
+        let pick = |ko: &'static str, en: &'static str| if english { en } else { ko };
         let temp = std::env::temp_dir().join(format!(
             "goyo-preview-{:x}",
             u64::from_le_bytes(*crypto::random::<8>().unwrap())
@@ -4129,25 +4484,31 @@ mod tests {
                 "GitHub",
                 "비밀번호",
                 "correct-horse-battery-staple-2026",
-                "복구 코드는 종이에 따로 보관",
+                pick(
+                    "복구 코드는 종이에 따로 보관",
+                    "Recovery codes kept on paper",
+                ),
             ),
             (
-                "비트코인 지갑",
+                pick("비트코인 지갑", "Bitcoin wallet"),
                 "니모닉",
                 "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual",
-                "하드웨어 지갑 · 2024년 생성",
+                pick(
+                    "하드웨어 지갑 · 2024년 생성",
+                    "Hardware wallet · created 2024",
+                ),
             ),
             (
-                "서버 SSH 키",
+                pick("서버 SSH 키", "Server SSH key"),
                 "프라이빗키",
                 "-----BEGIN OPENSSH PRIVATE KEY-----\r\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\r\n-----END OPENSSH PRIVATE KEY-----",
                 "",
             ),
             (
-                "은행 공동인증서",
+                pick("은행 공동인증서", "Bank certificate"),
                 "비밀번호",
                 "synthetic-only-value",
-                "만료 2027-03",
+                pick("만료 2027-03", "Expires 2027-03"),
             ),
         ] {
             let entry = Entry::new(title.into(), kind.into(), value.into(), notes.into()).unwrap();
@@ -4156,7 +4517,7 @@ mod tests {
         // Enough rows to show the list scrollbar.
         for i in 1..=10 {
             let entry = Entry::new(
-                format!("예시 계정 {i}"),
+                format!("{} {i}", pick("예시 계정", "Sample account")),
                 "비밀번호".into(),
                 "synthetic".into(),
                 String::new(),
@@ -4221,7 +4582,11 @@ mod tests {
                         }
                     });
                 }
-                let file = format!("{}-{file}", if dark { "dark" } else { "light" });
+                let file = format!(
+                    "{}{}-{file}",
+                    if english { "en-" } else { "" },
+                    if dark { "dark" } else { "light" }
+                );
                 let file = file.as_str();
                 APP.with(|cell| {
                     let mut b = cell.borrow_mut();

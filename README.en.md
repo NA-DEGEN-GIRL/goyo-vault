@@ -3,13 +3,10 @@
 <p align="center">An offline vault for passwords, seed phrases and private keys that stays on your PC (Windows 11)</p>
 <p align="center"><a href="README.md">한국어</a> · <b>English</b></p>
 
-![Goyo Vault](docs/images/vault.png)
+![Goyo Vault](docs/images/en/vault.png)
 
 > [!WARNING]
 > This is a development release. It has automated tests and AI-assisted code reviews, but **it has not had a professional security audit.** Try creating, backing up and restoring a vault with fake values before you trust it with real secrets.
-
-> [!NOTE]
-> The interface is in Korean only for now. This guide gives the Korean label of every button next to its English meaning, e.g. **New vault (새 금고 만들기)**.
 
 ## What it does
 
@@ -18,7 +15,7 @@
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
 - **Auto-lock** of an open vault after 60 seconds idle (2 minutes on the OTP backup screen), after 30 seconds in another app, when you lock the screen, the PC sleeps or Windows shuts down.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
-- **A single executable, no installer.** Dark and light themes.
+- **A single executable, no installer.** Dark and light themes, Korean and English interface.
 - **There is no automatic backup.** You make backups yourself; [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what and when.
 
 ## Security at a glance
@@ -36,7 +33,7 @@
 |Clipboard|Wiped after 15 seconds, excluded from Win+V history and cloud sync|Copying works only after you turn on "allow copy".|
 |Other programs|Window messages blocked, memory access restricted, DLL planting blocked|Other programs cannot read the input fields, fake clicks to make the app copy a secret, or read its memory.|
 |Transparency|Open source, pinned dependencies, the same source builds the same executable (`/Brepro`)|Anyone can read the code, build it and compare the result with the release.|
-|Verification|28 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
+|Verification|30 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
 
 **How long the password holds out if someone gets both files** (estimates, generously assuming one high-end GPU tries 100 passwords per second)
 
@@ -73,39 +70,39 @@ Extract the new ZIP **to the same place, overwriting the old files.** Only the p
 Every vault made before 0.5.0 uses an OTP and still opens as before. A vault made **without an OTP** in 0.5.0 or later does not open in 0.4.x or earlier.
 
 > [!NOTE]
-> ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault elsewhere (다른 위치에 있는 금고 열기)**.
+> ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault from another location**.
 
 ## How to use it
 
 ### 1. First start
 
-![First start](docs/images/welcome.png)
+![First start](docs/images/en/welcome.png)
 
 With no vault saved yet, you see this screen ("No vault saved yet").
 
-- **New vault (새 금고 만들기)** if this is your first time.
-- **Restore from backup (백업에서 복원)** to bring over a vault from another PC.
-- **Open a vault elsewhere (다른 위치에 있는 금고 열기)** for a vault on a USB drive or in another folder.
+- **Create a new vault** if this is your first time.
+- **Restore from backup** to bring over a vault from another PC.
+- **Open a vault from another location** for a vault on a USB drive or in another folder.
 
-Switch between **Dark (다크)** and **Light (라이트)** in the top-right corner.
+Switch between **Dark** and **Light** in the top-right corner.
 
 ### 2. Create a vault
 
-![Create a vault](docs/images/create.png)
+![Create a vault](docs/images/en/create.png)
 
-1. Choose where the **new vault file (새 금고 파일)** and **new key file (새 열쇠 파일)** go. Both default to the program folder, so the key caption warns in red. **Pick another place for the key, such as a USB drive, with Browse (찾기).** In the same folder, anyone who copies the folder only has to guess the password. The app remembers the last vault and key it opened (`goyo-vault.paths`), so a key on a USB drive does not need browsing every time.
+1. Choose where the **New vault file** and **New key file** go. Both default to the program folder, so the key caption warns in red. **Pick another place for the key, such as a USB drive, with Browse.** In the same folder, anyone who copies the folder only has to guess the password. The app remembers the last vault and key it opened (`goyo-vault.paths`), so a key on a USB drive does not need browsing every time.
 2. Enter a **password** twice. It needs at least 12 characters; repeated characters and passwords made only of common words, keyboard walks or number runs (`password1234`, `qwerty123456`, `1q2w3e4r5t6y`) are refused. For seed phrases or private keys use **4–6 unrelated words**. Words from common-password lists such as `dragon` or `sunshine` do not count, so pick uncommon ones. The check only filters the obvious; passing it does not make a password safe. If the key file is stolen, a common password falls to one GPU within a day; four random words are out of reach. Press the eye icon at the right of the field to check what you typed for typos; press it again to hide it.
-3. Decide on the OTP in the green **phone OTP (휴대폰 OTP)** card. It is off by default, but **turning it on is recommended.** To skip it, press **Create without OTP (OTP 없이 금고 만들기)** and you are done.
+3. Decide on the OTP in the green **Phone OTP** card. It is off by default, but **turning it on is recommended.** To skip it, press **Create vault without OTP** and you are done.
 
 #### Turning on the OTP (recommended)
 
-![Create a vault with the OTP on](docs/images/create-otp.png)
+![Create a vault with the OTP on](docs/images/en/create-otp.png)
 
 With the OTP on, opening the vault also asks for the 6-digit code from your phone's OTP app. If your password leaks (someone looks over your shoulder, or you reused it on a site that was breached), it still cannot open the vault with this app without your phone. **As long as this PC and the vault and key files stay out of other hands, the OTP helps a lot.** It does not stop someone who copied both files (see [Please read](#please-read)). Losing the phone without an OTP backup locks you out, so if you turn it on, also do the **OTP backup** (step 8 below) after creating the vault. **The choice is made when the vault is created and cannot be changed later.**
 
-1. Press **Turn on OTP (OTP 켜기)** to show the QR. The passwords you typed stay; **Turn off OTP (OTP 끄기)** switches back.
-2. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. Each vault gets its own entry name, such as `Goyo Vault (3FA2-C1D0)`; the same name appears above the OTP field when you open the vault, so with several vaults you can pick the right code. While you are in another app the QR and key are hidden, and **Back (뒤로)** keeps the same QR when you return. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
-3. Enter the **6-digit code** from the app and press **Confirm and create (등록 확인 · 금고 만들기)**.
+1. Press **Turn on OTP** to show the QR. The passwords you typed stay; **OTP off** turns it off again.
+2. In Google Authenticator tap **+ → Scan a QR code** and point it at the QR on screen. Each vault gets its own entry name, such as `Goyo Vault (3FA2-C1D0)`; the same name appears above the OTP field when you open the vault, so with several vaults you can pick the right code. While you are in another app the QR and key are hidden, and **‹ Back** keeps the same QR when you return. If scanning does not work, choose **Enter a setup key** and type the key shown next to the QR (type: **Time based**). The QR and key in the screenshot are fake examples.
+3. Enter the **6-digit code** from the app and press **Confirm and create vault**.
 
 > [!IMPORTANT]
 > - Scan the QR **only with the scanner inside your OTP app.** Pointing an ordinary camera or Google Lens at it, or taking a photo, can leave the secret in your photo library or in the cloud.
@@ -113,71 +110,71 @@ With the OTP on, opening the vault also asks for the 6-digit code from your phon
 
 ### 3. Save an entry
 
-![New entry](docs/images/new-entry.png)
+![New entry](docs/images/en/new-entry.png)
 
-Press **+ New entry (+ 새 항목)**, fill in name, type, secret and note, then press **Encrypt and save (암호화하여 저장)**.
+Press **+ New entry**, fill in name, type, secret and note, then press **Save encrypted**.
 
-- Type the kind yourself or use the **password · seed phrase · private key · API key** buttons (비밀번호 · 니모닉 · 프라이빗키 · API 키).
+- Type the kind yourself or use the **password · seed phrase · private key · API key** buttons.
 - Multi-line keys such as PEM files are kept exactly.
 - **Names are always visible in the list,** so never put a secret in the name.
 - For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. You can copy a value in another app, but **come back within 30 seconds** to paste it; staying away longer locks the vault and clears unsaved edits.
 
 ### 4. View and copy
 
-![Vault](docs/images/vault.png)
+![Vault](docs/images/en/vault.png)
 
 Pick an entry in the list to see it on the right.
 
-- **Show for 15 s (15초 보기)** reveals the secret and the note for 15 seconds. Press it again to hide them at once.
-- **Copy:** turn on **Allow copy (복사 허용)**, then press **Copy (복사)**. The permission turns itself off after 30 seconds or after one copy.
+- **Show 15 s** reveals the secret and the note for 15 seconds. Press it again to hide them at once.
+- **Copy:** turn on **Allow copy**, then press **Copy**. The permission turns itself off after 30 seconds or after one copy.
 - A copied value is **wiped from the clipboard after 15 seconds** and is kept out of Win+V clipboard history and cloud clipboard sync.
 - Remaining times are shown on screen.
 
 ### 5. Lock and open again
 
-![Open vault](docs/images/login.png)
+![Open vault](docs/images/en/login.png)
 
-The vault locks itself after 60 seconds without use, after 30 seconds in another app, when you lock the screen or the PC sleeps. **Lock (잠금)** locks it right away.
+The vault locks itself after 60 seconds without use, after 30 seconds in another app, when you lock the screen or the PC sleeps. **Lock** locks it right away.
 
 A quick trip to another app (pasting a copied value, a screenshot tool) does not lock it. The moment you switch, though, **Show for 15 s**, **Allow copy**, any password you made visible and the **OTP backup** QR are hidden. The vault window never appears in screen captures anyway.
 
 Screens before a vault is open (open, new vault, restore) keep what you typed and the OTP setup QR when you switch to another app; only a password you made visible is hidden again. They are still cleared after the idle time (5 minutes for a new vault, 60 seconds otherwise) or when you lock Windows.
 
-To open it again, enter your password. If you moved the vault or key file, pick it with **Browse (찾기)**. For a vault with the OTP on, an OTP field appears to match the chosen key file; enter a **new** code. A code that was already used is refused, so if you just opened the vault, wait for the next code on your phone.
+To open it again, enter your password. If you moved the vault or key file, pick it with **Browse**. For a vault with the OTP on, an OTP field appears to match the chosen key file; enter a **new** code. A code that was already used is refused, so if you just opened the vault, wait for the next code on your phone.
 
 ### 6. Back up and restore
 
 Use the buttons at the bottom of the vault screen.
 
-- **Back up vault (금고 백업)** saves the encrypted vault to a new file.
-- **Back up key (열쇠 백업)** saves the encrypted key file to a new file. Store it **apart** from the vault backup.
+- **Back up vault** saves the encrypted vault to a new file.
+- **Back up key** saves the encrypted key file to a new file. Store it **apart** from the vault backup.
 - A failed backup is reported in a dialog box. No dialog means the file was saved.
 - A backup never overwrites an existing file, so save it under a new, dated name such as `vault-2026-10-18.goyo`.
 
 [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what to back up and when.
 
-![Restore from backup](docs/images/restore.png)
+![Restore from backup](docs/images/en/restore.png)
 
-To restore, press **Restore from backup (백업에서 복원)** on the first-start or open screen. Choose the backup and the key file, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
+To restore, press **Restore from backup** on the first-start or open screen. Choose the backup and the key file, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
 ### 7. Change the password
 
-**Change password (비밀번호 변경)** on the vault screen asks for the current password and the new one (and a fresh OTP code if the vault uses one), then re-encrypts the key file. **Back up the key again** afterwards.
+**Change password** on the vault screen asks for the current password and the new one (and a fresh OTP code if the vault uses one), then re-encrypts the key file. **Back up the key again** afterwards.
 
 ### 8. OTP backup (in case you lose your phone)
 
-![OTP backup](docs/images/otp-backup.png)
+![OTP backup](docs/images/en/otp-backup.png)
 
-Only vaults with the OTP on have this. Press **OTP backup (OTP 백업)** at the bottom of the vault screen and enter your current password to see the same QR and setup key as when you created the vault. Add it to a spare phone or another OTP app and it shows the same codes as your phone, so you can still open the vault if the phone is lost. Writing the setup key on paper and keeping it somewhere safe works too.
+Only vaults with the OTP on have this. Press **OTP backup** at the bottom of the vault screen and enter your current password to see the same QR and setup key as when you created the vault. Add it to a spare phone or another OTP app and it shows the same codes as your phone, so you can still open the vault if the phone is lost. Writing the setup key on paper and keeping it somewhere safe works too.
 
 > [!NOTE]
 > Saving the setup key as an entry inside the vault is not a backup: the vault needs the OTP to open, so after losing the phone you could not get that entry out. Move it to another device or to paper **before** the phone is gone.
 
-### 9. Theme
+### 9. Theme and language
 
-![Light theme](docs/images/light.png)
+![Light theme](docs/images/en/light.png)
 
-Choose dark or light in the top-right corner. The choice is stored as just `dark` or `light` in `goyo-vault.theme` next to the executable and has nothing to do with your vault.
+Switch the language with **한국어 | English** and the colours with **Dark | Light** in the top-right corner. Whatever you have typed stays. The choices are stored as just `en`/`ko` in `goyo-vault.lang` and `dark`/`light` in `goyo-vault.theme` next to the executable and have nothing to do with your vault. On the first start the app uses Korean if Windows is set to Korean, and English otherwise.
 
 ## Backups: what you must do yourself
 
@@ -185,13 +182,13 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 
 |What|When|How|
 |---|---|---|
-|**Vault backup** (`.goyo`)|After adding or changing entries, especially a new seed phrase or private key|**Back up vault (금고 백업)** at the bottom of the vault screen|
-|**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time you change the password**|**Back up key (열쇠 백업)** at the bottom of the vault screen|
-|**OTP backup** (vaults with the OTP only)|**Once** right after creating the vault|**OTP backup (OTP 백업)**: enroll a spare phone or write the setup key on paper. Turning on the authenticator app's own backup also works.|
+|**Vault backup** (`.goyo`)|After adding or changing entries, especially a new seed phrase or private key|**Back up vault** at the bottom of the vault screen|
+|**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time you change the password**|**Back up key** at the bottom of the vault screen|
+|**OTP backup** (vaults with the OTP only)|**Once** right after creating the vault|**OTP backup**: enroll a spare phone or write the setup key on paper. Turning on the authenticator app's own backup also works.|
 |**Password**|Once, when you create the vault|Memorize it or write it down somewhere safe. **The app has no recovery of any kind.**|
-|**Restore drill**|Every few months|**Restore from backup (백업에서 복원)** to a new file; the original is not changed.|
+|**Restore drill**|Every few months|**Restore from backup** to a new file; the original is not changed.|
 
-**No need to back up:** `goyo-vault.theme` (theme) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
+**No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
 
 **A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
 
@@ -225,7 +222,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 **Memory and files**
 - On normal exit and on lock, keys, strings, serialization buffers and Argon2 working memory are wiped with `zeroize`. Copies inside Windows input controls, graphics memory, CPU registers, the page file or crash dumps are not guaranteed to be removed.
 - No plaintext file is ever written. An encrypted temporary file in the same folder is synced, renamed into place and flushed again under its final name. A file lock prevents two instances from using one vault. The lock goes by path, so two hard links to one vault can still be opened twice; it stops cooperating programs, not malware running as you.
-- `goyo-vault.theme` (theme) and `goyo-vault.paths` (last vault and key locations) next to the program hold no secrets. The paths file does reveal where the key is, so do not share that folder.
+- `goyo-vault.theme` (theme), `goyo-vault.lang` (language) and `goyo-vault.paths` (last vault and key locations) next to the program hold no secrets. The paths file does reveal where the key is, so do not share that folder.
 - Power-loss safety depends on the drive and file system; FAT/exFAT is not guaranteed. `.goyolock` files, encrypted temporary files left after a crash, and metadata such as file names and paths are not hidden.
 - Windows device names such as `CON`, `NUL` or `COM1` are refused as file names, because a backup to `NUL` would look successful and keep nothing.
 

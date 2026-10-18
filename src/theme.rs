@@ -98,10 +98,10 @@ pub const LINE: u32 = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS
 
 pub struct Theme {
     pub scale: f32,
-    pub body: isize,
-    pub strong: isize,
-    pub small: isize,
-    pub title: isize,
+    /// Body, strong, small and title text: 맑은 고딕 for Korean, Segoe UI for
+    /// English (Malgun Gothic draws a backslash as ₩). Hangul in English
+    /// mode, such as entry names, falls back through Windows font linking.
+    faces: [[isize; 4]; 2],
     pub code: isize,
     /// Segoe Fluent Icons glyphs (Windows 11 system font).
     pub icon: isize,
@@ -133,16 +133,35 @@ impl Theme {
         };
         Self {
             scale,
-            body: font(16.0, 400, "맑은 고딕"),
-            strong: font(16.0, 700, "맑은 고딕"),
-            small: font(13.0, 400, "맑은 고딕"),
-            title: font(22.0, 700, "맑은 고딕"),
+            faces: ["맑은 고딕", "Segoe UI"].map(|face| {
+                [
+                    font(16.0, 400, face),
+                    font(16.0, 700, face),
+                    font(13.0, 400, face),
+                    font(22.0, 700, face),
+                ]
+            }),
             code: font(22.0, 400, "Consolas"),
             icon: font(28.0, 400, "Segoe Fluent Icons"),
             glyph: font(16.0, 400, "Segoe Fluent Icons"),
             dark: Cell::new(true),
             background: Cell::new(unsafe { CreateSolidBrush(DARK.bg) }),
         }
+    }
+    fn face(&self, i: usize) -> isize {
+        self.faces[crate::i18n::english() as usize][i]
+    }
+    pub fn body(&self) -> isize {
+        self.face(0)
+    }
+    pub fn strong(&self) -> isize {
+        self.face(1)
+    }
+    pub fn small(&self) -> isize {
+        self.face(2)
+    }
+    pub fn title(&self) -> isize {
+        self.face(3)
     }
     pub fn px(&self, n: i32) -> i32 {
         (n as f32 * self.scale) as i32
@@ -154,16 +173,12 @@ impl Theme {
 impl Drop for Theme {
     fn drop(&mut self) {
         unsafe {
-            for h in [
-                self.body,
-                self.strong,
-                self.small,
-                self.title,
+            for h in self.faces.into_iter().flatten().chain([
                 self.code,
                 self.icon,
                 self.glyph,
                 self.background.get(),
-            ] {
+            ]) {
                 DeleteObject(h);
             }
         }
@@ -221,7 +236,14 @@ pub unsafe fn round(dc: isize, r: &Rect, radius: i32, fill: Option<u32>, border:
         }
     }
 }
+#[cfg(test)]
+thread_local! {
+    /// Everything painted with text(), for the language tests.
+    pub static PAINTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 pub unsafe fn text(dc: isize, s: &str, r: &Rect, font: isize, color: u32, flags: u32) {
+    #[cfg(test)]
+    PAINTED.with(|p| p.borrow_mut().push(s.to_owned()));
     let w = secret_wide(s);
     let mut r = *r;
     unsafe {
@@ -319,7 +341,7 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                     p.text
                 };
                 round(d.dc, &r, radius, Some(c), None);
-                (p.bg, t.strong)
+                (p.bg, t.strong())
             }
             ACCENT => {
                 let c = if disabled {
@@ -330,7 +352,7 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                     p.accent
                 };
                 round(d.dc, &r, radius, Some(c), None);
-                (p.bg, t.strong)
+                (p.bg, t.strong())
             }
             SECONDARY => {
                 round(
@@ -340,7 +362,7 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                     Some(if pressed { p.surface } else { p.bg }),
                     Some(p.border),
                 );
-                (if disabled { p.faint } else { p.text }, t.body)
+                (if disabled { p.faint } else { p.text }, t.body())
             }
             GHOST | DANGER_GHOST => {
                 if pressed {
@@ -353,19 +375,19 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                 } else {
                     p.text
                 };
-                (c, t.body)
+                (c, t.body())
             }
             TAB_ON => {
                 round(d.dc, &r, radius, Some(p.raised), Some(p.border));
-                (p.text, t.strong)
+                (p.text, t.strong())
             }
             TAB => {
                 if pressed {
                     round(d.dc, &r, radius, Some(p.border), None);
                 }
-                (p.muted, t.body)
+                (p.muted, t.body())
             }
-            LINK => (if pressed { p.text } else { p.muted }, t.small),
+            LINK => (if pressed { p.text } else { p.muted }, t.small()),
             EYE | EYE_ON => {
                 if pressed {
                     round(d.dc, &r, radius, Some(p.surface), None);
@@ -381,7 +403,7 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                     Some(if pressed { p.surface } else { p.bg }),
                     Some(p.border),
                 );
-                (p.muted, t.small)
+                (p.muted, t.small())
             }
             TOGGLE | TOGGLE_ON => {
                 let on = variant == TOGGLE_ON;
@@ -417,9 +439,9 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                 round(d.dc, &knob, k / 2, Some(knob_color), None);
                 text_rect.left = track.right + t.px(10);
                 flags = LINE;
-                (if disabled { p.faint } else { p.text }, t.body)
+                (if disabled { p.faint } else { p.text }, t.body())
             }
-            _ => (p.text, t.body),
+            _ => (p.text, t.body()),
         };
         text(d.dc, &label, &text_rect, font, color, flags);
         if focus {
@@ -464,7 +486,7 @@ unsafe fn draw_row(t: &Theme, d: &DrawItem) {
             d.dc,
             &title,
             &r,
-            if selected { t.strong } else { t.body },
+            if selected { t.strong() } else { t.body() },
             p.text,
             LINE,
         );
