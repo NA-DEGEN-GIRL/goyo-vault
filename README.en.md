@@ -19,6 +19,37 @@
 - **Auto-lock** of an open vault after 60 seconds idle (2 minutes on the OTP backup screen), after 30 seconds in another app, when you lock the screen, the PC sleeps or Windows shuts down.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
 - **A single executable, no installer.** Dark and light themes.
+- **There is no automatic backup.** You make backups yourself; [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what and when.
+
+## Security at a glance
+
+|Area|Specification|What it means|
+|---|---|---|
+|Encryption|**XChaCha20-Poly1305** (256-bit key, tamper detection)|Changing even one byte of a file makes it refuse to open. No plaintext file is ever written.|
+|Password handling|**Argon2id**, 256 MiB memory, 3 passes|Every guess costs 256 MiB of memory and about 0.6 s. A typical desktop using all cores manages about 8 guesses per second.|
+|Second key|A **key file** holding a random 256-bit key|Someone with only the vault file cannot open it, even with your password.|
+|Phone OTP (recommended)|RFC 6238 TOTP, a used code is never accepted again|If your password leaks, nobody can open the vault with this app on this PC without your phone.|
+|Randomness|CPU hardware randomness (**RDSEED**)|Keys, nonces and the OTP secret all come from hardware randomness.|
+|Network|**None**|There is no network code, and a pre-release check confirms that no network library is in the executable's DLL list.|
+|Memory|Keys, passwords and entries are wiped with `zeroize` after use|On lock and exit the app clears the secrets it manages from memory.|
+|Screen|Capture exclusion, hidden by default, auto-lock|The window does not appear in screenshots or recordings; a secret shows for 15 seconds only when you ask.|
+|Clipboard|Wiped after 15 seconds, excluded from Win+V history and cloud sync|Copying works only after you turn on "allow copy".|
+|Other programs|Window messages blocked, memory access restricted, DLL planting blocked|Other programs cannot read the input fields, fake clicks to make the app copy a secret, or read its memory.|
+|Transparency|Open source, pinned dependencies, the same source builds the same executable (`/Brepro`)|Anyone can read the code, build it and compare the result with the release.|
+|Verification|28 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
+
+**How long the password holds out if someone gets both files** (estimates, generously assuming one high-end GPU tries 100 passwords per second)
+
+|Password|1 GPU|100 GPUs|
+|---|---|---|
+|A common password from leak lists|about 1 day|about 17 minutes|
+|A human-chosen 12-character password|about 5 years|about 20 days|
+|**4 unrelated random words**|out of reach|about 5,800 years|
+|5+ random words, or 12 random characters|out of reach|out of reach|
+
+So **with the key file kept elsewhere and a long password (4–6 unrelated words)**, the vault stays closed even if both files are taken.
+
+Some things the app **cannot stop**: malware on the PC (keyloggers, copying your files), someone who has both files and your password, and a camera pointed at the screen. See [Please read](#please-read) and [Security design and limits](#security-design-and-limits) for the details. And again: this is not a professionally audited product.
 
 ## Requirements
 
@@ -121,12 +152,9 @@ Use the buttons at the bottom of the vault screen.
 - **Back up vault (금고 백업)** saves the encrypted vault to a new file.
 - **Back up key (열쇠 백업)** saves the encrypted key file to a new file. Store it **apart** from the vault backup.
 - A failed backup is reported in a dialog box. No dialog means the file was saved.
+- A backup never overwrites an existing file, so save it under a new, dated name such as `vault-2026-10-18.goyo`.
 
-**Backup rules**
-- Keep vault backups and key backups on **at least two different drives**. One USB stick holding both leaves only the password.
-- Make a new vault backup after adding or changing entries, especially a new seed phrase.
-- Every few months, **actually restore** a backup (it goes to a new file, so the original is safe).
-- Do not let this vault be the only copy of a valuable seed phrase; also keep it on paper or metal.
+[Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what to back up and when.
 
 ![Restore from backup](docs/images/restore.png)
 
@@ -150,6 +178,28 @@ Only vaults with the OTP on have this. Press **OTP backup (OTP 백업)** at the 
 ![Light theme](docs/images/light.png)
 
 Choose dark or light in the top-right corner. The choice is stored as just `dark` or `light` in `goyo-vault.theme` next to the executable and has nothing to do with your vault.
+
+## Backups: what you must do yourself
+
+The app **saves to the vault file immediately** whenever you add, change or delete an entry. But **it never makes copies anywhere else.** To survive a broken PC, a failed disk or an accidental deletion, you need to do the following yourself.
+
+|What|When|How|
+|---|---|---|
+|**Vault backup** (`.goyo`)|After adding or changing entries, especially a new seed phrase or private key|**Back up vault (금고 백업)** at the bottom of the vault screen|
+|**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time you change the password**|**Back up key (열쇠 백업)** at the bottom of the vault screen|
+|**OTP backup** (vaults with the OTP only)|**Once** right after creating the vault|**OTP backup (OTP 백업)**: enroll a spare phone or write the setup key on paper. Turning on the authenticator app's own backup also works.|
+|**Password**|Once, when you create the vault|Memorize it or write it down somewhere safe. **The app has no recovery of any kind.**|
+|**Restore drill**|Every few months|**Restore from backup (백업에서 복원)** to a new file; the original is not changed.|
+
+**No need to back up:** `goyo-vault.theme` (theme) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
+
+**A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
+
+**Where to keep them**
+- Keep vault backups and key backups on **different drives**, for example the vault backup on an external disk and the key backup on a USB stick.
+- Each is encrypted and safe on its own, but together they leave only the password, so never keep both on one USB stick or in one cloud account.
+- After changing the password, make a new key backup and destroy the old ones: an old key copy still opens the vault with the old password.
+- Do not let this vault be the only copy of a valuable seed phrase; also keep it on paper or metal.
 
 ## Please read
 
