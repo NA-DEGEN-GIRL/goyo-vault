@@ -1,6 +1,6 @@
 {
-  "sha256": "55223c06f3fb06e1d33dfb3423f1e4bb6c4915ab1e2eab074c10c3a76df6f238",
-  "bytes": 584704,
+  "sha256": "61334553194d00b75fd1e041c17f9a2517f7b1036869bed76ce3b3746d9f0b08",
+  "bytes": 631296,
   "machine": "0x8664",
   "dll_characteristics": "0xc160",
   "dependent_load_flags": "0x800",
@@ -150,6 +150,7 @@
       "OpenProcess",
       "OpenThread",
       "GetModuleHandleW",
+      "GetUserDefaultUILanguage",
       "GlobalSize",
       "GlobalLock",
       "GlobalUnlock",
