@@ -1,4 +1,4 @@
-고요 금고 · Goyo Vault 0.5.1
+고요 금고 · Goyo Vault 0.5.2
 
 1. ZIP 전체를 나만 쓰고 동기화되지 않는 폴더(예: C:\Users\내이름\GoyoVault)에 푸세요.
    ZIP 안·임시 폴더, OneDrive가 백업하는 문서·바탕 화면, C:\ 바로 아래는 피하세요.

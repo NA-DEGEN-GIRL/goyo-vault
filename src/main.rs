@@ -681,7 +681,7 @@ impl App {
         } else {
             374
         };
-        (AX, y, AW, 210)
+        (AX, y, AW, 226)
     }
     /// Labels of the OTP card; the frame, QR and key are painted.
     fn enrollment_labels(&mut self, tag: &str, footer: &str) {
@@ -710,7 +710,7 @@ impl App {
             40,
         );
         self.note("스캔이 안 되면 '설정 키 입력'에:", rx, cy + 84, rw, 18);
-        self.note(footer, cx + 16, cy + 172, cw - 32, 34);
+        self.note(footer, cx + 16, cy + 172, cw - 32, 40);
     }
     /// Suggests file names that do not exist yet for Create and Restore.
     fn default_paths(&mut self) {
@@ -910,12 +910,12 @@ impl App {
                     30,
                     theme::GHOST,
                 );
-                self.field(OTP, "앱에 표시된 6자리", "", AX, 600, 180, true);
+                self.field(OTP, "앱에 표시된 6자리", "", AX, 616, 180, true);
                 self.button(
                     SUBMIT,
                     "등록 확인 · 금고 만들기",
                     AX + 196,
-                    622,
+                    638,
                     AW - 196,
                     40,
                     theme::PRIMARY,
@@ -1248,7 +1248,7 @@ impl App {
                 &tag,
                 "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
             );
-            self.button(CANCEL, "닫기", AX + AW - 160, 384, 160, 42, theme::PRIMARY);
+            self.button(CANCEL, "닫기", AX + AW - 160, 400, 160, 42, theme::PRIMARY);
             unsafe {
                 SetFocus(self.handle(CANCEL));
             }
@@ -3411,6 +3411,153 @@ mod tests {
         assert_eq!(app.dest_path, dir.join("restored.goyo"));
         std::fs::remove_file(dir.join("vault.goyo")).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+    /// Every label's text fits its box at this machine's DPI: a STATIC clips
+    /// whatever does not fit, so a cut-off line would go unnoticed. Labels on
+    /// the OTP card end clear of its painted border. The status line is also
+    /// checked against every long message in the source.
+    #[test]
+    fn labels_fit_their_boxes() {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetClassNameW(h: Hwnd, name: *mut u16, n: i32) -> i32;
+        }
+        unsafe fn needed(h: Hwnd, text: &str) -> (i32, i32) {
+            unsafe {
+                let mut r = Rect::default();
+                GetClientRect(h, &mut r);
+                let dc = GetDC(h);
+                let old = SelectObject(dc, SendMessageW(h, 0x31, 0, 0)); // WM_GETFONT
+                let mut calc = Rect {
+                    left: 0,
+                    top: 0,
+                    right: r.right,
+                    bottom: 0,
+                };
+                let s = wide(text);
+                // DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS | DT_NOPREFIX
+                DrawTextW(dc, s.as_ptr(), -1, &mut calc, 0x400 | 0x10 | 0x40 | 0x800);
+                SelectObject(dc, old);
+                ReleaseDC(h, dc);
+                (calc.bottom, r.bottom)
+            }
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "goyo-fit-{:x}",
+            u64::from_le_bytes(*crypto::random::<8>().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let session = synthetic_session(&dir, "synthetic layout password");
+        let mut failures = vec![];
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(h, 0);
+            let mut app = App::new(h);
+            app.home_dir = dir.clone();
+            app.vault_path = session.path.clone();
+            app.key_path = session.key_path.clone();
+            let mut check = |app: &App, name: &str| {
+                for &child in &app.children {
+                    let mut class = [0u16; 16];
+                    let n = GetClassNameW(child, class.as_mut_ptr(), 16).max(0) as usize;
+                    if String::from_utf16_lossy(&class[..n]) != "Static" {
+                        continue;
+                    }
+                    let mut buf = vec![0u16; 2048];
+                    let n = GetWindowTextW(child, buf.as_mut_ptr(), 2048).max(0) as usize;
+                    let text = String::from_utf16_lossy(&buf[..n]);
+                    let (need, have) = needed(child, &text);
+                    if need > have {
+                        failures.push(format!("{name}: needs {need}px, has {have}px: {text:?}"));
+                    }
+                    let card =
+                        (app.provision.is_some() && app.create_otp) || app.otp_setup.is_some();
+                    if card {
+                        let (x, y, w, h) = app.enroll();
+                        let frame = app.r(x, y, w, h);
+                        let mut r = Rect::default();
+                        GetWindowRect(child, &mut r);
+                        let mut pts = [
+                            Point {
+                                x: r.left,
+                                y: r.top,
+                            },
+                            Point {
+                                x: r.right,
+                                y: r.bottom,
+                            },
+                        ];
+                        MapWindowPoints(0, app.hwnd, pts.as_mut_ptr(), 2);
+                        let inside = pts[0].y >= frame.top && pts[0].y < frame.bottom;
+                        if inside && pts[1].y > frame.bottom - app.px(8) {
+                            failures.push(format!("{name}: touches the card border: {text:?}"));
+                        }
+                    }
+                }
+            };
+            for screen in [Screen::Welcome, Screen::Login, Screen::Restore] {
+                app.screen = screen;
+                app.build();
+                check(&app, "pre-unlock");
+            }
+            app.provision = Some(Provision::new().unwrap());
+            for otp in [false, true] {
+                app.screen = Screen::Create;
+                app.create_otp = otp;
+                app.build();
+                check(&app, if otp { "create-otp" } else { "create" });
+            }
+            app.provision = None;
+            app.session = Some(session);
+            for screen in [
+                Screen::Vault,
+                Screen::Edit,
+                Screen::Password,
+                Screen::OtpBackup,
+            ] {
+                app.screen = screen;
+                app.build();
+                check(&app, "unlocked");
+            }
+            app.otp_setup = Some(
+                app.session
+                    .as_ref()
+                    .unwrap()
+                    .otp_setup("synthetic layout password")
+                    .unwrap(),
+            );
+            app.build();
+            check(&app, "otp-backup-qr");
+            // Every long Korean message in the source, in the status line.
+            app.otp_setup = None;
+            app.screen = Screen::Vault;
+            app.build();
+            let status = app.handle(STATUS);
+            for source in [
+                include_str!("main.rs"),
+                include_str!("vault.rs"),
+                include_str!("crypto.rs"),
+            ] {
+                for literal in source.split('"').skip(1).step_by(2) {
+                    let korean = literal
+                        .chars()
+                        .filter(|c| ('\u{ac00}'..='\u{d7a3}').contains(c))
+                        .count();
+                    if korean < 25 || literal.contains("\\r\\n") || literal.contains("\\n") {
+                        continue;
+                    }
+                    let (need, have) = needed(status, literal);
+                    if need > have {
+                        failures.push(format!("status: needs {need}px, has {have}px: {literal:?}"));
+                    }
+                }
+            }
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
     /// Synthetic vault on disk with a fresh OTP code that opens it.
     fn synthetic_session(dir: &std::path::Path, password: &str) -> Session {
