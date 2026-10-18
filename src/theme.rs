@@ -25,6 +25,9 @@ pub struct Palette {
     pub knob: u32,
     pub danger: u32,
     pub unlocked: u32,
+    /// Recommended option (e.g. turning on the OTP); text on it uses `bg`.
+    pub accent: u32,
+    pub accent_pressed: u32,
 }
 pub const LIGHT: Palette = Palette {
     bg: rgb(255, 255, 255),
@@ -40,6 +43,8 @@ pub const LIGHT: Palette = Palette {
     knob: rgb(255, 255, 255),
     danger: rgb(185, 28, 28),
     unlocked: rgb(22, 163, 74),
+    accent: rgb(21, 128, 61),
+    accent_pressed: rgb(22, 101, 52),
 };
 pub const DARK: Palette = Palette {
     bg: rgb(18, 18, 20),
@@ -55,6 +60,8 @@ pub const DARK: Palette = Palette {
     knob: rgb(212, 212, 216),
     danger: rgb(248, 113, 113),
     unlocked: rgb(74, 222, 128),
+    accent: rgb(74, 222, 128),
+    accent_pressed: rgb(34, 197, 94),
 };
 
 // Owner-drawn button variants, stored in the button's GWLP_USERDATA.
@@ -72,6 +79,8 @@ pub const LINK: isize = 10;
 /// Password reveal toggle: eye while masked, struck-through eye while shown.
 pub const EYE: isize = 11;
 pub const EYE_ON: isize = 12;
+/// Filled green button for the recommended choice.
+pub const ACCENT: isize = 13;
 // Static label tones, stored the same way.
 pub const TONE_TEXT: isize = 0;
 pub const TONE_MUTED: isize = 1;
@@ -312,6 +321,17 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
                 round(d.dc, &r, radius, Some(c), None);
                 (p.bg, t.strong)
             }
+            ACCENT => {
+                let c = if disabled {
+                    p.track
+                } else if pressed {
+                    p.accent_pressed
+                } else {
+                    p.accent
+                };
+                round(d.dc, &r, radius, Some(c), None);
+                (p.bg, t.strong)
+            }
             SECONDARY => {
                 round(
                     d.dc,
@@ -403,7 +423,11 @@ unsafe fn draw_button(t: &Theme, d: &DrawItem) {
         };
         text(d.dc, &label, &text_rect, font, color, flags);
         if focus {
-            let ring = if variant == PRIMARY { p.bg } else { p.focus };
+            let ring = if matches!(variant, PRIMARY | ACCENT) {
+                p.bg
+            } else {
+                p.focus
+            };
             round(
                 d.dc,
                 &inset(&r, t.px(3), t.px(3)),

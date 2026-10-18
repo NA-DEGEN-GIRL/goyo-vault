@@ -103,7 +103,7 @@ const CARD_W: i32 = 464;
 const HINT: (i32, i32, i32, i32) = (CARD_X, 372, CARD_W, 40);
 /// Dark/light segmented switch in the top-right corner of every screen.
 const THEME_SWITCH: (i32, i32, i32, i32) = (704, 21, 132, 36);
-/// Create with the OTP off: the painted card that offers it.
+/// Create with the OTP off: the painted card that recommends it.
 const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
 /// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
 const LOGIN_LINKS: (i32, i32, i32, i32) = (AX, 500, AW, 1);
@@ -921,36 +921,28 @@ impl App {
                     theme::PRIMARY,
                 );
             } else {
-                // The OTP is optional; the card (painted frame) says what it adds.
+                // Off by default but recommended: the card's frame, heading
+                // and "권장" badge are painted (see draw_otp_offer).
                 let (cx, cy, cw, ch) = CREATE_OTP_CARD;
-                let strong = self.font_of(|t| t.strong);
-                self.text(
-                    0,
-                    "휴대폰 OTP · 선택 사항",
-                    (cx + 20, cy + 18, cw - 180, 22),
-                    strong,
-                    TONE_TEXT,
-                    0,
-                );
                 self.button(
                     OTP_TOGGLE,
-                    "OTP 사용",
-                    cx + cw - 132,
+                    "OTP 켜기",
+                    cx + cw - 136,
                     cy + 14,
-                    116,
-                    32,
-                    theme::SECONDARY,
+                    120,
+                    36,
+                    theme::ACCENT,
                 );
                 self.note(
-                    "켜면 금고를 열 때마다 휴대폰 OTP 앱의 6자리도 입력합니다.\r\n비밀번호를 엿본 사람이 이 PC에서 여는 것을 막아 줍니다.\r\n금고·열쇠 파일을 복사해 간 사람은 막지 못하니, 열쇠 파일은 따로 보관하세요.",
+                    "켜 두면 비밀번호가 새어도 휴대폰 없이는 이 앱으로 금고를 열 수 없습니다.\r\n금고를 열 때마다 휴대폰 OTP 앱의 6자리를 함께 입력합니다.\r\n금고·열쇠 파일을 통째로 복사해 가는 것은 막지 못하니, 열쇠 파일은 따로 두세요.",
                     cx + 20,
-                    cy + 52,
+                    cy + 54,
                     cw - 40,
                     60,
                 );
                 self.button(
                     SUBMIT,
-                    "금고 만들기",
+                    "OTP 없이 금고 만들기",
                     AX,
                     cy + ch + 20,
                     AW,
@@ -1726,7 +1718,7 @@ impl App {
                 self.status = if self.create_otp {
                     "휴대폰 OTP 앱으로 QR을 등록하고, 앱에 표시된 6자리를 입력하세요."
                 } else {
-                    "OTP 없이 비밀번호와 열쇠 파일로 여는 금고를 만듭니다."
+                    "OTP 없이 비밀번호와 열쇠 파일로만 여는 금고를 만듭니다. 이 PC를 다른 사람도 쓸 수 있다면 OTP를 켜 두세요."
                 }
                 .into();
                 // Same OTP secret either way, so a QR already scanned stays valid.
@@ -2153,16 +2145,7 @@ impl App {
                     let card = self.r(AX, self.password_card_y(), AW, 80);
                     theme::round(dc, &card, self.px(10), Some(p.bg), Some(p.border));
                 }
-                Screen::Create if !self.create_otp => {
-                    let (x, y, w, h) = CREATE_OTP_CARD;
-                    theme::round(
-                        dc,
-                        &self.r(x, y, w, h),
-                        self.px(12),
-                        Some(p.bg),
-                        Some(p.border),
-                    );
-                }
+                Screen::Create if !self.create_otp => self.draw_otp_offer(dc, &p, small),
                 _ => {}
             }
             let focus = GetFocus();
@@ -2193,6 +2176,41 @@ impl App {
             if self.screen == Screen::Vault {
                 self.draw_detail(dc, small, title);
             }
+        }
+    }
+    /// Create with the OTP off: an accent frame, the heading and a "권장"
+    /// badge, painted so the badge can sit right after the heading.
+    unsafe fn draw_otp_offer(&self, dc: isize, p: &theme::Palette, small: isize) {
+        let Some(strong) = theme::with(|t| t.strong) else {
+            return;
+        };
+        let (x, y, w, h) = CREATE_OTP_CARD;
+        unsafe {
+            theme::round(
+                dc,
+                &self.r(x, y, w, h),
+                self.px(12),
+                Some(p.bg),
+                Some(p.accent),
+            );
+            let heading = "휴대폰 OTP로 한 번 더 잠그기";
+            theme::text(
+                dc,
+                heading,
+                &self.r(x + 20, y + 20, w - 180, 24),
+                strong,
+                p.text,
+                LINE,
+            );
+            let left = self.px(x + 20) + theme::text_width(dc, heading, strong) + self.px(10);
+            let badge = Rect {
+                left,
+                top: self.px(y + 22),
+                right: left + theme::text_width(dc, "권장", small) + self.px(18),
+                bottom: self.px(y + 42),
+            };
+            theme::round(dc, &badge, self.px(10), None, Some(p.accent));
+            theme::text(dc, "권장", &badge, small, p.accent, DT_CENTER | LINE);
         }
     }
     /// While another app is in front the card shows no QR and no key.
@@ -2307,7 +2325,7 @@ impl App {
                 ("금고 파일", "암호화된 항목\n(.goyo)"),
                 ("열쇠 파일", "금고와 따로 보관\n(.goyokey)"),
                 ("비밀번호", "12자 이상의\n긴 문장"),
-                ("휴대폰 OTP", "선택 사항\n켠 금고만 필요"),
+                ("휴대폰 OTP", "켜기 권장\n켠 금고만 필요"),
             ]
             .into_iter()
             .enumerate()
@@ -3466,6 +3484,11 @@ mod tests {
             app.command(CREATE, 0).unwrap();
             assert!(app.screen == Screen::Create && !app.create_otp);
             assert_eq!(app.handle(OTP), 0);
+            // Off, but offered as the recommended choice.
+            assert_eq!(
+                GetWindowLongPtrW(app.handle(OTP_TOGGLE), -21),
+                theme::ACCENT
+            );
             let code = app.provision.as_ref().unwrap().setup_code();
             for id in [PASS, CONFIRM] {
                 SetWindowTextW(app.handle(id), wide(pass).as_ptr());
