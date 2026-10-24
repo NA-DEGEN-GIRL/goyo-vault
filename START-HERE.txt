@@ -1,4 +1,4 @@
-Goyo Vault 0.6.0
+Goyo Vault 0.7.0
 
 1. Extract the whole ZIP to a folder only you use that is not synced
    (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
@@ -39,11 +39,15 @@ There is no automatic backup. Do it yourself:
   - Password: the app cannot recover it; remember it or store it safely
 Keep vault backups and key backups on different drives, and try a restore now and then.
 
-An open vault locks after more than 30 seconds in another app.
+By default an open vault locks after 60 seconds idle or more than 30 seconds in another
+app. 'Auto-lock' at the bottom right of the vault screen changes it to 5m, 30m or Off.
+Locking Windows (Win+L), sleep and shutdown always lock it; with Off, press Win+L when
+you leave.
 Anything shown and the copy permission are hidden the moment you switch.
 The create and restore screens keep what you typed when you switch apps
 (cleared after 5 minutes / 60 seconds of inactivity).
-If you copy a value from another app while editing, paste it within 30 seconds.
+If you copy a value from another app while editing, paste it within 30 seconds
+(default setting).
 The secret and notes fields block input methods (IME); paste text that needs one.
 To copy a value from the vault, turn on 'Allow copy' first.
 A copied value is wiped from the clipboard after 15 seconds.

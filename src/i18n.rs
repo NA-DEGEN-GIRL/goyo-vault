@@ -58,10 +58,13 @@ pub const EN: &[(&str, &str)] = &[
     ("+ 새 항목", "+ New entry"),
     ("12자 이상의\n긴 문장", "12+ characters,\na long phrase"),
     ("15초 보기", "Show 15 s"),
+    ("1분", "1m"),
     (
-        "60초 미사용·다른 앱 30초·화면 잠금 시 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
-        "Locks: 60 s idle · 30 s away · screen lock\r\nHidden from capture · cannot stop malware",
+        "2분 동안 쓰지 않아 OTP 화면을 닫았습니다.",
+        "Closed the OTP screen after 2 minutes without use.",
     ),
+    ("30분", "30m"),
+    ("5분", "5m"),
     ("API 키", "API key"),
     (
         "CON·NUL·COM1 같은 장치 이름은 파일 이름으로 쓸 수 없습니다.",
@@ -321,8 +324,8 @@ pub const EN: &[(&str, &str)] = &[
     ("비밀정보", "Secret"),
     ("비밀정보 · 여러 줄 가능", "Secret · may span several lines"),
     (
-        "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n이 화면에서 복사·잘라내기는 막혀 있고 붙여넣기만 됩니다.\r\n편집 중 내용이 화면에 보입니다. 다른 앱에 30초 넘게 머무르면 잠기고 저장하지 않은 내용은 지워집니다.",
-        "The secret and notes fields block input methods (IME), which could learn what you type; paste instead.\r\nCopy and cut are blocked on this screen; only paste works.\r\nWhat you edit is visible. After 30 s in another app the vault locks and unsaved changes are lost.",
+        "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n이 화면에서 복사·잘라내기는 막혀 있고 붙여넣기만 됩니다.",
+        "The secret and notes fields block input methods (IME), which could learn what you type; paste instead.\r\nCopy and cut are blocked on this screen; only paste works.",
     ),
     ("삭제", "Delete"),
     ("삭제할 항목을 선택하세요.", "Select an entry to delete."),
@@ -503,6 +506,23 @@ pub const EN: &[(&str, &str)] = &[
         "입력 보호를 확인할 수 없어 비밀번호를 표시하지 않았습니다.",
         "Input protection could not be confirmed, so the password stays hidden.",
     ),
+    ("자동 잠금", "Auto-lock"),
+    (
+        "자동 잠금 1분: 1분 동안 쓰지 않거나 다른 앱에 30초 넘게 머무르면 잠급니다.",
+        "Auto-lock 1 min: locks after 1 minute without use or 30 seconds in another app.",
+    ),
+    (
+        "자동 잠금 30분: 30분 동안 쓰지 않으면 잠급니다. 다른 앱에 있는 시간도 포함됩니다.",
+        "Auto-lock 30 min: locks after 30 minutes without use, time in other apps included.",
+    ),
+    (
+        "자동 잠금 5분: 5분 동안 쓰지 않으면 잠급니다. 다른 앱에 있는 시간도 포함됩니다.",
+        "Auto-lock 5 min: locks after 5 minutes without use, time in other apps included.",
+    ),
+    (
+        "자동 잠금 끔: 잠금 버튼, Windows 화면 잠금(Win+L), 절전, 종료 때만 잠깁니다. 자리를 비울 때는 Win+L을 누르세요.",
+        "Auto-lock off: locks only with Lock, the Windows screen lock (Win+L), sleep or shutdown. Press Win+L when you step away.",
+    ),
     (
         "자동 잠금 타이머를 시작할 수 없어 종료합니다.",
         "Cannot start the auto-lock timer; exiting.",
@@ -510,8 +530,12 @@ pub const EN: &[(&str, &str)] = &[
     ("잠금", "Lock"),
     ("잠금 해제", "Unlock"),
     (
-        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다.",
-        "Unlocked · changes are encrypted as soon as you save. Copying is off by default.",
+        "잠금 해제됨 · 자동 잠금이 꺼져 있습니다. 자리를 비울 때는 잠금 버튼이나 Win+L을 누르세요.",
+        "Unlocked · auto-lock is off. Press Lock or Win+L when you step away.",
+    ),
+    (
+        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다.",
+        "Unlocked · changes are encrypted as soon as you save. Hidden from capture, but this cannot stop malware.",
     ),
     ("잠김", "Locked"),
     (
@@ -564,6 +588,7 @@ pub const EN: &[(&str, &str)] = &[
         "켜기 권장\n켠 금고만 필요",
         "Recommended;\nonly if turned on",
     ),
+    ("끔", "Off"),
     (
         "클립보드 기록 제외 설정 실패",
         "Could not exclude the copy from clipboard history",
@@ -582,6 +607,22 @@ pub const EN: &[(&str, &str)] = &[
     ("텍스트 형식 오류", "Text format error"),
     ("텍스트가 없습니다.", "No text."),
     ("파일 경로를 지정하세요.", "Choose a file path."),
+    (
+        "편집 중 내용이 화면에 보입니다. 30분 동안 쓰지 않으면 잠기고 저장하지 않은 내용은 지워집니다.",
+        "What you edit is visible. After 30 minutes without use the vault locks and unsaved changes are lost.",
+    ),
+    (
+        "편집 중 내용이 화면에 보입니다. 5분 동안 쓰지 않으면 잠기고 저장하지 않은 내용은 지워집니다.",
+        "What you edit is visible. After 5 minutes without use the vault locks and unsaved changes are lost.",
+    ),
+    (
+        "편집 중 내용이 화면에 보입니다. 다른 앱에 30초 넘게 머무르면 잠기고 저장하지 않은 내용은 지워집니다.",
+        "What you edit is visible. After 30 s in another app the vault locks and unsaved changes are lost.",
+    ),
+    (
+        "편집 중 내용이 화면에 보입니다. 잠금·화면 잠금·절전 때 저장하지 않은 내용은 지워집니다.",
+        "What you edit is visible. Locking, the Windows screen lock and sleep clear unsaved changes.",
+    ),
     ("파일 선택", "Choose a file"),
     ("파일 식별 실패", "Could not identify the file"),
     ("파일 읽기 실패", "Could not read the file"),

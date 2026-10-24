@@ -80,10 +80,49 @@ const BACK: i32 = 126;
 const PEEK_PASS: i32 = 127;
 const PEEK_CONFIRM: i32 = 128;
 const PEEK_CURRENT: i32 = 129;
-/// An open vault locks once another app has had focus this long. Shorter
-/// trips (pasting a copied value, a screenshot tool's overlay) only hide
-/// what was shown; capture exclusion already keeps the window out of shots.
+/// With the shortest auto-lock, an open vault locks once another app has had
+/// focus this long. Shorter trips (pasting a copied value, a screenshot
+/// tool's overlay) only hide what was shown; capture exclusion already keeps
+/// the window out of shots. Longer settings count time away as unused time.
 const AWAY_LOCK: Duration = Duration::from_secs(30);
+/// Auto-lock choices for an open vault, in the order of the switch on the
+/// vault screen: caption, how long the vault may go unused (None: no timer;
+/// locking Windows, sleep and shutdown still lock), the status line when it
+/// is picked and the warning on the edit screen.
+const AUTO_LOCKS: [(&str, Option<Duration>, &str, &str); 4] = [
+    (
+        "1분",
+        Some(Duration::from_secs(60)),
+        "자동 잠금 1분: 1분 동안 쓰지 않거나 다른 앱에 30초 넘게 머무르면 잠급니다.",
+        "편집 중 내용이 화면에 보입니다. 다른 앱에 30초 넘게 머무르면 잠기고 저장하지 않은 내용은 지워집니다.",
+    ),
+    (
+        "5분",
+        Some(Duration::from_secs(300)),
+        "자동 잠금 5분: 5분 동안 쓰지 않으면 잠급니다. 다른 앱에 있는 시간도 포함됩니다.",
+        "편집 중 내용이 화면에 보입니다. 5분 동안 쓰지 않으면 잠기고 저장하지 않은 내용은 지워집니다.",
+    ),
+    (
+        "30분",
+        Some(Duration::from_secs(1800)),
+        "자동 잠금 30분: 30분 동안 쓰지 않으면 잠급니다. 다른 앱에 있는 시간도 포함됩니다.",
+        "편집 중 내용이 화면에 보입니다. 30분 동안 쓰지 않으면 잠기고 저장하지 않은 내용은 지워집니다.",
+    ),
+    (
+        "끔",
+        None,
+        "자동 잠금 끔: 잠금 버튼, Windows 화면 잠금(Win+L), 절전, 종료 때만 잠깁니다. 자리를 비울 때는 Win+L을 누르세요.",
+        "편집 중 내용이 화면에 보입니다. 잠금·화면 잠금·절전 때 저장하지 않은 내용은 지워집니다.",
+    ),
+];
+/// Segments of the auto-lock switch, in the order of AUTO_LOCKS.
+const AUTO_LOCK: i32 = 139;
+const AUTO_LOCK_LAST: i32 = AUTO_LOCK + AUTO_LOCKS.len() as i32 - 1;
+/// Bottom right of the vault screen, next to its "자동 잠금" label.
+const AUTO_LOCK_SWITCH: (i32, i32, i32, i32) = (634, 640, 202, 36);
+/// The OTP backup QR closes after this long without use, whatever the
+/// auto-lock setting; scanning it takes longer than the shortest setting.
+const OTP_QR_IDLE: Duration = Duration::from_secs(120);
 const OTP_SETUP: i32 = 135;
 /// Create: turns the optional OTP on or off.
 const OTP_TOGGLE: i32 = 136;
@@ -180,6 +219,8 @@ struct App {
     shown: [bool; 3],
     /// Tone of the status line on the next build (one-shot).
     status_tone: isize,
+    /// Index into AUTO_LOCKS, kept in goyo-vault.autolock.
+    auto_lock: usize,
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
@@ -226,6 +267,7 @@ impl App {
             inactive: false,
             shown: [false; 3],
             status_tone: TONE_MUTED,
+            auto_lock: load_auto_lock(),
         };
         // The last vault and key that opened, so a key kept on a USB drive does
         // not have to be picked with "찾기" on every start.
@@ -1123,14 +1165,17 @@ impl App {
         if self.session.as_ref().is_some_and(Session::uses_otp) {
             self.button(OTP_SETUP, "OTP 백업", 420, 642, 104, 34, theme::SECONDARY);
         }
-        self.text(
-            0,
-            "60초 미사용·다른 앱 30초·화면 잠금 시 잠금\r\n화면 캡처 차단 · 악성코드까지 막지는 못합니다.",
-            (536, 640, 300, 38),
-            small,
-            TONE_MUTED,
-            2,
-        );
+        self.text(0, "자동 잠금", (536, 650, 90, 20), small, TONE_MUTED, 2);
+        let (x, y, _, _) = AUTO_LOCK_SWITCH;
+        for (i, (name, ..)) in AUTO_LOCKS.iter().enumerate() {
+            let variant = if i == self.auto_lock {
+                theme::TAB_ON
+            } else {
+                theme::TAB
+            };
+            let id = AUTO_LOCK + i as i32;
+            self.button(id, name, x + 2 + i as i32 * 50, y + 2, 48, 32, variant);
+        }
         self.sync_detail();
         unsafe {
             SetFocus(list);
@@ -1182,13 +1227,14 @@ impl App {
         self.input(SECRET, &values[2], (40, 294, 796, 130), false, true, 0);
         self.label("메모", 40, 440, 400);
         self.input(NOTES, &values[3], (40, 462, 796, 100), false, true, 0);
-        self.note(
-            "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n이 화면에서 복사·잘라내기는 막혀 있고 붙여넣기만 됩니다.\r\n편집 중 내용이 화면에 보입니다. 다른 앱에 30초 넘게 머무르면 잠기고 저장하지 않은 내용은 지워집니다.",
-            40,
-            574,
-            796,
-            58,
+        let note = format!(
+            "{}\r\n{}",
+            tr(
+                "비밀정보·메모 칸은 한글 IME를 차단합니다. 입력기 학습 위험이 있어 붙여넣기를 권장합니다.\r\n이 화면에서 복사·잘라내기는 막혀 있고 붙여넣기만 됩니다."
+            ),
+            tr(AUTO_LOCKS[self.auto_lock].3)
         );
+        self.note(&note, 40, 574, 796, 58);
         self.button(CANCEL, "취소", 588, 640, 100, 40, theme::SECONDARY);
         self.button(SAVE, "암호화하여 저장", 696, 640, 140, 40, theme::PRIMARY);
         unsafe {
@@ -1387,7 +1433,7 @@ impl App {
     /// user is elsewhere: passwords shown with the eye are masked and the new
     /// vault's OTP QR is hidden; with a vault open the 15-second view and copy
     /// permission also end and the OTP backup QR closes. Pre-unlock forms are
-    /// kept. An open vault locks after AWAY_LOCK (see timer). Runs on
+    /// kept. An open vault locks per the auto-lock setting (see timer). Runs on
     /// WM_ACTIVATEAPP and from the timer, which also catches missed messages.
     fn deactivated(&mut self) {
         self.mask_passwords();
@@ -1425,6 +1471,25 @@ impl App {
                 InvalidateRect(self.hwnd, null(), 0);
             }
         }
+    }
+    /// Picks an auto-lock choice; it applies from the next timer tick and is
+    /// saved next to the exe.
+    fn set_auto_lock(&mut self, choice: usize) {
+        self.auto_lock = choice;
+        save_auto_lock(choice);
+        for i in 0..AUTO_LOCKS.len() {
+            let variant = if i == choice {
+                theme::TAB_ON
+            } else {
+                theme::TAB
+            };
+            let b = self.handle(AUTO_LOCK + i as i32);
+            unsafe {
+                SetWindowLongPtrW(b, -21, variant);
+                InvalidateRect(b, null(), 0);
+            }
+        }
+        self.status(AUTO_LOCKS[choice].2);
     }
     fn lock(&mut self, why: &str, clear_clipboard: bool) {
         self.auth_dirty = false;
@@ -1619,8 +1684,11 @@ impl App {
                     (true, false) => {
                         "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요."
                     }
+                    _ if AUTO_LOCKS[self.auto_lock].1.is_none() => {
+                        "잠금 해제됨 · 자동 잠금이 꺼져 있습니다. 자리를 비울 때는 잠금 버튼이나 Win+L을 누르세요."
+                    }
                     _ => {
-                        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다."
+                        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다."
                     }
                 };
                 self.status = match warning {
@@ -1772,6 +1840,7 @@ impl App {
             }
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
             LANG_KO | LANG_EN => self.set_language(id == LANG_EN),
+            AUTO_LOCK..=AUTO_LOCK_LAST => self.set_auto_lock((id - AUTO_LOCK) as usize),
             PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT => self.peek(id)?,
             PRESET..=PRESET_LAST => unsafe {
                 let kind = self.handle(KIND);
@@ -1937,6 +2006,7 @@ impl App {
                     | COPY
                     | PREVIOUS
                     | NEXT
+                    | AUTO_LOCK..=AUTO_LOCK_LAST
             ),
             Screen::Edit => matches!(
                 id,
@@ -2013,21 +2083,33 @@ impl App {
             } else if !self.inactive || (self.session.is_some() && self.away_since.is_none()) {
                 self.deactivated();
             }
-            if self.session.is_some() && self.away_since.is_some_and(|t| now - t >= AWAY_LOCK) {
+            let away = self.away_since.map_or(Duration::ZERO, |t| now - t);
+            if self.session.is_some() && self.auto_lock == 0 && away >= AWAY_LOCK {
                 self.lock("다른 앱에 30초 넘게 머물러 잠갔습니다.", false);
                 return;
             }
-            // Scanning a QR or copying the key onto paper takes longer.
-            let seconds = if self.provision.is_some() {
-                300
+            let idle = now.duration_since(self.activity);
+            // Typed forms before a vault is open are cleared on fixed times;
+            // copying the new key onto paper or scanning a QR takes longer.
+            let limit = if self.provision.is_some() {
+                Some(Duration::from_secs(300))
+            } else if self.session.is_none() {
+                Some(Duration::from_secs(60))
             } else if self.otp_setup.is_some() {
-                120
+                AUTO_LOCKS[self.auto_lock].1.map(|l| l.max(OTP_QR_IDLE))
             } else {
-                60
+                AUTO_LOCKS[self.auto_lock].1
             };
-            if now.duration_since(self.activity) >= Duration::from_secs(seconds) {
+            // Time in another app counts as unused even if an input slipped by.
+            if limit.is_some_and(|l| idle.max(away) >= l) {
                 self.lock("미사용 시간이 지나 자동으로 잠갔습니다.", true);
                 return;
+            }
+            if self.otp_setup.is_some() && idle >= OTP_QR_IDLE {
+                self.otp_setup = None;
+                self.screen = Screen::Vault;
+                self.status = "2분 동안 쓰지 않아 OTP 화면을 닫았습니다.".into();
+                self.build();
             }
         }
         if ticking && self.screen == Screen::Vault {
@@ -2163,7 +2245,8 @@ impl App {
             label.left += self.px(22);
             label.right -= self.px(8);
             theme::text(dc, &state, &label, small, p.muted, LINE);
-            for (sx, sy, sw, sh) in [THEME_SWITCH, LANG_SWITCH] {
+            let vault = (self.screen == Screen::Vault).then_some(AUTO_LOCK_SWITCH);
+            for (sx, sy, sw, sh) in [THEME_SWITCH, LANG_SWITCH].into_iter().chain(vault) {
                 theme::round(
                     dc,
                     &self.r(sx, sy, sw, sh),
@@ -3063,6 +3146,40 @@ fn save_language(english: bool) {
         write_setting(&p, if english { b"en" } else { b"ko" });
     }
 }
+/// The auto-lock choice in minutes ("1", "5", "30") or "off", next to the
+/// exe. Anything else is the shortest choice.
+fn auto_lock_file() -> Option<PathBuf> {
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join("goyo-vault.autolock"),
+    )
+}
+const AUTO_LOCK_NAMES: [&[u8]; AUTO_LOCKS.len()] = [b"1", b"5", b"30", b"off"];
+fn load_auto_lock() -> usize {
+    use std::io::Read;
+    if cfg!(test) {
+        return 0;
+    }
+    let mut buf = Vec::new();
+    let read = auto_lock_file()
+        .and_then(|p| std::fs::File::open(p).ok())
+        .and_then(|f| f.take(16).read_to_end(&mut buf).ok());
+    read.map_or(0, |_| auto_lock_choice(&buf))
+}
+/// Index into AUTO_LOCKS for the saved text.
+fn auto_lock_choice(saved: &[u8]) -> usize {
+    AUTO_LOCK_NAMES
+        .iter()
+        .position(|n| *n == saved.trim_ascii())
+        .unwrap_or(0)
+}
+fn save_auto_lock(choice: usize) {
+    if let Some(p) = auto_lock_file() {
+        write_setting(&p, AUTO_LOCK_NAMES[choice]);
+    }
+}
 fn save_theme(dark: bool) {
     if let Some(p) = theme_file() {
         write_setting(&p, if dark { b"dark" } else { b"light" });
@@ -3581,6 +3698,14 @@ mod tests {
             app.build();
             visit(&mut app, "vault-copy");
             app.copy_until = None;
+            // The edit screen's warning follows the auto-lock choice.
+            for choice in 1..AUTO_LOCKS.len() {
+                app.auto_lock = choice;
+                app.screen = Screen::Edit;
+                app.build();
+                visit(&mut app, &format!("edit-auto-lock-{choice}"));
+            }
+            app.auto_lock = 0;
             for (screen, name) in [
                 (Screen::Edit, "edit"),
                 (Screen::Password, "password"),
@@ -4117,6 +4242,105 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// The auto-lock switch on the vault screen. Longer choices count time in
+    /// another app as unused time; "끔" keeps the vault open on the timer, but
+    /// the OTP backup QR still closes after OTP_QR_IDLE.
+    #[test]
+    fn auto_lock_choices() {
+        assert_eq!(auto_lock_choice(b"5\r\n"), 1);
+        assert_eq!(auto_lock_choice(b"off"), 3);
+        assert_eq!(auto_lock_choice(b"never"), 0);
+        let dir = test_dir("auto-lock");
+        std::fs::create_dir(dir.join("b")).unwrap();
+        let pass = "synthetic auto-lock password";
+        let sessions = [
+            synthetic_session(&dir, pass),
+            synthetic_session(&dir.join("b"), pass),
+        ];
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetForegroundWindow(h: Hwnd) -> i32;
+        }
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            // Stands in for another app. build() focuses a control, which can
+            // bring the test window to the front, so leave it before a check.
+            let other = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            let leave = |app: &mut App, away: Duration| {
+                SetForegroundWindow(other);
+                assert!(!is_foreground(h));
+                app.deactivated();
+                app.away_since = Some(Instant::now() - away);
+            };
+            let mut app = App::new(h);
+            app.vault_path = dir.join("missing.goyo");
+            app.screen = app.home();
+            app.build();
+            assert!(app.command(AUTO_LOCK + 3, 0).is_err()); // only with a vault open
+            assert_eq!(app.auto_lock, 0);
+            let [first, second] = sessions;
+            app.session = Some(first);
+            app.screen = Screen::Vault;
+            app.build();
+            let variant = |app: &App, i: i32| GetWindowLongPtrW(app.handle(AUTO_LOCK + i), -21);
+            assert_eq!(variant(&app, 0), theme::TAB_ON);
+            app.command(AUTO_LOCK + 1, 0).unwrap();
+            assert_eq!(app.auto_lock, 1);
+            assert_eq!(variant(&app, 0), theme::TAB);
+            assert_eq!(variant(&app, 1), theme::TAB_ON);
+            assert_eq!(app.status, AUTO_LOCKS[1].2);
+            // Five minutes: 31 s in another app no longer locks; five minutes do.
+            leave(&mut app, AWAY_LOCK + Duration::from_secs(1));
+            app.timer();
+            assert!(app.session.is_some());
+            app.away_since = Some(Instant::now() - Duration::from_secs(301));
+            app.timer();
+            assert!(app.session.is_none());
+            assert_eq!(app.status, "미사용 시간이 지나 자동으로 잠갔습니다.");
+            // Off: an hour unused and away keeps the vault open.
+            app.session = Some(second);
+            app.screen = Screen::Vault;
+            app.build();
+            app.command(AUTO_LOCK + 3, 0).unwrap();
+            leave(&mut app, Duration::from_secs(3600));
+            app.activity = Instant::now() - Duration::from_secs(3600);
+            app.timer();
+            assert!(app.session.is_some() && app.screen == Screen::Vault);
+            // The OTP backup QR closes on its own time; the vault stays open.
+            // Leaving the app would close it at once, so the timer must see an
+            // app switch that has already been handled and just begun.
+            let just_left = |app: &mut App| {
+                app.inactive = true;
+                app.away_since = Some(Instant::now());
+            };
+            app.otp_setup = Some(app.session.as_ref().unwrap().otp_setup(pass).unwrap());
+            app.screen = Screen::OtpBackup;
+            app.build();
+            just_left(&mut app);
+            app.activity = Instant::now() - OTP_QR_IDLE - Duration::from_secs(1);
+            app.timer();
+            assert!(app.otp_setup.is_none() && app.screen == Screen::Vault);
+            assert!(app.session.is_some());
+            // Shortest choice: the QR screen locks the vault after OTP_QR_IDLE.
+            app.command(AUTO_LOCK, 0).unwrap();
+            app.otp_setup = Some(app.session.as_ref().unwrap().otp_setup(pass).unwrap());
+            app.screen = Screen::OtpBackup;
+            app.build();
+            just_left(&mut app);
+            app.activity = Instant::now() - Duration::from_secs(61);
+            app.timer();
+            assert!(app.session.is_some() && app.otp_setup.is_some());
+            app.activity = Instant::now() - OTP_QR_IDLE - Duration::from_secs(1);
+            app.timer();
+            assert!(app.session.is_none() && app.otp_setup.is_none());
+            drop(app);
+            DestroyWindow(other);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn native_control_protection_layout_and_expiry() {
         // Own hidden test window, synthetic strings only; no real vault or
@@ -4595,7 +4819,7 @@ mod tests {
                     // Status lines as the real app shows them on each screen.
                     a.status = match screen {
                         Screen::Login => "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.",
-                        Screen::Vault => "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 복사는 기본적으로 꺼져 있습니다.",
+                        Screen::Vault => "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다.",
                         _ => "",
                     }
                     .into();

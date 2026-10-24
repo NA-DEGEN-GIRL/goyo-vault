@@ -13,7 +13,7 @@
 - **Fully offline:** no network code, no server, account, sync or auto-update.
 - **Opening a vault takes** the vault file (`.goyo`), a separate key file (`.goyokey`) and your password. A phone OTP is off by default, but **turning it on is recommended.** Only the two files and the password take part in decryption, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
-- **Auto-lock** of an open vault after 60 seconds idle (2 minutes on the OTP backup screen), after 30 seconds in another app, when you lock the screen, the PC sleeps or Windows shuts down.
+- **Auto-lock** of an open vault, by default after 60 seconds idle (2 minutes on the OTP backup screen) or 30 seconds in another app; on the vault screen you can change it to 5 minutes, 30 minutes or off. Locking the screen, sleep and Windows shutdown always lock it.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
 - **A single executable, no installer.** Dark and light themes, Korean and English interface.
 - **There is no automatic backup.** You make backups yourself; [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what and when.
@@ -33,7 +33,7 @@
 |Clipboard|Wiped after 15 seconds, excluded from Win+V history and cloud sync|Copying works only after you turn on "allow copy".|
 |Other programs|Window messages blocked, memory access restricted, DLL planting blocked|Other programs cannot read the input fields, fake clicks to make the app copy a secret, or read its memory.|
 |Transparency|Open source, pinned dependencies, the same source builds the same executable (`/Brepro`)|Anyone can read the code, build it and compare the result with the release.|
-|Verification|30 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
+|Verification|31 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
 
 **How long the password holds out if someone gets both files** (estimates, generously assuming one high-end GPU tries 100 passwords per second)
 
@@ -117,7 +117,7 @@ Press **+ New entry**, fill in name, type, secret and note, then press **Save en
 - Type the kind yourself or use the **password · seed phrase · private key · API key** buttons.
 - Multi-line keys such as PEM files are kept exactly.
 - **Names are always visible in the list,** so never put a secret in the name.
-- For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. You can copy a value in another app, but **come back within 30 seconds** to paste it; staying away longer locks the vault and clears unsaved edits.
+- For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. You can copy a value in another app, but with the default auto-lock (1 minute) **come back within 30 seconds** to paste it; staying away longer locks the vault and clears unsaved edits.
 
 ### 4. View and copy
 
@@ -134,7 +134,17 @@ Pick an entry in the list to see it on the right.
 
 ![Open vault](docs/images/en/login.png)
 
-The vault locks itself after 60 seconds without use, after 30 seconds in another app, when you lock the screen or the PC sleeps. **Lock** locks it right away.
+**Lock** locks the vault right away. Locking Windows (Win+L), sleep and Windows shutdown always lock it.
+
+Choose any other automatic locking under **Auto-lock** at the bottom right of the vault screen.
+
+|Choice|Locks|
+|---|---|
+|**1m** (default)|after 60 seconds without use or 30 seconds in another app; 2 minutes while the OTP backup QR is shown|
+|**5m**, **30m**|after that long without use. Time in other apps counts as unused.|
+|**Off**|never on a timer.|
+
+If it locks too often on a PC only you use, make it longer or turn it off. The trade-off: if you step away without locking the screen, whoever sits down at the PC sees the open vault. With Off, press **Win+L** whenever you leave, and set Windows to lock itself when you are away (for example the screen saver's "On resume, display logon screen"). The choice is stored as `1`, `5`, `30` or `off` in `goyo-vault.autolock` next to the executable. The OTP backup QR closes after 2 minutes without use whatever the setting.
 
 A quick trip to another app (pasting a copied value, a screenshot tool) does not lock it. The moment you switch, though, **Show for 15 s**, **Allow copy**, any password you made visible and the **OTP backup** QR are hidden. The vault window never appears in screen captures anyway.
 
@@ -188,7 +198,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 |**Password**|Once, when you create the vault|Memorize it or write it down somewhere safe. **The app has no recovery of any kind.**|
 |**Restore drill**|Every few months|**Restore from backup** to a new file; the original is not changed.|
 
-**No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
+**No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language), `goyo-vault.autolock` (auto-lock) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
 
 **A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
 
