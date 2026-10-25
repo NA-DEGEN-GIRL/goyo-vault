@@ -142,6 +142,10 @@ pub const EN: &[(&str, &str)] = &[
         "같은 이름의 파일이 이미 있습니다. 새 금고·열쇠 파일 이름을 바꾸세요.",
         "A file with that name already exists. Rename the new vault or key file.",
     ),
+    (
+        "경고: 서버가 이전 상태의 금고를 보냈습니다. 이 PC의 항목은 그대로이며 서버에 다시 올립니다.",
+        "Warning: the server sent an older state of the vault. Nothing here changed; this PC uploads its data again.",
+    ),
     ("경로 오류", "Path error"),
     ("경로 확인 실패", "Could not check the path"),
     ("고요 금고", "Goyo Vault"),
@@ -193,6 +197,14 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("니모닉", "Seed phrase"),
     (
+        "다른 PC에서 항목 {}개가 삭제되거나 수정되었습니다. 합치기 전 상태를 {}에 보관했습니다.",
+        "{} entries were deleted or edited on another PC. The state before merging was kept in {}.",
+    ),
+    (
+        "다른 PC의 변경을 합쳤습니다: 추가 {}개, 삭제 {}개.",
+        "Merged changes from another PC: {} added, {} removed.",
+    ),
+    (
         "다른 고요 금고에서 사용 중인 파일입니다.",
         "This file is in use by another Goyo Vault window.",
     ),
@@ -225,6 +237,45 @@ pub const EN: &[(&str, &str)] = &[
     (
         "대화상자가 열린 동안 잠겼습니다. 다시 인증하세요.",
         "The vault locked while the dialog was open. Unlock it again.",
+    ),
+    (
+        "더 새로운 버전에서 만든 금고 형식입니다. 고요 금고를 업데이트하세요.",
+        "This vault was saved by a newer version. Update Goyo Vault.",
+    ),
+    ("도우미 꺼짐", "Helper off"),
+    ("동기화 경고", "Sync warning"),
+    (
+        "동기화 도우미(goyo-sync.exe)가 실행 중이 아닙니다. 변경은 이 PC에 저장되어 있습니다.",
+        "The sync helper (goyo-sync.exe) is not running. Your changes are saved on this PC.",
+    ),
+    (
+        "동기화 오류: SSH 인증에 실패했습니다. goyo-sync.log를 확인하세요.",
+        "Sync error: SSH authentication failed. See goyo-sync.log.",
+    ),
+    (
+        "동기화 오류: goyo-sync.log를 확인하세요. 변경은 이 PC에 저장되어 있습니다.",
+        "Sync error: see goyo-sync.log. Your changes are saved on this PC.",
+    ),
+    (
+        "동기화 오프라인: 변경은 이 PC에 저장되어 있고 연결되면 올립니다.",
+        "Sync offline: changes are saved on this PC and upload once connected.",
+    ),
+    (
+        "동기화 중단: 서버 호스트 키가 바뀌었습니다. 확인하기 전에는 연결하지 않습니다.",
+        "Sync stopped: the server's host key changed. goyo-sync will not connect until you check it.",
+    ),
+    ("동기화됨", "Synced"),
+    (
+        "동기화됨 · 확인 코드 {} (다른 PC에서도 같으면 같은 내용입니다)",
+        "Synced · check code {} (the same code on another PC means the same contents)",
+    ),
+    (
+        "동기화를 켰습니다. 서버에 올라가면 위에 '동기화됨'이 표시됩니다.",
+        "Sync is on. 'Synced' appears at the top once the vault is on the server.",
+    ),
+    (
+        "두 PC에서 함께 고친 항목 {}개는 두 버전을 모두 남겼습니다. 이름이 같은 항목을 확인하세요.",
+        "Entries edited on two PCs: {}. Both versions were kept; check entries with the same name.",
     ),
     (
         "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
@@ -328,6 +379,10 @@ pub const EN: &[(&str, &str)] = &[
         "The secret and notes fields block input methods (IME), which could learn what you type; paste instead.\r\nCopy and cut are blocked on this screen; only paste works.",
     ),
     ("삭제", "Delete"),
+    (
+        "삭제·수정 기록이 한도(65,536개)에 도달했습니다.",
+        "The delete/edit record limit (65,536) was reached.",
+    ),
     ("삭제할 항목을 선택하세요.", "Select an entry to delete."),
     ("새 OTP 6자리 · {tag}", "New OTP code · {tag}"),
     (
@@ -376,6 +431,18 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("새 항목", "New entry"),
     (
+        "서버 사본이 새 버전 형식이라 동기화를 멈췄습니다. 고요 금고를 업데이트하세요.",
+        "The server copy uses a newer format, so sync stopped. Update Goyo Vault.",
+    ),
+    (
+        "서버 사본이 다른 금고의 것이라 무시했습니다. goyo-sync를 멈추고 동기화 폴더를 지운 뒤 다시 실행하세요.",
+        "The server copy belongs to another vault and was ignored. Stop goyo-sync, delete the sync folder and start it again.",
+    ),
+    (
+        "서버에서 받은 금고를 인증하지 못해 무시했습니다(손상 또는 변조). 이 PC의 상태를 다시 올립니다.",
+        "The copy from the server failed authentication and was ignored (damaged or altered). This PC uploads its state again.",
+    ),
+    (
         "선택한 항목을 삭제할까요? 기존 백업 사본은 삭제되지 않습니다.",
         "Delete the selected entry? Existing backups keep their copy.",
     ),
@@ -405,7 +472,9 @@ pub const EN: &[(&str, &str)] = &[
         "Running from inside a ZIP or a temporary folder, which may be deleted. Extract to a folder you will keep and run it from there.",
     ),
     ("앱에 표시된 6자리", "Code shown in the app"),
+    ("연결 안 됨", "Offline"),
     ("열림 · {}", "Open · {}"),
+    ("열림 · {} · {}", "Open · {} · {}"),
     ("열쇠 백업", "Back up key"),
     ("열쇠 파일", "Key file"),
     (
@@ -429,6 +498,10 @@ pub const EN: &[(&str, &str)] = &[
         "The key file was changed elsewhere. Lock and open the vault again.",
     ),
     (
+        "열쇠 파일이 동기화 폴더 안에 있어 동기화하지 않습니다. 열쇠를 다른 폴더로 옮기세요.",
+        "The key file is inside the sync folder, so this vault does not sync. Move the key file elsewhere.",
+    ),
+    (
         "열쇠 파일이 변경되었습니다. 잠근 뒤 새 비밀번호로 다시 열고 백업하세요.",
         "The key file was changed. Lock, open it again with the new password and back up the key.",
     ),
@@ -440,6 +513,7 @@ pub const EN: &[(&str, &str)] = &[
         "예비 휴대폰이나 다른 OTP 앱에 등록하면 지금 휴대폰과 같은 번호가 나옵니다.",
         "A spare phone or another OTP app enrolled here shows the same codes as your phone.",
     ),
+    ("올리는 중", "Uploading"),
     (
         "올바르지 않은 유니코드 입력입니다.",
         "Invalid Unicode input.",
@@ -452,6 +526,10 @@ pub const EN: &[(&str, &str)] = &[
     (
         "원격/공유 세션에서는 금고를 열 수 없습니다.",
         "A vault cannot be opened in a remote or shared session.",
+    ),
+    (
+        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n동기화를 켜면 금고 형식이 바뀌어 0.7 이하 버전에서는 이 금고와 이후 백업을 열 수 없습니다. 다른 PC도 먼저 0.8 이상으로 업데이트하세요. 동기화를 켤까요?",
+        "There is a sync folder ({}) next to this vault. goyo-sync uses it to exchange only an encrypted copy of the vault with your server. The key file and password are never sent.\n\nTurning sync on changes the vault format: version 0.7 and older cannot open this vault or later backups of it. Update your other PCs to 0.8 or later first. Turn sync on?",
     ),
     (
         "이 금고는 OTP를 쓰지 않습니다.",
@@ -654,6 +732,11 @@ pub const EN: &[(&str, &str)] = &[
         "프로세스 보호 설정에 실패했습니다.",
         "Could not set up process protection.",
     ),
+    (
+        "합치면 항목 1000개 또는 8 MiB를 넘어 합치지 않았습니다. 항목을 정리하세요.",
+        "Merging would exceed 1000 entries or 8 MiB, so nothing was merged. Remove some entries.",
+    ),
+    ("항목 ID 오류", "Entry ID error"),
     ("항목 {count}개", "Entries: {count}"),
     ("항목 선택 오류", "Entry selection error"),
     ("항목 수 제한 초과", "Too many entries"),
@@ -716,5 +799,443 @@ pub const EN: &[(&str, &str)] = &[
     (
         "흔한 단어(password, dragon 등)·키보드 배열·연속된 숫자는 추측 도구가 가장 먼저 시도해서 글자 수로 치지 않습니다. 흔하지 않은 단어나 나만 아는 문장을 섞으세요.",
         "Common words (password, dragon, ...), keyboard runs and number sequences are tried first by guessing tools, so they do not count. Add uncommon words or a phrase only you know.",
+    ),
+    // goyo-sync.exe settings window (src/bin/goyo-sync/gui.rs).
+    ("고요 금고 동기화", "Goyo Vault Sync"),
+    (
+        "SSH 개인 키 (모든 파일)\0*.*\0",
+        "SSH private key (all files)\0*.*\0",
+    ),
+    ("전용 SSH 키 파일 선택", "Choose the dedicated SSH key file"),
+    ("서버 (ssh 호스트)", "Server (ssh host)"),
+    ("고급 설정", "Advanced settings"),
+    ("연결 확인", "Check connection"),
+    ("서버에 설치·업데이트", "Install or update on server"),
+    (
+        "~/.ssh/config의 별칭(예: my-server)이나 user@host를 적습니다. 집 밖에서는 ssh 포트를 인터넷에 열지 말고 Tailscale 같은 VPN으로 서버에 닿게 하세요.",
+        "An alias from ~/.ssh/config (for example my-server) or user@host. Away from home, never open the ssh port to the internet; reach the server through a VPN such as Tailscale.",
+    ),
+    ("서버의 스크립트 경로", "Script path on the server"),
+    ("파이썬 명령", "Python command"),
+    ("간격(초)", "Interval (s)"),
+    ("제한(초)", "Timeout (s)"),
+    (
+        "전용 SSH 키 파일 (선택) · 비우면 평소 ssh 설정을 씁니다",
+        "Dedicated SSH key file (optional) · empty: your usual ssh setup",
+    ),
+    ("금고", "Vaults"),
+    (
+        "동기화할 금고 파일 · 최대 8개",
+        "Vault files to sync · up to 8",
+    ),
+    ("서버에서 받기…", "Get from server…"),
+    ("빼기", "Remove"),
+    ("추가…", "Add…"),
+    (
+        "Windows에 로그인하면 자동으로 시작",
+        "Start automatically when I sign in to Windows",
+    ),
+    ("저장하고 시작", "Save and start"),
+    ("지금 동기화", "Sync now"),
+    ("중지", "Stop"),
+    ("로그 보기", "View log"),
+    ("로그", "Log"),
+    (
+        "goyo-sync.log의 최근 {}줄",
+        "Recent lines of goyo-sync.log: {}",
+    ),
+    ("새로 고침", "Refresh"),
+    ("아직 로그가 없습니다.", "No log yet."),
+    ("서버에서 받기", "Get from server"),
+    (
+        "받을 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
+        "Choose the vault to get. Its tag is the one your OTP app shows as 'Goyo Vault (tag)'.",
+    ),
+    (
+        "받은 파일은 고요 금고의 '백업에서 복원'으로 엽니다. 이 PC에서 동기화할 경로로 복원하세요.",
+        "Open the file with 'Restore from backup' in Goyo Vault, restoring it to the path this PC will sync.",
+    ),
+    ("받기…", "Get…"),
+    (
+        "서버 버전 {}({}바이트)을 다음 파일로 받았습니다:\n{}\n\n이렇게 여세요.\n1. 열쇠 파일(.goyokey)을 USB 등으로 이 PC에 옮깁니다.\n2. 고요 금고에서 '백업에서 복원'을 누르고 이 파일을 고릅니다.\n3. '복원할 새 파일'은 이 PC에서 동기화할 경로(예: GoyoVault 폴더의 vault.goyo)로 정합니다.\n4. 복원한 금고 파일을 여기서 '추가…'로 넣고 '저장하고 시작'을 누릅니다.\n\n처음 받는 사본은 서버를 믿는 것이니, 연 뒤 확인 코드를 첫 PC와 비교하세요.",
+        "Got server version {} ({} bytes) as:\n{}\n\nOpen it like this:\n1. Bring the key file (.goyokey) to this PC, by USB for example.\n2. In Goyo Vault, press 'Restore from backup' and choose this file.\n3. Set 'Restore to (new file)' to the path this PC will sync (for example vault.goyo in the GoyoVault folder).\n4. Add the restored vault file here with 'Add…' and press 'Save and start'.\n\nA first copy from the server trusts the server: after opening it, compare the check code with the first PC.",
+    ),
+    (
+        "서버 호스트 키가 이 PC의 known_hosts에 저장된 키와 다릅니다.\n\n누군가 연결을 가로채고 있을 수 있어 goyo-sync는 연결하지 않으며, 이 창에서는 새 키를 받아들이지 않습니다.\n\n서버를 다시 설치했거나 키를 바꾼 것이 확실할 때만: 서버에서 직접 지문을 확인하고(예: ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub), PowerShell에서 ssh-keygen -R {} 으로 예전 키를 지운 뒤 ssh {} 로 한 번 접속해 지문을 비교하세요.",
+        "The server's host key differs from the key stored in this PC's known_hosts.\n\nSomeone may be intercepting the connection, so goyo-sync does not connect, and this window never accepts the new key.\n\nOnly if you are sure the server was reinstalled or its key changed: check the fingerprint on the server itself (for example ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub), remove the old key with ssh-keygen -R {} in PowerShell, then connect once with ssh {} and compare the fingerprint.",
+    ),
+    ("백그라운드 동기화 실행 중", "Background sync running"),
+    ("백그라운드 동기화 꺼짐", "Background sync off"),
+    (
+        "아직 동기화할 금고가 없습니다. '추가…'로 금고 파일(.goyo)을 고르세요.",
+        "No vault to sync yet. Choose a vault file (.goyo) with 'Add…'.",
+    ),
+    (
+        "서버를 적고 '연결 확인'을 누르세요. 서버에 스크립트가 아직 없다면 먼저 '서버에 설치·업데이트'를 누르세요.",
+        "Enter the server and press 'Check connection'. If the server has no script yet, press 'Install or update on server' first.",
+    ),
+    ("연결 확인 중… {}초", "Checking the connection… {} s"),
+    (
+        "호스트 키를 저장하고 연결 확인 중… {}초",
+        "Storing the host key and checking… {} s",
+    ),
+    ("서버에 설치하는 중… {}초", "Installing on the server… {} s"),
+    (
+        "서버의 금고 목록을 받는 중… {}초",
+        "Getting the server's vault list… {} s",
+    ),
+    (
+        "서버에서 금고를 받는 중… {}초",
+        "Getting the vault from the server… {} s",
+    ),
+    (
+        "모든 금고를 지금 동기화하는 중… {}초",
+        "Syncing every vault now… {} s",
+    ),
+    (
+        "백그라운드 동기화를 다시 시작하는 중… {}초",
+        "Restarting background sync… {} s",
+    ),
+    (
+        "연결 정상 · 512바이트 이진 왕복 확인 · 서버에 금고 {}개",
+        "Connection OK · 512-byte binary round trip checked · vaults on the server: {}",
+    ),
+    (
+        "서버 호스트 키가 known_hosts와 다릅니다. 중간자 공격일 수 있어 연결하지 않습니다.",
+        "The server's host key differs from known_hosts. This may be an attack, so goyo-sync will not connect.",
+    ),
+    (
+        "서버가 known_hosts에 있는 키와 다른 종류의 키를 보냈습니다. 연결하지 않습니다.",
+        "The server sent another type of host key than the one in known_hosts. goyo-sync will not connect.",
+    ),
+    (
+        "호스트 키를 확인할 수 없습니다. PowerShell에서 ssh {}로 한 번 접속해 지문을 확인하세요.",
+        "The host key cannot be checked. Connect once with ssh {} in PowerShell and check the fingerprint.",
+    ),
+    (
+        "호스트 키를 저장하지 않았습니다. 지문을 확인할 수 있을 때 다시 '연결 확인'을 누르세요.",
+        "The host key was not stored. Press 'Check connection' again when you can check the fingerprint.",
+    ),
+    (
+        "서버에 스크립트를 설치했습니다(selftest: PASS). 이제 '연결 확인'을 누르세요.",
+        "The script is installed on the server (selftest: PASS). Now press 'Check connection'.",
+    ),
+    (
+        "설치는 됐지만 서버 셸이 PASS 외의 글을 출력합니다. 셸 시작 파일이 대화형 셸에서만 출력하게 고치세요.",
+        "Installed, but the server's shell prints text besides PASS. Make the shell start-up files print only in interactive shells.",
+    ),
+    (
+        "서버에서 파이썬 명령({})을 찾지 못했습니다. 고급 설정의 파이썬 명령을 확인하세요.",
+        "The server did not find the Python command ({}). Check it under Advanced settings.",
+    ),
+    (
+        "설치하지 못했습니다. 서버 출력: {}",
+        "Installation failed. Server output: {}",
+    ),
+    (
+        "스크립트 경로나 파이썬 명령을 설치 명령에 쓸 수 없습니다. 스크립트 경로는 파일 이름으로 끝나야 합니다.",
+        "The script path or Python command cannot go into the install command. The script path must end in a file name.",
+    ),
+    (
+        "서버에 금고가 없습니다. 첫 PC의 고요 금고에서 동기화를 켜면 올라갑니다.",
+        "The server has no vaults yet. They appear once sync is on in Goyo Vault on the first PC.",
+    ),
+    (
+        "서버 버전 {}({}바이트)을 받았습니다. 안내대로 고요 금고의 '백업에서 복원'으로 여세요.",
+        "Got server version {} ({} bytes). Open it with 'Restore from backup' in Goyo Vault as described.",
+    ),
+    (
+        "이미 있는 파일입니다. 덮어쓰지 않으니 새 이름을 고르세요.",
+        "That file already exists and is never overwritten. Choose a new name.",
+    ),
+    (
+        "서버에 그 금고가 없습니다.",
+        "The server does not have that vault.",
+    ),
+    (
+        "파일을 저장할 수 없습니다. 다른 폴더나 이름을 고르세요.",
+        "Cannot save the file. Choose another folder or name.",
+    ),
+    (
+        "아직 설정이 저장되지 않았습니다. 서버와 금고를 정한 뒤 '저장하고 시작'을 누르세요.",
+        "Nothing is saved yet. Set the server and vaults, then press 'Save and start'.",
+    ),
+    (
+        "저장하지 않은 변경이 있습니다. '저장하고 시작'을 누르면 적용됩니다.",
+        "There are unsaved changes. 'Save and start' applies them.",
+    ),
+    (
+        "백그라운드에서 동기화하고 있습니다. 이 창을 닫아도 계속됩니다.",
+        "Syncing in the background. It keeps going when you close this window.",
+    ),
+    (
+        "백그라운드 동기화가 꺼져 있습니다. '저장하고 시작'으로 켜세요.",
+        "Background sync is off. Turn it on with 'Save and start'.",
+    ),
+    (
+        "goyo-sync.conf를 읽을 수 없습니다. 설정을 다시 저장하세요.",
+        "Cannot read goyo-sync.conf. Save the settings again.",
+    ),
+    (
+        "goyo-sync.conf {}번째 줄에 문제가 있습니다. 보이는 설정을 고친 뒤 '저장하고 시작'을 누르세요.",
+        "Line {} of goyo-sync.conf has a problem. Fix the settings shown and press 'Save and start'.",
+    ),
+    (
+        "설정을 저장하고 백그라운드 동기화를 시작했습니다.",
+        "Settings saved; background sync started.",
+    ),
+    (
+        "실행 중인 도우미가 멈추지 않아 다시 시작하지 못했습니다. 잠시 뒤 다시 누르세요.",
+        "The running helper did not stop, so it was not restarted. Try again in a moment.",
+    ),
+    (
+        "도우미를 시작하지 못했습니다(오류 {}).",
+        "Could not start the helper (error {}).",
+    ),
+    (
+        "도우미가 시작하자마자 끝났습니다. '로그 보기'로 이유를 확인하세요.",
+        "The helper ended right after it started. See why with 'View log'.",
+    ),
+    (
+        "goyo-sync.conf를 저장하지 못했습니다. 이 폴더에 쓸 수 있는지 확인하세요.",
+        "Could not save goyo-sync.conf. Check that this folder is writable.",
+    ),
+    (
+        "자동 시작 설정을 바꾸지 못했습니다(오류 {}).",
+        "Could not change the autostart setting (error {}).",
+    ),
+    (
+        "지금 동기화를 마쳤습니다: 정상 {}개, 문제 {}개. 금고마다 결과가 목록에 보입니다.",
+        "Sync finished: {} OK, {} with problems. Each vault's result is shown in the list.",
+    ),
+    (
+        "실행 중인 도우미에 중지 신호를 보냈습니다.",
+        "The running helper was asked to stop.",
+    ),
+    ("실행 중인 도우미가 없습니다.", "No helper is running."),
+    (
+        "금고를 추가했습니다. '저장하고 시작'을 누르면 적용됩니다.",
+        "Vault added. 'Save and start' applies it.",
+    ),
+    (
+        "목록에서 뺐습니다. '저장하고 시작'을 누르면 적용됩니다. 금고 옆 동기화 폴더는 그대로 남습니다.",
+        "Removed from the list. 'Save and start' applies it. The sync folder next to the vault stays.",
+    ),
+    (
+        "고요 금고 파일(.goyo·.goyokey)은 전용 키로 쓸 수 없습니다. SSH 개인 키를 고르세요.",
+        "A Goyo Vault file (.goyo or .goyokey) cannot be the dedicated key. Choose an SSH private key.",
+    ),
+    (
+        "뺄 금고를 목록에서 고르세요.",
+        "Choose the vault to remove in the list.",
+    ),
+    ("서버", "Server"),
+    ("스크립트 경로", "Script path"),
+    ("전용 키 파일", "Dedicated key file"),
+    ("간격", "Interval"),
+    ("제한 시간", "Timeout"),
+    ("금고 경로", "Vault path"),
+    (
+        "{}에 #를 쓸 수 없습니다. goyo-sync.conf에서 주석을 시작하는 기호입니다.",
+        "{} cannot contain #: it starts a comment in goyo-sync.conf.",
+    ),
+    (
+        "설정이 8 KiB를 넘습니다. 금고 경로가 너무 깁니다.",
+        "The settings would exceed 8 KiB: the vault paths are too long.",
+    ),
+    (
+        "서버(ssh 호스트)를 적으세요.",
+        "Enter the server (ssh host).",
+    ),
+    (
+        "서버는 ssh 별칭이나 호스트 이름이어야 합니다(영문·숫자·. _ -, user@ 허용, -로 시작 불가).",
+        "The server must be an ssh alias or host name (letters, digits, . _ -, optional user@, not starting with -).",
+    ),
+    (
+        "서버의 스크립트 경로는 영문·숫자·. _ / ~ + -만 쓸 수 있고 -로 시작할 수 없습니다.",
+        "The script path may use only letters, digits and . _ / ~ + -, and cannot start with -.",
+    ),
+    (
+        "파이썬 명령은 영문·숫자·. _ / + -만 쓸 수 있고 -로 시작할 수 없습니다.",
+        "The Python command may use only letters, digits and . _ / + -, and cannot start with -.",
+    ),
+    (
+        "전용 키 파일은 있는 SSH 개인 키 파일의 절대 경로여야 합니다(.goyo·.goyokey 불가).",
+        "The dedicated key must be the full path of an existing SSH private key file (not .goyo or .goyokey).",
+    ),
+    (
+        "간격은 30~3600초 사이의 숫자여야 합니다.",
+        "The interval must be a number from 30 to 3600 seconds.",
+    ),
+    (
+        "제한 시간은 30~600초 사이의 숫자여야 합니다.",
+        "The timeout must be a number from 30 to 600 seconds.",
+    ),
+    (
+        "열쇠 파일(.goyokey)은 동기화하지 않습니다. 금고 파일(.goyo)을 고르세요.",
+        "Key files (.goyokey) are never synced. Choose a vault file (.goyo).",
+    ),
+    (
+        "이미 목록에 있는 금고입니다.",
+        "This vault is already in the list.",
+    ),
+    (
+        "금고는 8개까지 넣을 수 있습니다.",
+        "The list holds at most 8 vaults.",
+    ),
+    (
+        "동기화할 금고를 하나 이상 추가하세요.",
+        "Add at least one vault to sync.",
+    ),
+    (
+        "이 금고 경로는 쓸 수 없습니다(절대 경로만, 따옴표·와일드카드·장치 경로 불가): {}",
+        "This vault path cannot be used (full paths only; no quotes, wildcards or device paths): {}",
+    ),
+    (
+        "서버에 동기화 스크립트가 없습니다({}). '서버에 설치·업데이트'로 설치하세요.",
+        "The sync script is not on the server ({}). Install it with 'Install or update on server'.",
+    ),
+    (
+        "서버에 연결할 수 없습니다. 네트워크·VPN과 서버 이름을 확인하세요.",
+        "Cannot reach the server. Check the network, the VPN and the server name.",
+    ),
+    (
+        "SSH 인증에 실패했습니다. 키나 ssh-agent, 서버의 authorized_keys를 확인하세요. 암호를 묻는 키는 쓸 수 없습니다.",
+        "SSH authentication failed. Check the key or ssh-agent and the server's authorized_keys. A key that asks for a passphrase cannot be used.",
+    ),
+    (
+        "서버 호스트 키를 확인해야 합니다. '연결 확인'을 누르세요.",
+        "The server's host key needs checking. Press 'Check connection'.",
+    ),
+    (
+        "Windows OpenSSH 클라이언트(ssh.exe)가 없습니다. 설정 > 시스템 > 선택적 기능에서 'OpenSSH 클라이언트'를 추가하세요.",
+        "The Windows OpenSSH client (ssh.exe) is missing. Add 'OpenSSH Client' under Settings > System > Optional features.",
+    ),
+    (
+        "서버가 요청을 거부했습니다. goyo-sync.log를 확인하세요.",
+        "The server refused the request. See goyo-sync.log.",
+    ),
+    (
+        "서버 사본이 더 새로운 형식입니다. 고요 금고와 goyo-sync를 업데이트하세요.",
+        "The server copy uses a newer format. Update Goyo Vault and goyo-sync.",
+    ),
+    ("설정을 확인하세요.", "Check the settings."),
+    (
+        "서버 또는 통신 오류입니다. 서버 스크립트와 파이썬을 확인하고 goyo-sync.log를 보세요.",
+        "Server or protocol error. Check the server script and Python, and see goyo-sync.log.",
+    ),
+    (
+        "서버 또는 통신 오류입니다(ssh: {}). 서버 스크립트와 파이썬을 확인하세요.",
+        "Server or protocol error (ssh: {}). Check the server script and Python.",
+    ),
+    (
+        "known_hosts에 저장된 {} 서버의 호스트 키:\n\n{}\n\n서버에서 직접 확인한 지문과 같은지 비교하세요. 서버에서는 예를 들어 ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub 로 볼 수 있습니다. 다르면 ssh-keygen -R {} 으로 지우고 이 서버에 연결하지 마세요.",
+        "Host key of {} now in known_hosts:\n\n{}\n\nCompare it with the fingerprint you check on the server itself, for example with ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub there. If they differ, remove it with ssh-keygen -R {} and do not use this server.",
+    ),
+    (
+        "호스트 키를 저장했는지 확인하지 못했습니다. PowerShell에서 ssh-keygen -l -F {} 로 지문을 보고 서버의 지문과 비교하세요.",
+        "Could not confirm the stored host key. Run ssh-keygen -l -F {} in PowerShell and compare the fingerprint with the server's.",
+    ),
+    (
+        "{} 서버에 동기화 스크립트를 설치하거나 업데이트합니다.\n\n서버 경로: {} (/로 시작하지 않으면 홈 폴더 기준)\n확인: 보낸 스크립트를 먼저 {} -I로 selftest하고, PASS일 때만 기존 스크립트와 바꿉니다.\n\n설치에는 평소의 ssh 로그인(기본 키나 ssh-agent)을 쓰고, '전용 키 파일'은 쓰지 않습니다. 전용 키는 서버에서 동기화 명령만 실행하도록 묶여 있을 수 있기 때문입니다. 계속할까요?",
+        "This installs or updates the sync script on {}.\n\nPath on the server: {} (from your home folder unless it starts with /)\nCheck: the new copy first runs its selftest with {} -I and replaces the old script only if it prints PASS.\n\nThe install uses your usual ssh login (default key or ssh-agent), not the dedicated key file, because that key may be bound on the server to run only the sync command. Continue?",
+    ),
+    (
+        "이 PC는 아직 {} 서버의 호스트 키를 모릅니다(처음 연결).\n\n'예'를 누르면 이번 한 번만 서버가 보내는 키를 확인 없이 믿고 known_hosts에 저장합니다(처음 사용할 때 신뢰). 지금 누군가 연결을 가로채고 있다면 그 사람의 키가 저장됩니다. 그 뒤로는 키가 바뀌면 연결하지 않습니다.\n\n저장한 뒤 지문을 보여 드리니, 서버에서 직접 본 지문과 꼭 비교하세요. 이 키를 믿고 저장할까요?",
+        "This PC does not know the host key of {} yet (first connection).\n\n'Yes' trusts the key the server sends, this once and without checking, and stores it in known_hosts (trust on first use). If someone is intercepting the connection right now, their key is stored. From then on a changed key is refused.\n\nThe fingerprint is shown once it is stored; be sure to compare it with the one you see on the server itself. Trust and store this key?",
+    ),
+    (
+        "금고 파일을 찾을 수 없습니다. 경로를 확인하세요.",
+        "Vault file not found. Check the path.",
+    ),
+    (
+        "아직 설정 전 · '저장하고 시작'하면 금고 옆에 동기화 폴더를 만듭니다",
+        "Not set up yet · 'Save and start' makes the sync folder next to the vault",
+    ),
+    (
+        "동기화 폴더가 링크이거나 폴더가 아니어서 쓰지 않습니다",
+        "The sync folder is a link or not a folder, so it is not used",
+    ),
+    (
+        "도우미 꺼짐 · 마지막 서버 버전 {}",
+        "Helper off · last server version {}",
+    ),
+    ("정상 · 서버 버전 {}", "OK · server version {}"),
+    (
+        "정상 · 서버에 아직 사본 없음",
+        "OK · no copy on the server yet",
+    ),
+    (
+        "고요 금고에서 동기화 동의를 기다리는 중 · 금고를 열면 묻습니다",
+        "Waiting for consent in Goyo Vault · it asks when you unlock the vault",
+    ),
+    (
+        "오프라인 · 변경은 이 PC에 남아 있다가 연결되면 올라갑니다",
+        "Offline · changes stay on this PC and go up once connected",
+    ),
+    (
+        "SSH 인증 실패 · '연결 확인'으로 확인하세요",
+        "SSH authentication failed · see 'Check connection'",
+    ),
+    (
+        "호스트 키 확인 필요 · '연결 확인'을 누르세요",
+        "Host key needs checking · press 'Check connection'",
+    ),
+    ("ssh.exe가 없습니다", "ssh.exe is missing"),
+    (
+        "서버 오류 · '로그 보기'로 확인하세요",
+        "Server error · see 'View log'",
+    ),
+    (
+        "업로드 거부됨 · '로그 보기'로 확인하세요",
+        "Upload refused · see 'View log'",
+    ),
+    (
+        "설정 오류 · 설정을 고친 뒤 저장하세요",
+        "Settings error · fix the settings and save",
+    ),
+    (
+        "새 형식 · 고요 금고를 업데이트하세요",
+        "Newer format · update Goyo Vault",
+    ),
+    (
+        "실행 중인 도우미가 처리하고 있어 건너뛰었습니다",
+        "Skipped: the running helper is working on it",
+    ),
+    (
+        "지금 동기화: 올렸습니다 · 서버 버전 {}",
+        "Synced now: uploaded · server version {}",
+    ),
+    (
+        "지금 동기화: 새 서버 버전 {}을 받았습니다",
+        "Synced now: received server version {}",
+    ),
+    (
+        "지금 동기화: 최신입니다 · 서버 버전 {}",
+        "Synced now: up to date · server version {}",
+    ),
+    (
+        "지금 동기화: 서버에 아직 사본이 없습니다",
+        "Synced now: the server has no copy yet",
+    ),
+    ("이 PC의 {}와 같은 금고", "Same vault as {} on this PC"),
+    ("금고 ID {}", "Vault ID {}"),
+    ("{} · 버전 {}", "{} · version {}"),
+    ("{} KB · {} UTC 저장", "{} KB · stored {} UTC"),
+    (
+        "저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?",
+        "There are unsaved changes. Close without saving?",
+    ),
+    (
+        "화면을 만들 수 없어 종료합니다.",
+        "The window could not be created, so goyo-sync stops.",
+    ),
+    (
+        "로그인할 때 자동으로 시작하지 않습니다. 지금 실행 중인 도우미는 '중지'로 멈추세요.",
+        "It no longer starts when you sign in. Stop the helper running now with 'Stop'.",
+    ),
+    (
+        "로그인할 때 자동으로 시작하지 않습니다.",
+        "It no longer starts when you sign in.",
     ),
 ];

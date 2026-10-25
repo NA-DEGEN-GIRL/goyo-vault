@@ -1,0 +1,35 @@
+# goyo-sync.conf: settings for goyo-sync.exe (optional sync helper).
+# The settings window (double-click goyo-sync.exe) writes this file for you.
+# To set it up by hand instead, copy this file to goyo-sync.conf next to
+# goyo-sync.exe and edit it.
+# goyo-sync.conf stays on this PC: it names your server, so never commit
+# or share it. Setup and troubleshooting: docs/SYNC.md.
+#
+# Lines are "name = value". "#" starts a comment, so no value can hold "#".
+# An unknown name or an invalid value stops goyo-sync (exit code 2).
+
+# The ssh destination: an alias from %USERPROFILE%\.ssh\config, or
+# [user@]host. Its host key must already be in known_hosts.
+host = my-server
+
+# The server script, relative to your home folder on the server.
+remote = .local/share/goyo-sync/goyo-sync-server.py
+
+# The Python 3 command on the server.
+python = python3
+
+# Optional: a dedicated SSH private key for goyo-sync, best with a forced
+# command on the server (docs/SYNC.md). Empty: your usual ssh setup.
+# Example: identity = C:\Users\<you>\.ssh\goyo_sync
+identity =
+
+# Seconds between server checks (30 to 3600).
+interval = 60
+
+# Seconds allowed for one ssh call (30 to 600).
+timeout = 120
+
+# One line per vault file, 1 to 8, as an absolute path. Never a key file
+# (*.goyokey): key files are not synced. goyo-sync uses only the folder
+# "<vault file>.sync" next to each vault, which it creates.
+vault = D:\GoyoVault\vault.goyo

@@ -1,7 +1,12 @@
 //! Minimal Win32 UI/clipboard/defense bindings. Cryptography never calls Win32.
 #![allow(non_snake_case, dead_code)]
 use crate::i18n::tr;
-use std::{ffi::c_void, mem::size_of, path::PathBuf};
+use std::{
+    ffi::c_void,
+    mem::size_of,
+    path::PathBuf,
+    sync::atomic::{AtomicIsize, Ordering},
+};
 use zeroize::Zeroizing;
 pub type Hwnd = isize;
 pub type Proc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
@@ -469,38 +474,104 @@ pub fn clipboard_text(h: Hwnd) -> std::result::Result<Pasted, &'static str> {
     }
 }
 pub fn message(h: Hwnd, s: &str) {
+    message_in(h, s, "고요 금고");
+}
+/// [`message`] with its own title (goyo-sync's settings window).
+pub fn message_in(h: Hwnd, s: &str, title: &str) {
     modal(|| unsafe {
-        MessageBoxW(
-            h,
-            wide(tr(s)).as_ptr(),
-            wide(tr("고요 금고")).as_ptr(),
-            0x40,
-        );
+        MessageBoxW(h, wide(tr(s)).as_ptr(), wide(tr(title)).as_ptr(), 0x40);
     });
 }
+/// The open confirm box (0 when none), for the queue filter: a message box
+/// is an owned popup, not a child of the main window.
+static CONFIRM_BOX: AtomicIsize = AtomicIsize::new(0);
+static CONFIRM_PROC: AtomicIsize = AtomicIsize::new(0);
+pub fn confirm_box() -> Hwnd {
+    CONFIRM_BOX.load(Ordering::Relaxed)
+}
+/// Asks a yes/no question that only the user can answer. Another program
+/// could otherwise answer the box for them: posted clicks are refused by the
+/// queue filter (see confirm_box), and commands or input sent from another
+/// thread by confirm_proc. If the box cannot be guarded, the answer is no.
 pub fn confirm(h: Hwnd, s: &str) -> bool {
+    confirm_in(h, s, "고요 금고")
+}
+/// [`confirm`] with its own title (goyo-sync's settings window).
+pub fn confirm_in(h: Hwnd, s: &str, title: &str) -> bool {
     modal(|| unsafe {
-        MessageBoxW(
-            h,
-            wide(tr(s)).as_ptr(),
-            wide(tr("고요 금고")).as_ptr(),
-            0x124,
-        ) == 6
+        let hook = SetWindowsHookExW(5, confirm_cbt, 0, GetCurrentThreadId()); // WH_CBT
+        if hook == 0 {
+            return false;
+        }
+        let yes = MessageBoxW(h, wide(tr(s)).as_ptr(), wide(tr(title)).as_ptr(), 0x124) == 6;
+        UnhookWindowsHookEx(hook);
+        let guarded = CONFIRM_PROC.swap(0, Ordering::Relaxed) != 0;
+        CONFIRM_BOX.store(0, Ordering::Relaxed);
+        yes && guarded
     })
 }
+/// Subclasses the box when it is first activated (HCBT_ACTIVATE), before
+/// it takes any input.
+unsafe extern "system" fn confirm_cbt(code: i32, w: usize, l: isize) -> isize {
+    if code == 5 && CONFIRM_BOX.load(Ordering::Relaxed) == 0 {
+        let b = w as Hwnd;
+        let old = unsafe { SetWindowLongPtrW(b, -4, confirm_proc as *const () as isize) };
+        if old != 0 {
+            CONFIRM_PROC.store(old, Ordering::Relaxed);
+            CONFIRM_BOX.store(b, Ordering::Relaxed);
+        }
+    }
+    unsafe { CallNextHookEx(0, code, w, l) }
+}
+/// Drops commands and input sent from another thread, including the command
+/// a button sends while it handles a BM_CLICK from another thread.
+unsafe extern "system" fn confirm_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+    if from_other_thread() && matches!(m, 0x111 | 0x100..=0x109 | 0x201..=0x20e) {
+        return 0;
+    }
+    let old = CONFIRM_PROC.load(Ordering::Relaxed);
+    unsafe { CallWindowProcW(std::mem::transmute::<isize, Option<Proc>>(old), h, m, w, l) }
+}
 pub fn dialog(h: Hwnd, save: bool, key: bool) -> Option<PathBuf> {
+    pick_file(
+        h,
+        save,
+        if key {
+            "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0"
+        } else {
+            "고요 금고/백업 (*.goyo)\0*.goyo\0모든 파일\0*.*\0"
+        },
+        if key { "goyokey" } else { "goyo" },
+        if save {
+            "새 파일 이름을 선택하세요 (기존 파일 덮어쓰기 금지)"
+        } else {
+            "파일 선택"
+        },
+        None,
+    )
+}
+/// An open or save file dialog. `filter` and `title` are Korean sources
+/// (passed through tr()); `ext` is added to a typed name without one ("":
+/// none); `initial` prefills the name and folder.
+pub fn pick_file(
+    h: Hwnd,
+    save: bool,
+    filter: &str,
+    ext: &str,
+    title: &str,
+    initial: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
     let mut file = vec![0u16; 32768];
-    let filter = wide(tr(if key {
-        "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0"
-    } else {
-        "고요 금고/백업 (*.goyo)\0*.goyo\0모든 파일\0*.*\0"
-    }));
-    let ext = wide(if key { "goyokey" } else { "goyo" });
-    let title = wide(tr(if save {
-        "새 파일 이름을 선택하세요 (기존 파일 덮어쓰기 금지)"
-    } else {
-        "파일 선택"
-    }));
+    if let Some(initial) = initial {
+        let name: Vec<u16> = initial.as_os_str().encode_wide().collect();
+        if name.len() < file.len() && !name.contains(&0) {
+            file[..name.len()].copy_from_slice(&name);
+        }
+    }
+    let filter = wide(tr(filter));
+    let ext = wide(ext);
+    let title = wide(tr(title));
     let mut o: OpenFile = unsafe { std::mem::zeroed() };
     o.size = size_of::<OpenFile>() as u32;
     o.owner = h;
@@ -509,7 +580,9 @@ pub fn dialog(h: Hwnd, save: bool, key: bool) -> Option<PathBuf> {
     o.file = file.as_mut_ptr();
     o.max_file = file.len() as u32;
     o.title = title.as_ptr();
-    o.def_ext = ext.as_ptr();
+    if ext.len() > 1 {
+        o.def_ext = ext.as_ptr();
+    }
     o.flags = 0x80000 | 0x800 | 0x8 | 0x02000000 | if save { 0x2 } else { 0x1000 };
     let ok = modal(|| unsafe {
         if save {

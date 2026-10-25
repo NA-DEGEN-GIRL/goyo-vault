@@ -6,8 +6,21 @@
 *.goyotmp
 /test-output/
 goyo-vault.theme
+goyo-vault.lang
+goyo-vault.autolock
 # Local review tooling tied to one developer machine's MCP configuration.
 /scripts/mcp_client.py
 /scripts/mcp-*.json
 /scripts/prepare_review.py
 goyo-vault.paths
+# Agent worktrees of this repository.
+/.claude/worktrees/
+# goyo-sync: the local settings name the private server; never commit them.
+goyo-sync.conf
+goyo-sync.log
+goyo-sync.log.1
+*.goyo.sync/
+*.goyosync
+# A local `serve` without --root stores here; py_compile writes caches.
+/server/data/
+__pycache__/

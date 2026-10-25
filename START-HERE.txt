@@ -1,4 +1,4 @@
-Goyo Vault 0.7.0
+Goyo Vault 0.8.0
 
 1. Extract the whole ZIP to a folder only you use that is not synced
    (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
@@ -52,6 +52,10 @@ The secret and notes fields block input methods (IME); paste text that needs one
 To copy a value from the vault, turn on 'Allow copy' first.
 A copied value is wiped from the clipboard after 15 seconds.
 Changing the password does not revoke old key copies.
+Optional sync between PCs: the separate add-on goyo-sync.exe exchanges only the
+encrypted vault file with your own SSH server. Double-click goyo-sync.exe for its
+settings window (server, install, vaults, autostart). A synced vault needs 0.8.0 or
+later on every PC. See docs/SYNC.en.md.
 
 This is a development release. It has AI reviews and automated tests but no
 professional security audit. It cannot make an infected Windows safe or stop every

@@ -5,8 +5,11 @@ mod i18n;
 mod theme;
 mod win;
 use goyo_vault::{
-    crypto,
-    vault::{Entry, OtpSetup, Provision, Session, key_uses_otp, leftover_temp, vault_tag},
+    crypto, syncfile,
+    vault::{
+        Entry, Format, OtpSetup, Provision, Session, SyncBadge, SyncNotice, key_uses_otp,
+        leftover_temp, vault_tag,
+    },
 };
 use i18n::{fill, tr};
 use std::{
@@ -34,6 +37,19 @@ thread_local! {
     /// Set by edit_proc before it posts PASTE_CLEARED (bit 1) or INPUT_ERROR
     /// (bit 2), so the same messages posted by another program do nothing.
     static PASTE_NOTICE: Cell<u8> = const { Cell::new(0) };
+    /// Set by App::submit when an unlock found a v1 vault next to a sync
+    /// folder; window_proc then asks whether to turn sync on (offer_sync).
+    /// Internal state, never a message, so no other program can raise it.
+    static SYNC_OFFER: Cell<bool> = const { Cell::new(false) };
+}
+/// Answers one question in place of the user; gets the question's text.
+#[cfg(test)]
+type Answer = Box<dyn FnMut(&str) -> bool>;
+#[cfg(test)]
+thread_local! {
+    /// The answer to the next ask(), given by a test: no test can click a
+    /// real message box. It runs as the box would, inside modal().
+    static ANSWER: RefCell<Option<Answer>> = const { RefCell::new(None) };
 }
 static EDIT_PROC: OnceLock<Proc> = OnceLock::new();
 static LIST_PROC: OnceLock<Proc> = OnceLock::new();
@@ -149,6 +165,11 @@ const HINT: (i32, i32, i32, i32) = (CARD_X, 372, CARD_W, 40);
 const THEME_SWITCH: (i32, i32, i32, i32) = (704, 21, 132, 36);
 /// 한국어 | English, left of the theme switch.
 const LANG_SWITCH: (i32, i32, i32, i32) = (554, 21, 146, 36);
+/// The "open" pill after the brand ends here at the latest, clear of the
+/// lock button; a long file name is cut with an ellipsis.
+const PILL_RIGHT: i32 = LANG_SWITCH.0 - 108;
+/// The sync folder is polled on every 4th timer tick (2 s).
+const SYNC_TICKS: u32 = 4;
 /// Create with the OTP off: the painted card that recommends it.
 const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
 /// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
@@ -200,7 +221,9 @@ struct App {
     clipboard: Option<(u32, Instant)>,
     failed: u32,
     retry: Instant,
-    status: String,
+    /// Korean source of the status line, shown translated line by line.
+    /// Wiped when replaced: a sync conflict line names an entry.
+    status: Zeroizing<String>,
     page: usize,
     closing: bool,
     auth_dirty: bool,
@@ -221,6 +244,11 @@ struct App {
     status_tone: isize,
     /// Index into AUTO_LOCKS, kept in goyo-vault.autolock.
     auto_lock: usize,
+    /// Timer ticks, for polling the sync folder on every SYNC_TICKS-th.
+    sync_ticks: u32,
+    /// The word on the "open" pill for a vault that syncs, as of the last
+    /// unlock, edit or poll that changed it.
+    sync_badge: Option<SyncBadge>,
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
@@ -256,7 +284,7 @@ impl App {
             clipboard: None,
             failed: 0,
             retry: Instant::now(),
-            status: "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.".into(),
+            status: line("금고·열쇠 파일을 확인하고 비밀번호를 입력하세요."),
             page: 0,
             closing: false,
             auth_dirty: false,
@@ -268,6 +296,8 @@ impl App {
             shown: [false; 3],
             status_tone: TONE_MUTED,
             auto_lock: load_auto_lock(),
+            sync_ticks: 0,
+            sync_badge: None,
         };
         // The last vault and key that opened, so a key kept on a USB drive does
         // not have to be picked with "찾기" on every start.
@@ -428,9 +458,9 @@ impl App {
             if !scope_ok || !ime_ok {
                 self.input_failed = true;
                 EnableWindow(edit, 0);
-                self.status =
-                    "입력 보호 설정 실패. 프로그램을 다시 시작하고 Windows 입력기를 확인하세요."
-                        .into();
+                self.status = line(
+                    "입력 보호 설정 실패. 프로그램을 다시 시작하고 Windows 입력기를 확인하세요.",
+                );
             }
             SendMessageW(
                 edit,
@@ -686,12 +716,14 @@ impl App {
         }
     }
     fn set_status(&mut self, text: &str, tone: isize) {
-        self.status = text.to_owned();
+        // Wipe the line it replaces, before the buffer may grow.
+        self.status.zeroize();
+        self.status.push_str(text);
         let h = self.handle(STATUS);
         unsafe {
             // Tone first: setting the text repaints the label.
             SetWindowLongPtrW(h, -21, tone);
-            SetWindowTextW(h, wide(tr(text)).as_ptr());
+            SetWindowTextW(h, secret_wide(&tr_lines(text)).as_ptr());
             InvalidateRect(h, null(), 1);
         }
     }
@@ -812,9 +844,9 @@ impl App {
             Screen::OtpBackup => self.build_otp_backup(),
         }
         let small = self.font_of(|t| t.small());
-        let status = self.status.clone();
+        let status = tr_lines(&self.status);
         let tone = std::mem::replace(&mut self.status_tone, TONE_MUTED);
-        self.text(STATUS, &status, (40, 690, 796, 40), small, tone, 0);
+        self.text(STATUS, &status, (40, 690, 796, 60), small, tone, 0);
         let dark = theme::is_dark();
         let (x, y, _, _) = THEME_SWITCH;
         for (i, (id, name, on)) in [(THEME_DARK, "다크", dark), (THEME_LIGHT, "라이트", !dark)]
@@ -1422,10 +1454,14 @@ impl App {
             .to_lowercase()
             .starts_with(temp.trim_end_matches('\\'))
         {
-            self.status = "압축 파일 안이나 임시 폴더에서 실행 중입니다. 이 폴더는 지워질 수 있으니, 계속 보관할 폴더에 압축을 푼 뒤 실행하세요.".into();
+            self.status = line(
+                "압축 파일 안이나 임시 폴더에서 실행 중입니다. 이 폴더는 지워질 수 있으니, 계속 보관할 폴더에 압축을 푼 뒤 실행하세요.",
+            );
             self.status_tone = TONE_DANGER;
         } else if in_cloud_folder(folder) {
-            self.status = "프로그램 폴더가 클라우드 동기화 폴더에 있습니다. 여기에 금고와 열쇠를 함께 두면 둘 다 같은 계정에 올라갑니다.".into();
+            self.status = line(
+                "프로그램 폴더가 클라우드 동기화 폴더에 있습니다. 여기에 금고와 열쇠를 함께 두면 둘 다 같은 계정에 올라갑니다.",
+            );
             self.status_tone = TONE_DANGER;
         }
     }
@@ -1455,7 +1491,7 @@ impl App {
         }
         if self.otp_setup.take().is_some() {
             self.screen = Screen::Vault;
-            self.status = "다른 앱으로 전환되어 OTP 화면을 닫았습니다.".into();
+            self.status = line("다른 앱으로 전환되어 OTP 화면을 닫았습니다.");
             self.build();
         }
     }
@@ -1509,9 +1545,12 @@ impl App {
         if clear_clipboard {
             self.expire_clipboard();
         }
+        self.sync_badge = None;
         self.screen = self.home();
         self.from_welcome = false;
-        self.status = why.into();
+        // The line may name an entry (a sync conflict).
+        self.status.zeroize();
+        self.status = line(why);
         self.build();
     }
     /// Drops the keys, the OTP secret and any reveal or copy permission
@@ -1563,7 +1602,7 @@ impl App {
                 Ok(setup) => {
                     self.failed = 0;
                     self.otp_setup = Some(setup);
-                    self.status = "예비 기기에 등록한 뒤 '닫기'를 누르세요.".into();
+                    self.status = line("예비 기기에 등록한 뒤 '닫기'를 누르세요.");
                     self.build();
                     Ok(())
                 }
@@ -1593,7 +1632,9 @@ impl App {
             }
             self.failed = 0;
             self.screen = Screen::Vault;
-            self.status="비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.".into();
+            self.status = line(
+                "비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.",
+            );
             self.build();
             return Ok(());
         }
@@ -1662,7 +1703,7 @@ impl App {
             _ => Session::unlock(&self.vault_path, &self.key_path, &pass, &otp),
         };
         match result {
-            Ok(s) => {
+            Ok(mut s) => {
                 self.vault_path = s.path.clone();
                 self.key_path = s.key_path.clone();
                 self.new_vault_path = PathBuf::new();
@@ -1672,6 +1713,13 @@ impl App {
                 save_paths(&s.path, &s.key_path);
                 let warning = placement_warning(&s.path, &s.key_path);
                 let uses_otp = s.uses_otp();
+                // Only opening a vault looks at its sync folder.
+                let login = screen == Screen::Login;
+                let notice = if login { s.take_unlock_notice() } else { None };
+                if login && s.sync_offer() {
+                    SYNC_OFFER.with(|f| f.set(true));
+                }
+                self.sync_badge = s.badge();
                 self.session = Some(s);
                 self.provision = None;
                 self.create_otp = false;
@@ -1691,13 +1739,20 @@ impl App {
                         "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다."
                     }
                 };
+                // What the unlock found in the sync folder replaces the usual
+                // line; the placement warning still follows it.
+                let (first, mut tone) = match &notice {
+                    Some(n) => sync_line(n),
+                    None => (Zeroizing::new(first.to_owned()), TONE_MUTED),
+                };
                 self.status = match warning {
                     Some(w) => {
-                        self.status_tone = TONE_DANGER;
-                        format!("{first}\r\n{}", w.message())
+                        tone = TONE_DANGER;
+                        joined(&[&first, w.message()])
                     }
-                    None => first.into(),
+                    None => first,
                 };
+                self.status_tone = tone;
                 self.build();
                 Ok(())
             }
@@ -1789,7 +1844,7 @@ impl App {
                     _ if self.screen == Screen::Login => Screen::Welcome,
                     _ => self.home(),
                 };
-                self.status = "".into();
+                self.status = line("");
                 self.build();
             }
             SUBMIT => self.submit()?,
@@ -1819,12 +1874,11 @@ impl App {
             }
             OTP_TOGGLE => {
                 self.create_otp = !self.create_otp;
-                self.status = if self.create_otp {
+                self.status = line(if self.create_otp {
                     "휴대폰 OTP 앱으로 QR을 등록하고, 앱에 표시된 6자리를 입력하세요."
                 } else {
                     "OTP 없이 비밀번호와 열쇠 파일로만 여는 금고를 만듭니다. 이 PC를 다른 사람도 쓸 수 있다면 OTP를 켜 두세요."
-                }
-                .into();
+                });
                 // Same OTP secret either way, so a QR already scanned stays valid.
                 self.rebuild_keeping(&[PASS, CONFIRM]);
                 let next = if self.read(PASS)?.is_empty() {
@@ -1865,11 +1919,14 @@ impl App {
                     std::mem::take(&mut *notes),
                 )?;
                 let s = self.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+                // `editing` is still the entry's index: merges wait while
+                // the edit screen is shown (see timer).
                 s.put(self.editing, e)?;
+                self.sync_badge = s.badge();
                 self.selected = self.editing.or(Some(s.entries.len() - 1));
                 self.page = 0;
                 self.screen = Screen::Vault;
-                self.status = "암호화하여 저장했습니다.".into();
+                self.status = line("암호화하여 저장했습니다.");
                 self.build();
             }
             CHANGE => {
@@ -2108,14 +2165,69 @@ impl App {
             if self.otp_setup.is_some() && idle >= OTP_QR_IDLE {
                 self.otp_setup = None;
                 self.screen = Screen::Vault;
-                self.status = "2분 동안 쓰지 않아 OTP 화면을 닫았습니다.".into();
+                self.status = line("2분 동안 쓰지 않아 OTP 화면을 닫았습니다.");
                 self.build();
             }
+        }
+        // Merges wait while an entry is edited, another screen is shown or a
+        // dialog runs, so `editing` and `selected` keep pointing at the
+        // entry they meant; the first tick back on the list applies them.
+        self.sync_ticks = self.sync_ticks.wrapping_add(1);
+        if self.sync_ticks.is_multiple_of(SYNC_TICKS)
+            && self.session.is_some()
+            && self.screen == Screen::Vault
+            && !self.closing
+            && !in_modal()
+        {
+            self.poll_sync();
         }
         if ticking && self.screen == Screen::Vault {
             let (x, y, w, h) = HINT;
             unsafe {
                 InvalidateRect(self.hwnd, &self.r(x, y, w, h), 0);
+            }
+        }
+    }
+    /// One look at the sync folder from the vault list (see timer). A merge
+    /// can move or replace entries: the selection follows its entry by ID,
+    /// or the entry that replaced it by an edit on another PC. The 15-second
+    /// view and copy permission end with any change to the list, since a
+    /// merge can also put other text under the same ID. Polling is not use
+    /// (`activity` stays) and its notices never beep.
+    fn poll_sync(&mut self) {
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        let kept = self.selected.and_then(|i| s.entry_id(i));
+        let Some(event) = s.poll_sync() else {
+            return;
+        };
+        if event.badge_changed {
+            self.sync_badge = s.badge();
+        }
+        let line = event.notice.as_ref().map(sync_line);
+        if event.list_changed {
+            self.selected = kept.and_then(|id| s.entry_index(&id).or_else(|| s.successor(&id)));
+            self.reveal_until = None;
+            self.page = 0;
+            self.reset_copy();
+            if let Some((text, tone)) = line {
+                self.status.zeroize();
+                self.status.push_str(&text);
+                self.status_tone = tone;
+            } else {
+                // The line stays as it is, in its tone.
+                self.status_tone = unsafe { GetWindowLongPtrW(self.handle(STATUS), -21) };
+            }
+            self.build();
+        } else {
+            if let Some((text, tone)) = line {
+                self.set_status(&text, tone);
+            }
+            if event.badge_changed {
+                unsafe {
+                    InvalidateRect(self.hwnd, &self.r(40, 22, PILL_RIGHT - 40, 34), 0);
+                }
             }
         }
     }
@@ -2214,14 +2326,21 @@ impl App {
             let brand = tr("고요 금고");
             theme::text(dc, brand, &self.r(40, 22, 200, 34), title, p.text, LINE);
             let open = self.session.as_ref();
+            // A vault that syncs shows its sync state before the file name,
+            // so the ellipsis of a long name never hides it.
+            let badge = open.and(self.sync_badge);
             let state = match open {
-                Some(s) => fill(
-                    "열림 · {}",
-                    &[&s.path
+                Some(s) => {
+                    let name = s
+                        .path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()],
-                ),
+                        .unwrap_or_default();
+                    match badge {
+                        Some(b) => fill("열림 · {} · {}", &[&tr(badge_word(b)), &name]),
+                        None => fill("열림 · {}", &[&name]),
+                    }
+                }
                 None => tr("잠김").into(),
             };
             let x = self.px(40) + theme::text_width(dc, brand, title) + self.px(14);
@@ -2229,7 +2348,7 @@ impl App {
             let pill = Rect {
                 left: x,
                 top: self.px(28),
-                right: (x + width).min(self.px(LANG_SWITCH.0 - 108)),
+                right: (x + width).min(self.px(PILL_RIGHT)),
                 bottom: self.px(50),
             };
             theme::round(dc, &pill, self.px(11), Some(p.surface), None);
@@ -2239,7 +2358,11 @@ impl App {
                 right: x + self.px(16),
                 bottom: self.px(42),
             };
-            let dot_color = if open.is_some() { p.unlocked } else { p.faint };
+            let dot_color = match (open, badge) {
+                (None, _) => p.faint,
+                (Some(_), Some(SyncBadge::Warning)) => p.danger,
+                (Some(_), _) => p.unlocked,
+            };
             theme::round(dc, &dot, self.px(3), Some(dot_color), None);
             let mut label = pill;
             label.left += self.px(22);
@@ -2658,9 +2781,15 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         if matches!(id, BACKUP | KEYBACKUP | DELETE) && a.session.is_none() {
             return Err("금고가 잠겼습니다.");
         }
-        if id == DELETE && a.selected.is_none() {
-            return Err("삭제할 항목을 선택하세요.");
-        }
+        // DELETE removes the entry the user confirmed, found again by its ID
+        // afterwards, not whatever then sits at its index.
+        let doomed = match (id, a.session.as_ref()) {
+            (DELETE, Some(s)) => {
+                let i = a.selected.ok_or("삭제할 항목을 선택하세요.")?;
+                Some(s.entry_id(i).ok_or("항목 선택 오류")?)
+            }
+            _ => None,
+        };
         a.activity = Instant::now();
         a.paths()?;
         a.reset_copy();
@@ -2668,10 +2797,10 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         unsafe {
             InvalidateRect(h, null(), 1);
         }
-        Ok((a.screen, a.selected))
+        Ok((a.screen, a.selected, doomed))
     });
     drain_pending(h);
-    let (screen, selected) = prepared?;
+    let (screen, selected, doomed) = prepared?;
     if !APP.with(|cell| {
         cell.try_borrow().is_ok_and(|b| {
             b.as_ref()
@@ -2684,7 +2813,7 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         UpdateWindow(h);
     }
     let path = if id == DELETE {
-        if !confirm(
+        if !ask(
             h,
             "선택한 항목을 삭제할까요? 기존 백업 사본은 삭제되지 않습니다.",
         ) {
@@ -2711,11 +2840,15 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         a.activity = Instant::now();
         match id {
             DELETE => {
-                let i = selected.ok_or("항목 선택 오류")?;
-                a.session.as_mut().ok_or("금고가 잠겼습니다.")?.delete(i)?;
+                let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+                let i = doomed
+                    .and_then(|id| s.entry_index(&id))
+                    .ok_or("항목 선택 오류")?;
+                s.delete(i)?;
+                a.sync_badge = s.badge();
                 a.selected = None;
                 a.page = 0;
-                a.status = "항목을 삭제했습니다.".into();
+                a.status = line("항목을 삭제했습니다.");
                 a.build();
             }
             BACKUP | KEYBACKUP => {
@@ -2758,6 +2891,78 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     });
     drain_pending(h);
     result
+}
+/// confirm(); a test answers in its place (see ANSWER).
+fn ask(h: Hwnd, text: &str) -> bool {
+    #[cfg(test)]
+    if let Some(mut answer) = ANSWER.with(|a| a.borrow_mut().take()) {
+        return modal(|| answer(text));
+    }
+    confirm(h, text)
+}
+
+/// Asks once per unlock whether to turn sync on for a v1 vault next to a
+/// sync folder (see SYNC_OFFER). Saying yes changes the vault's format for
+/// good, so it is the user's choice, made in a dialog. Like modal_command
+/// no borrow spans the dialog, and the answer counts only for the vault it
+/// was asked about, still open and still v1.
+fn offer_sync(h: Hwnd) {
+    let asked = APP.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let a = b.as_ref()?;
+        let s = a.session.as_ref().filter(|s| s.sync_offer())?;
+        if a.closing || a.screen != Screen::Vault {
+            return None;
+        }
+        let folder = syncfile::sync_dir(&s.path)?;
+        let folder = folder.file_name()?.to_string_lossy().into_owned();
+        Some((s.path.clone(), folder))
+    });
+    let Some((path, folder)) = asked else {
+        return;
+    };
+    unsafe {
+        UpdateWindow(h);
+    }
+    let consent = fill(
+        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n동기화를 켜면 금고 형식이 바뀌어 0.7 이하 버전에서는 이 금고와 이후 백업을 열 수 없습니다. 다른 PC도 먼저 0.8 이상으로 업데이트하세요. 동기화를 켤까요?",
+        &[&folder],
+    );
+    // No keeps v1, and the question comes again at the next unlock.
+    if !ask(h, &consent) {
+        return;
+    }
+    let result = APP.with(|cell| -> crypto::Result<()> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        let same = a.session.as_ref().is_some_and(|s| s.path == path);
+        if a.closing || a.screen != Screen::Vault || !same {
+            return Err("대화상자가 열린 동안 잠겼습니다. 다시 인증하세요.");
+        }
+        if let Err(e) = check_environment(h) {
+            a.lock(e, true);
+            return Err(e);
+        }
+        a.activity = Instant::now();
+        let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+        // The change is for good: only while what was asked still holds
+        // (still v1, the folder still there, the key file still outside it).
+        if s.format() != Format::V1 || !s.sync_offer() {
+            return Ok(());
+        }
+        s.enable_sync()?;
+        a.sync_badge = s.badge();
+        let (line, tone) = sync_line(&SyncNotice::SyncOn);
+        a.set_status(&line, tone);
+        unsafe {
+            InvalidateRect(h, null(), 0);
+        }
+        Ok(())
+    });
+    drain_pending(h);
+    if let Err(e) = result {
+        report(h, e);
+    }
 }
 
 /// Shows an error in the status line. Falls back to a message box only while
@@ -3089,6 +3294,12 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
     });
     if !foreign {
         drain_pending(h);
+        // Raised only by an unlock this window just handled. A nested call
+        // (a control notifying the window while the unlock rebuilds the
+        // screen) leaves it for the outer one, which holds no borrow.
+        if APP.with(|cell| cell.try_borrow_mut().is_ok()) && SYNC_OFFER.with(|f| f.replace(false)) {
+            offer_sync(h);
+        }
     }
     if let Some(e) = error {
         report(h, e);
@@ -3246,6 +3457,139 @@ impl Placement {
         }
     }
 }
+/// The word on the "open" pill for a vault that syncs.
+fn badge_word(badge: SyncBadge) -> &'static str {
+    match badge {
+        SyncBadge::Synced => "동기화됨",
+        SyncBadge::Uploading => "올리는 중",
+        SyncBadge::HelperOff => "도우미 꺼짐",
+        SyncBadge::Offline => "연결 안 됨",
+        SyncBadge::Warning => "동기화 경고",
+    }
+}
+/// A status line in a buffer wiped when it is replaced.
+fn line(s: &str) -> Zeroizing<String> {
+    Zeroizing::new(s.to_owned())
+}
+/// Status lines joined with CRLF in one buffer of the exact final size. A
+/// buffer that grew would have freed its earlier copy of the text unwiped.
+fn joined(lines: &[&str]) -> Zeroizing<String> {
+    let breaks = 2 * lines.len().saturating_sub(1);
+    let size = lines.iter().map(|l| l.len()).sum::<usize>() + breaks;
+    let mut out = Zeroizing::new(String::with_capacity(size));
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        out.push_str(l);
+    }
+    out
+}
+/// tr() for each line of a status: an unlock line and the placement warning
+/// after it are separate entries, and the stored Korean source lets a
+/// language switch translate them again.
+fn tr_lines(text: &str) -> Zeroizing<String> {
+    let parts: Vec<&str> = text.split("\r\n").map(tr).collect();
+    joined(&parts)
+}
+/// The status line for a sync notice and its tone. Sync news never beeps:
+/// it is not the result of what the user just did. A line without values
+/// keeps its Korean source, so a language switch translates it. No line
+/// names an entry: the status line is window text other programs can read.
+fn sync_line(notice: &SyncNotice) -> (Zeroizing<String>, isize) {
+    let (text, danger) = match notice {
+        SyncNotice::SyncOn => (
+            line("동기화를 켰습니다. 서버에 올라가면 위에 '동기화됨'이 표시됩니다."),
+            false,
+        ),
+        SyncNotice::Merged { added, removed } => (
+            Zeroizing::new(fill(
+                "다른 PC의 변경을 합쳤습니다: 추가 {}개, 삭제 {}개.",
+                &[added, removed],
+            )),
+            false,
+        ),
+        SyncNotice::Conflicts(n) => (
+            Zeroizing::new(fill(
+                "두 PC에서 함께 고친 항목 {}개는 두 버전을 모두 남겼습니다. 이름이 같은 항목을 확인하세요.",
+                &[n],
+            )),
+            false,
+        ),
+        // The count includes entries edited there: an edit replaces the
+        // old entry, which is gone here as well. In the danger tone: it may
+        // be a key holder deleting through the server.
+        SyncNotice::MassDelete { removed, file } => (
+            Zeroizing::new(fill(
+                "다른 PC에서 항목 {}개가 삭제되거나 수정되었습니다. 합치기 전 상태를 {}에 보관했습니다.",
+                &[removed, file],
+            )),
+            true,
+        ),
+        SyncNotice::Rollback => (
+            line(
+                "경고: 서버가 이전 상태의 금고를 보냈습니다. 이 PC의 항목은 그대로이며 서버에 다시 올립니다.",
+            ),
+            true,
+        ),
+        SyncNotice::BadIncoming => (
+            line(
+                "서버에서 받은 금고를 인증하지 못해 무시했습니다(손상 또는 변조). 이 PC의 상태를 다시 올립니다.",
+            ),
+            true,
+        ),
+        SyncNotice::ForeignIncoming => (
+            line(
+                "서버 사본이 다른 금고의 것이라 무시했습니다. goyo-sync를 멈추고 동기화 폴더를 지운 뒤 다시 실행하세요.",
+            ),
+            true,
+        ),
+        SyncNotice::TooLarge => (
+            line("합치면 항목 1000개 또는 8 MiB를 넘어 합치지 않았습니다. 항목을 정리하세요."),
+            true,
+        ),
+        SyncNotice::NewerFormat => (
+            line("서버 사본이 새 버전 형식이라 동기화를 멈췄습니다. 고요 금고를 업데이트하세요."),
+            true,
+        ),
+        SyncNotice::KeyInFolder => (
+            line(
+                "열쇠 파일이 동기화 폴더 안에 있어 동기화하지 않습니다. 열쇠를 다른 폴더로 옮기세요.",
+            ),
+            true,
+        ),
+        SyncNotice::Synced { code } => (
+            Zeroizing::new(fill(
+                "동기화됨 · 확인 코드 {} (다른 PC에서도 같으면 같은 내용입니다)",
+                &[code],
+            )),
+            false,
+        ),
+        SyncNotice::HelperOff => (
+            line(
+                "동기화 도우미(goyo-sync.exe)가 실행 중이 아닙니다. 변경은 이 PC에 저장되어 있습니다.",
+            ),
+            false,
+        ),
+        SyncNotice::Offline => (
+            line("동기화 오프라인: 변경은 이 PC에 저장되어 있고 연결되면 올립니다."),
+            false,
+        ),
+        SyncNotice::HostKey => (
+            line("동기화 중단: 서버 호스트 키가 바뀌었습니다. 확인하기 전에는 연결하지 않습니다."),
+            true,
+        ),
+        SyncNotice::Auth => (
+            line("동기화 오류: SSH 인증에 실패했습니다. goyo-sync.log를 확인하세요."),
+            true,
+        ),
+        SyncNotice::HelperError => (
+            line("동기화 오류: goyo-sync.log를 확인하세요. 변경은 이 PC에 저장되어 있습니다."),
+            true,
+        ),
+    };
+    (text, if danger { TONE_DANGER } else { TONE_MUTED })
+}
 /// Placements that leave only the password between a thief and the data.
 fn placement_warning(vault: &Path, key: &Path) -> Option<Placement> {
     let folder = |p: &Path| p.parent().map(|d| d.to_string_lossy().to_lowercase());
@@ -3312,7 +3656,12 @@ fn create_window(instance: isize, class: &[u16]) -> Hwnd {
 /// mouse-button input is real only while one of the app's windows is in
 /// front; otherwise it was posted by someone else.
 fn accept_queued(h: Hwnd, msg: &Msg) -> bool {
-    let ours = msg.hwnd != 0 && (msg.hwnd == h || unsafe { IsChild(h, msg.hwnd) } != 0);
+    // A confirm box is an owned popup, not a child: its buttons count too.
+    let b = confirm_box();
+    let ours = msg.hwnd != 0
+        && (msg.hwnd == h
+            || unsafe { IsChild(h, msg.hwnd) } != 0
+            || (b != 0 && (msg.hwnd == b || unsafe { IsChild(b, msg.hwnd) } != 0)));
     if !ours {
         return true;
     }
@@ -3645,8 +3994,8 @@ mod tests {
     }
     /// Builds every screen with synthetic data and calls `visit` on each:
     /// first run, open, restore, create with and without the OTP, the vault
-    /// empty and with a shown entry, edit, password change, OTP backup with
-    /// and without the QR.
+    /// empty, with a shown entry and syncing (each pill word), edit,
+    /// password change, OTP backup with and without the QR.
     unsafe fn each_screen(dir: &std::path::Path, visit: &mut dyn FnMut(&mut App, &str)) {
         let mut session = synthetic_session(dir, "synthetic layout password");
         unsafe {
@@ -3698,6 +4047,29 @@ mod tests {
             app.build();
             visit(&mut app, "vault-copy");
             app.copy_until = None;
+            // A vault that syncs: the helper's folder and status, sync turned
+            // on and its first upload handed back, so the pill shows a real
+            // "동기화됨" before the file name; then every other word.
+            let s = app.session.as_mut().unwrap();
+            let mut server = Server::default();
+            server.helper(&s.path);
+            s.enable_sync().unwrap();
+            upload(&mut server, s);
+            app.sync_badge = s.badge();
+            assert_eq!(app.sync_badge, Some(SyncBadge::Synced));
+            app.build();
+            visit(&mut app, "vault-sync");
+            for badge in [
+                SyncBadge::Uploading,
+                SyncBadge::HelperOff,
+                SyncBadge::Offline,
+                SyncBadge::Warning,
+            ] {
+                app.sync_badge = Some(badge);
+                app.build();
+                visit(&mut app, &format!("vault-sync-{badge:?}"));
+            }
+            app.sync_badge = Some(SyncBadge::Synced);
             // The edit screen's warning follows the auto-lock choice.
             for choice in 1..AUTO_LOCKS.len() {
                 app.auto_lock = choice;
@@ -3855,6 +4227,18 @@ mod tests {
                             ));
                         }
                     }
+                    // Sync notices filled with their longest values.
+                    for notice in sync_notices() {
+                        let (line, _) = sync_line(&notice);
+                        let text = tr(&line);
+                        let need = measure(status, font, text, r.right, 0x10 | 0x40).bottom;
+                        if need > r.bottom {
+                            failures.push(format!(
+                                "{language} status: needs {need}px, has {}px: {text:?}",
+                                r.bottom
+                            ));
+                        }
+                    }
                 }
             };
             unsafe { each_screen(&dir, &mut check) };
@@ -3940,7 +4324,7 @@ mod tests {
         let _korean = KoreanAfter;
         let main = include_str!("main.rs");
         let main = &main[..main.find("#[cfg(test)]\nmod tests").unwrap()];
-        let mut missing = vec![];
+        let (mut missing, mut scanned) = (vec![], vec![]);
         for source in [
             main,
             include_str!("win.rs"),
@@ -3948,20 +4332,37 @@ mod tests {
             include_str!("vault.rs"),
             include_str!("crypto.rs"),
             include_str!("otp.rs"),
+            // goyo-sync's settings window draws with this app's i18n.rs.
+            include_str!("bin/goyo-sync/gui.rs"),
         ] {
-            let code = source.split("#[cfg(test)]").next().unwrap();
+            // Up to the test modules: a test-only item among the program's
+            // own (ANSWER here, PAINTED in theme.rs) must not end the scan.
+            let code = source.split("#[cfg(test)]\nmod ").next().unwrap();
             for text in korean_literals(code) {
                 if !i18n::EN.iter().any(|(ko, _)| *ko == text)
                     && !i18n::KEEP.contains(&text.as_str())
                 {
-                    missing.push(text);
+                    missing.push(text.clone());
                 }
+                scanned.push(text);
             }
         }
         assert!(
             missing.is_empty(),
             "no English for:\n{}",
             missing.join("\n")
+        );
+        // The scan of this file reached main(), the end of its program code.
+        assert!(
+            scanned
+                .iter()
+                .any(|text| text == "자동 잠금 타이머를 시작할 수 없어 종료합니다.")
+        );
+        // And the scan of gui.rs reached run(), near the end of its code.
+        assert!(
+            scanned
+                .iter()
+                .any(|text| text == "화면을 만들 수 없어 종료합니다.")
         );
         for (ko, en) in i18n::EN {
             assert!(!has_korean(en), "untranslated: {ko:?}");
@@ -3997,6 +4398,18 @@ mod tests {
                 .iter()
                 .any(|(s, t)| s == "vault-shown" && t == "Seed phrase")
         );
+        // So does the sync word on the pill, before the file name.
+        assert!(
+            shown
+                .iter()
+                .any(|(s, t)| s == "vault-sync" && t == "Open · Synced · vault.goyo")
+        );
+        // Sync notices are filled from their English templates.
+        for notice in sync_notices() {
+            let (line, _) = sync_line(&notice);
+            let text = tr(&line);
+            assert!(!has_korean(text), "Korean in English mode: {text:?}");
+        }
     }
     /// Switching the language keeps what was typed and the screen's state.
     #[test]
@@ -4048,6 +4461,149 @@ mod tests {
                 Some(&code),
             )
             .unwrap()
+    }
+    const SYNC_PASSWORD: &str = "synthetic sync password";
+    fn sync_entry(title: &str, secret: &str) -> Entry {
+        Entry::new(title.into(), "kind".into(), secret.into(), String::new()).unwrap()
+    }
+    /// What goyo-sync and the server do, for the sync tests, without ssh:
+    /// numbered copies of the uploads, the newest handed back as incoming.
+    #[derive(Default)]
+    struct Server {
+        versions: Vec<Vec<u8>>,
+    }
+    impl Server {
+        /// The helper's first run next to `vault`: its folder and a fresh
+        /// status saying all is well.
+        fn helper(&self, vault: &Path) {
+            let dir = syncfile::sync_dir(vault).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let status = syncfile::render_status(now, now, syncfile::SyncState::Ok);
+            syncfile::replace_file(&dir.join(syncfile::STATUS), &status).unwrap();
+        }
+        /// One helper pass for `vault`: an upload made from the newest
+        /// version becomes the next one (any other lost the race), and the
+        /// newest goes to the incoming file if it is not there yet.
+        fn pass(&mut self, vault: &Path) {
+            let dir = syncfile::sync_dir(vault).unwrap();
+            if let Ok(bytes) = std::fs::read(dir.join(syncfile::OUTGOING)) {
+                let (base, blob) = syncfile::parse_outgoing(&bytes).unwrap();
+                if base == self.versions.len() as u64 {
+                    self.versions.push(blob.to_vec());
+                }
+            }
+            let Some(head) = self.versions.last() else {
+                return;
+            };
+            let incoming = syncfile::render_incoming(self.versions.len() as u64, head).unwrap();
+            let path = dir.join(syncfile::INCOMING);
+            if std::fs::read(&path).ok().as_ref() != Some(&incoming) {
+                syncfile::replace_file(&path, &incoming).unwrap();
+            }
+        }
+    }
+    /// A helper pass for `s`, whose app then looks at what it brought.
+    fn upload(server: &mut Server, s: &mut Session) {
+        server.pass(&s.path);
+        s.poll_sync();
+    }
+    /// PC A turns sync on for a vault holding `titles` and uploads it as
+    /// version 1. PC B gets the key and that version (by USB and `goyo-sync
+    /// --fetch`, then Restore) next to its own helper's folder, which already
+    /// holds version 1 as incoming. Returns A's session and B's vault and key.
+    fn two_pcs(dir: &Path, server: &mut Server, titles: &[&str]) -> (Session, PathBuf, PathBuf) {
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let mut sa = Provision::new()
+            .unwrap()
+            .finish(
+                &a.join("vault.goyo"),
+                &a.join("vault.goyokey"),
+                SYNC_PASSWORD,
+                None,
+            )
+            .unwrap();
+        for title in titles {
+            sa.put(None, sync_entry(title, "secret")).unwrap();
+        }
+        server.helper(&sa.path);
+        sa.enable_sync().unwrap();
+        upload(server, &mut sa);
+        assert_eq!(sa.badge(), Some(SyncBadge::Synced));
+        let (vault, key) = (b.join("vault.goyo"), b.join("vault.goyokey"));
+        std::fs::copy(&sa.key_path, &key).unwrap();
+        let fetched = b.join("from-server.goyo");
+        std::fs::write(&fetched, &server.versions[0]).unwrap();
+        drop(Session::restore(&fetched, &key, &vault, SYNC_PASSWORD, "").unwrap());
+        server.helper(&vault);
+        server.pass(&vault);
+        (sa, vault, key)
+    }
+    /// A mass delete may be a key holder deleting through the server, so it
+    /// is told in the danger tone. Status lines, joined or translated, are
+    /// built in buffers of their final size in both languages, so no grown
+    /// buffer frees an unwiped copy.
+    #[test]
+    fn sync_lines_and_status_buffers() {
+        let _korean = KoreanAfter;
+        let mass = SyncNotice::MassDelete {
+            removed: 5,
+            file: r"vault.goyo.sync\pre-merge-1792000000.goyo".into(),
+        };
+        assert_eq!(sync_line(&mass).1, TONE_DANGER);
+        let merged = SyncNotice::Merged {
+            added: 1,
+            removed: 1,
+        };
+        assert_eq!(sync_line(&merged).1, TONE_MUTED);
+        for english in [false, true] {
+            i18n::set_english(english);
+            for notice in sync_notices() {
+                let (line, _) = sync_line(&notice);
+                for warning in [Placement::SameFolder, Placement::Cloud] {
+                    let both = joined(&[&line, warning.message()]);
+                    assert_eq!(both.capacity(), both.len());
+                    let shown = tr_lines(&both);
+                    assert_eq!(shown.capacity(), shown.len());
+                    assert_eq!(shown.split("\r\n").nth(1), Some(tr(warning.message())));
+                }
+            }
+        }
+    }
+    /// Every sync notice, with values as long as they get.
+    fn sync_notices() -> Vec<SyncNotice> {
+        vec![
+            SyncNotice::SyncOn,
+            SyncNotice::Merged {
+                added: 1000,
+                removed: 1000,
+            },
+            SyncNotice::Conflicts(1000),
+            // Losses since the last copy: at most 4 before the merge that
+            // made it, plus that merge's.
+            SyncNotice::MassDelete {
+                removed: 1004,
+                file: r"vault-2.goyo.sync\pre-merge-1792000000.goyo".into(),
+            },
+            SyncNotice::Rollback,
+            SyncNotice::BadIncoming,
+            SyncNotice::TooLarge,
+            SyncNotice::NewerFormat,
+            SyncNotice::KeyInFolder,
+            SyncNotice::Synced {
+                code: "DDDD-DDDD-DDDD-DDDD".into(),
+            },
+            SyncNotice::HelperOff,
+            SyncNotice::Offline,
+            SyncNotice::HostKey,
+            SyncNotice::Auth,
+            SyncNotice::HelperError,
+        ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
         let (mut acc, mut bits, mut out) = (0u32, 0u32, vec![]);
@@ -4290,7 +4846,7 @@ mod tests {
             assert_eq!(app.auto_lock, 1);
             assert_eq!(variant(&app, 0), theme::TAB);
             assert_eq!(variant(&app, 1), theme::TAB_ON);
-            assert_eq!(app.status, AUTO_LOCKS[1].2);
+            assert_eq!(*app.status, AUTO_LOCKS[1].2);
             // Five minutes: 31 s in another app no longer locks; five minutes do.
             leave(&mut app, AWAY_LOCK + Duration::from_secs(1));
             app.timer();
@@ -4298,7 +4854,7 @@ mod tests {
             app.away_since = Some(Instant::now() - Duration::from_secs(301));
             app.timer();
             assert!(app.session.is_none());
-            assert_eq!(app.status, "미사용 시간이 지나 자동으로 잠갔습니다.");
+            assert_eq!(*app.status, "미사용 시간이 지나 자동으로 잠갔습니다.");
             // Off: an hour unused and away keeps the vault open.
             app.session = Some(second);
             app.screen = Screen::Vault;
@@ -4749,6 +5305,13 @@ mod tests {
             .unwrap();
             session.put(None, entry).unwrap();
         }
+        // The vault syncs, so the pill shows "동기화됨" before the file name:
+        // the helper's folder and status, and the first upload handed back.
+        let mut server = Server::default();
+        server.helper(&session.path);
+        session.enable_sync().unwrap();
+        upload(&mut server, &mut session);
+        assert_eq!(session.badge(), Some(SyncBadge::Synced));
         unsafe {
             SetProcessDPIAware();
             let instance = GetModuleHandleW(null());
@@ -4817,12 +5380,11 @@ mod tests {
                     let a = b.as_mut().unwrap();
                     a.screen = screen;
                     // Status lines as the real app shows them on each screen.
-                    a.status = match screen {
+                    a.status = line(match screen {
                         Screen::Login => "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.",
                         Screen::Vault => "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다.",
                         _ => "",
-                    }
-                    .into();
+                    });
                     a.reveal_until = None;
                     a.copy_until = None;
                     a.provision = None;
@@ -4833,6 +5395,9 @@ mod tests {
                     if screen == Screen::Vault && a.session.is_none() {
                         a.session = session.take();
                     }
+                    // "동기화됨" (checked above) however long the shots take:
+                    // the helper's heartbeat would grow stale meanwhile.
+                    a.sync_badge = a.session.as_ref().map(|_| SyncBadge::Synced);
                     a.selected = if file.ends_with("5-vault-selected") {
                         Some(0)
                     } else if file.ends_with("6-vault-revealed") {
@@ -4875,10 +5440,96 @@ mod tests {
             DestroyWindow(h);
             pump();
         }
-        for e in std::fs::read_dir(&temp).unwrap() {
-            let _ = std::fs::remove_file(e.unwrap().path());
+        // Also the sync folder.
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    /// A yes/no box (the sync consent, delete) answers only to this thread:
+    /// another thread, standing in for another program, posts and sends
+    /// "Yes" in every form, and the box still waits. This thread, standing in
+    /// for the user, then answers it. It shows a real box for about a second.
+    #[test]
+    fn confirm_box_ignores_other_programs() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetDlgItem(h: Hwnd, id: i32) -> Hwnd;
+            fn KillTimer(h: Hwnd, id: usize) -> i32;
         }
-        let _ = std::fs::remove_dir(&temp);
+        static TRIED: AtomicBool = AtomicBool::new(false);
+        static ANSWER: AtomicUsize = AtomicUsize::new(7);
+        unsafe extern "system" fn answer(_: Hwnd, _: u32, _: usize, _: u32) {
+            let b = confirm_box();
+            if b != 0 && TRIED.load(Relaxed) {
+                unsafe { SendMessageW(b, 0x111, ANSWER.load(Relaxed), 0) };
+            }
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            let hook = filter_queue(h);
+            assert_ne!(hook, 0);
+            let timer = SetTimer(0, 0, 50, answer as *const () as isize);
+            assert_ne!(timer, 0);
+            // Each way another program could answer "Yes"; then this thread
+            // answers. The last round checks that a real answer still works.
+            // Posted mouse or key input is taken while the box is in front:
+            // like SendInput, it cannot be told from the user's own input
+            // (docs/SECURITY_REVIEW.md, same-user programs are out of scope).
+            type Attack = fn(Hwnd, Hwnd);
+            let attacks: [(&str, Attack); 6] = [
+                ("posted WM_COMMAND", |b, _| {
+                    PostMessageW(b, 0x111, 6, 0);
+                }),
+                ("posted BM_CLICK", |_, y| {
+                    PostMessageW(y, 0xf5, 0, 0);
+                }),
+                ("sent WM_COMMAND", |b, _| {
+                    SendMessageW(b, 0x111, 6, 0);
+                }),
+                ("sent BM_CLICK", |_, y| {
+                    SendMessageW(y, 0xf5, 0, 0);
+                }),
+                ("sent mouse click", |_, y| {
+                    SendMessageW(y, 0x201, 1, 0);
+                    SendMessageW(y, 0x202, 0, 0);
+                }),
+                ("nothing", |_, _| {}),
+            ];
+            for (i, (name, attack)) in attacks.into_iter().enumerate() {
+                let last = i == 5;
+                TRIED.store(false, Relaxed);
+                ANSWER.store(if last { 6 } else { 7 }, Relaxed);
+                let other = std::thread::spawn(move || {
+                    let start = Instant::now();
+                    let mut b = 0;
+                    while b == 0 && start.elapsed() < Duration::from_secs(10) {
+                        std::thread::sleep(Duration::from_millis(20));
+                        b = confirm_box();
+                    }
+                    assert_ne!(b, 0, "the box never opened");
+                    let yes = GetDlgItem(b, 6); // IDYES
+                    assert_ne!(yes, 0);
+                    attack(b, yes);
+                    std::thread::sleep(Duration::from_millis(200));
+                    let open = confirm_box() == b;
+                    TRIED.store(true, Relaxed);
+                    open
+                });
+                let yes = win::confirm(
+                    h,
+                    "선택한 항목을 삭제할까요? 기존 백업 사본은 삭제되지 않습니다.",
+                );
+                let open = other.join().unwrap();
+                assert!(open, "{name} answered the box");
+                assert_eq!(yes, last, "{name}");
+                assert_eq!(confirm_box(), 0);
+            }
+            KillTimer(0, timer);
+            UnhookWindowsHookEx(hook);
+            FILTERED_WINDOW.with(|f| f.set(0));
+            DestroyWindow(h);
+        }
     }
     /// Another thread stands in for another program: Windows reports both as
     /// "sent from another thread" (ISMEX_SEND, or ISMEX_NOTIFY for
@@ -4961,10 +5612,12 @@ mod tests {
                     send(pass, 0x0e, 0),                  // WM_GETTEXTLENGTH
                     send(h, 0x111, THEME_LIGHT as usize), // WM_COMMAND
                     send(peek, 0xf5, 0),                  // BM_CLICK
+                    send(h, 0x111, SUBMIT as usize),      // an unlock, then the sync offer
                 ]
             });
             pump_until(&results);
-            assert_eq!(results.join().unwrap(), [0; 5]);
+            assert_eq!(results.join().unwrap(), [0; 6]);
+            assert!(!SYNC_OFFER.with(Cell::get));
             // Message boxes, file dialogs and move loops run message loops
             // that never call accept_queued; the queue filter covers them.
             let hook = filter_queue(h);
@@ -5050,6 +5703,574 @@ mod tests {
             WINDOW_GONE.with(|p| p.set(false));
             PENDING_EVENTS.with(|p| p.set(0));
         }
+    }
+    /// The App behind the window of a test, borrowed for `f`.
+    fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
+        APP.with(|cell| f(cell.borrow_mut().as_mut().unwrap()))
+    }
+    /// Gives the next ask() its answer, and records the question.
+    fn answer(asked: &std::rc::Rc<RefCell<Vec<String>>>, yes: bool) {
+        let asked = asked.clone();
+        ANSWER.with(|a| {
+            *a.borrow_mut() = Some(Box::new(move |text: &str| {
+                // Asked like a message box: timers see a dialog.
+                assert!(in_modal());
+                asked.borrow_mut().push(text.to_owned());
+                yes
+            }))
+        });
+    }
+    /// Timer ticks as they come while another app is in front, its switch
+    /// handled a moment ago: nothing locks or ends what is shown on that
+    /// account (see auto_lock_choices).
+    fn tick(app: &mut App, n: u32) {
+        for _ in 0..n {
+            app.inactive = true;
+            app.away_since = Some(Instant::now());
+            app.timer();
+        }
+    }
+    /// B's vault list merges what A uploaded within one poll (every 4th
+    /// tick), and only there: not while an entry is edited, not while a
+    /// dialog runs. The selection follows its entry by ID or the edit that
+    /// replaced it; the 15-second view and copy permission end with any
+    /// change to the list, since a merge can put other text under the same
+    /// ID. Polling never counts as use.
+    #[test]
+    fn timer_merges_on_the_vault_list() {
+        let _korean = KoreanAfter;
+        let dir = test_dir("sync-timer");
+        let mut server = Server::default();
+        let titles = ["entry 0", "entry 1", "entry 2", "entry 3"];
+        let (mut a, vault, key) = two_pcs(&dir, &mut server, &titles);
+        let ids: Vec<_> = (0..titles.len()).map(|i| a.entry_id(i).unwrap()).collect();
+        let entries = |app: &App| app.session.as_ref().unwrap().entries.len();
+        let merged = |added: usize, removed: usize| {
+            let (line, _) = sync_line(&SyncNotice::Merged { added, removed });
+            line.to_string()
+        };
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.vault_path = vault.clone();
+            app.key_path = key;
+            app.screen = Screen::Login;
+            app.build();
+            // B opens, in English. The unlock merged version 1 and found it
+            // equal, so the check code takes the usual line's place; the key
+            // next to the vault still gets its warning, translated as well.
+            i18n::set_english(true);
+            SetWindowTextW(app.handle(PASS), wide(SYNC_PASSWORD).as_ptr());
+            app.command(SUBMIT, 0).unwrap();
+            assert!(app.screen == Screen::Vault);
+            assert_eq!(app.session.as_ref().unwrap().check_code(), a.check_code());
+            assert_eq!(app.sync_badge, Some(SyncBadge::Synced));
+            assert!(!SYNC_OFFER.with(Cell::get)); // already syncing
+            let code = SyncNotice::Synced {
+                code: a.check_code(),
+            };
+            let line = format!(
+                "{}\r\n{}",
+                *sync_line(&code).0,
+                tr(Placement::SameFolder.message())
+            );
+            assert_eq!(caption(app.handle(STATUS)), line);
+            assert!(!has_korean(&line));
+            assert_eq!(GetWindowLongPtrW(app.handle(STATUS), -21), TONE_DANGER);
+            // Joined in a buffer of the final size: none grew and freed an
+            // unwiped copy of the line.
+            assert_eq!(app.status.capacity(), app.status.len());
+            // The status keeps its Korean source, so a switch back to Korean
+            // translates the warning again (lines built with values keep the
+            // language they were shown in).
+            app.command(LANG_KO, 0).unwrap();
+            let shown = caption(app.handle(STATUS));
+            assert_eq!(
+                shown.split("\r\n").nth(1),
+                Some(Placement::SameFolder.message())
+            );
+            let pill = "열림 · 동기화됨 · vault.goyo".to_owned();
+            assert!(painted(&app).contains(&pill));
+
+            // A deletes entry 0. Entry 2, selected, shown and allowed to be
+            // copied, moves up one row and stays selected; the view and the
+            // copy permission end.
+            app.selected = Some(2);
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.copy_until = Some(Instant::now() + Duration::from_secs(30));
+            app.build();
+            app.set_toggle(true);
+            a.delete(a.entry_index(&ids[0]).unwrap()).unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            let used = app.activity;
+            app.sync_ticks = 0;
+            tick(&mut app, SYNC_TICKS - 1);
+            assert_eq!(entries(&app), 4);
+            tick(&mut app, 1);
+            assert_eq!(entries(&app), 3);
+            let s = app.session.as_ref().unwrap();
+            assert_eq!(app.selected, Some(1));
+            assert_eq!(app.selected, s.entry_index(&ids[2]));
+            assert_eq!(SendMessageW(app.handle(LIST), 0x188, 0, 0), 1); // LB_GETCURSEL
+            assert!(app.reveal_until.is_none() && app.copy_until.is_none());
+            assert_eq!(GetWindowLongPtrW(app.handle(TOGGLE), -21), theme::TOGGLE);
+            assert_eq!(*app.status, merged(0, 1));
+            assert_eq!(GetWindowLongPtrW(app.handle(STATUS), -21), TONE_MUTED);
+            assert_eq!(app.activity, used);
+
+            // A edits entry 2: the selection follows the edit, and the view
+            // of the old text and the copy permission end.
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.copy_until = Some(Instant::now() + Duration::from_secs(30));
+            app.build();
+            app.set_toggle(true);
+            app.page = 1;
+            let i = a.entry_index(&ids[2]).unwrap();
+            a.put(Some(i), sync_entry("entry 2", "edited on A"))
+                .unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            tick(&mut app, SYNC_TICKS);
+            let s = app.session.as_ref().unwrap();
+            let edited = s.successor(&ids[2]);
+            assert!(edited.is_some() && app.selected == edited);
+            assert_eq!(&*s.entries[edited.unwrap()].secret, "edited on A");
+            assert!(app.reveal_until.is_none() && app.copy_until.is_none());
+            assert_eq!(app.page, 0);
+            assert_eq!(GetWindowLongPtrW(app.handle(TOGGLE), -21), theme::TOGGLE);
+            // Two of B's four entries went in this session: added up, that
+            // makes a safety copy, told in the danger tone.
+            let copies = syncfile::pre_merge_copies(&syncfile::sync_dir(&vault).unwrap());
+            assert_eq!(copies.len(), 1);
+            let name = copies[0].file_name().unwrap().to_string_lossy();
+            let file = format!("vault.goyo.sync\\{name}");
+            let (line, tone) = sync_line(&SyncNotice::MassDelete { removed: 2, file });
+            assert_eq!(*app.status, *line);
+            assert_eq!(tone, TONE_DANGER);
+            assert_eq!(GetWindowLongPtrW(app.handle(STATUS), -21), TONE_DANGER);
+
+            // A adds an entry while B edits the selected one: nothing merges
+            // until B is back on the list, so the edit replaces the entry it
+            // opened. A dialog holds merges back as well.
+            let selected = app.selected;
+            let opened = edited.and_then(|i| s.entry_id(i)).unwrap();
+            app.command(EDIT, 0).unwrap();
+            assert!(app.screen == Screen::Edit && app.editing == selected);
+            a.put(None, sync_entry("entry 4", "secret")).unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            tick(&mut app, 2 * SYNC_TICKS);
+            assert_eq!(entries(&app), 3);
+            SetWindowTextW(app.handle(SECRET), secret_wide("edited on B").as_ptr());
+            app.command(SAVE, 0).unwrap();
+            let s = app.session.as_ref().unwrap();
+            assert_eq!(&*s.entries[selected.unwrap()].secret, "edited on B");
+            assert_eq!(s.successor(&opened), selected);
+            assert_eq!(app.sync_badge, Some(SyncBadge::Uploading));
+            modal(|| tick(&mut app, 2 * SYNC_TICKS));
+            assert_eq!(entries(&app), 3);
+            tick(&mut app, SYNC_TICKS);
+            assert_eq!(entries(&app), 4);
+            assert_eq!(app.selected, selected);
+            assert_eq!(*app.status, merged(1, 0));
+
+            // B's upload lands: only the pill changes.
+            server.pass(&vault);
+            tick(&mut app, SYNC_TICKS);
+            assert_eq!(app.sync_badge, Some(SyncBadge::Synced));
+            assert_eq!(*app.status, merged(1, 0));
+            assert!(painted(&app).contains(&pill));
+
+            // A deletes the entry B shows: the selection and the view end.
+            upload(&mut server, &mut a);
+            app.selected = app.session.as_ref().unwrap().entry_index(&ids[1]);
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.build();
+            a.delete(a.entry_index(&ids[1]).unwrap()).unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            tick(&mut app, SYNC_TICKS);
+            assert!(app.selected.is_none() && app.reveal_until.is_none());
+            assert_eq!(*app.status, merged(0, 1));
+            let s = app.session.as_ref().unwrap();
+            assert_eq!(s.entries.len(), 3);
+            assert_eq!(s.check_code(), a.check_code());
+            drop(app);
+            DestroyWindow(h);
+        }
+        drop(a);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Sync is offered right after the user's own unlock of a v1 vault next
+    /// to a sync folder, and from nothing else: another program can neither
+    /// unlock nor raise the question, not even with the flag already up.
+    /// "No" keeps v1 and asks again next time; "yes" while the vault locked
+    /// changes nothing; "yes" makes it v2 and starts the upload.
+    #[test]
+    fn sync_is_offered_after_an_unlock_only() {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn PeekMessageW(m: *mut Msg, h: Hwnd, min: u32, max: u32, remove: u32) -> i32;
+            fn SendNotifyMessageW(h: Hwnd, m: u32, w: usize, l: isize) -> i32;
+        }
+        /// Handles what another thread sends, and nothing posted: the filter
+        /// matches no queued message.
+        fn serve_sent<T>(worker: std::thread::JoinHandle<T>) -> T {
+            let peek = || unsafe {
+                let mut msg = Msg::default();
+                PeekMessageW(&mut msg, 0, 0x7fff, 0x7fff, 0);
+            };
+            while !worker.is_finished() {
+                peek();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            peek();
+            worker.join().unwrap()
+        }
+        let dir = test_dir("sync-offer");
+        let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
+        let mut s = Provision::new()
+            .unwrap()
+            .finish(&vault, &key, SYNC_PASSWORD, None)
+            .unwrap();
+        s.put(None, sync_entry("entry 0", "secret")).unwrap();
+        drop(s);
+        Server::default().helper(&vault);
+        let outgoing = syncfile::sync_dir(&vault).unwrap().join(syncfile::OUTGOING);
+        let format = || std::fs::read(&vault).unwrap()[..8].to_vec();
+        assert_eq!(format(), b"GOYOVA01");
+        let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+        unsafe {
+            let name = wide("GoyoSyncOfferTest");
+            let instance = GetModuleHandleW(null());
+            let wc = WndClass {
+                style: 0,
+                proc: Some(window_proc),
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: 0,
+                cursor: 0,
+                background: 6,
+                menu: null(),
+                class: name.as_ptr(),
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let h = CreateWindowExW(
+                0,
+                name.as_ptr(),
+                wide("Synthetic sync offer test").as_ptr(),
+                0x00ca0000,
+                0,
+                0,
+                900,
+                800,
+                0,
+                0,
+                instance,
+                null_mut(),
+            );
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            WINDOW_GONE.with(|p| p.set(false));
+            let mut app = App::new(h);
+            app.vault_path = vault.clone();
+            app.key_path = key.clone();
+            app.screen = Screen::Login;
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            let type_password = || {
+                with_app(|a| SetWindowTextW(a.handle(PASS), wide(SYNC_PASSWORD).as_ptr()));
+            };
+            let unlock = || SendMessageW(h, 0x111, SUBMIT as usize, 0);
+
+            // Another program: no unlock, no question.
+            type_password();
+            answer(&asked, true);
+            let worker = std::thread::spawn(move || {
+                SendNotifyMessageW(h, 0x111, SUBMIT as usize, 0);
+                SendMessageW(h, 0x111, SUBMIT as usize, 0)
+            });
+            assert_eq!(serve_sent(worker), 0);
+            assert!(with_app(|a| a.session.is_none()));
+            assert!(!SYNC_OFFER.with(Cell::get) && asked.borrow().is_empty());
+
+            // The user's unlock asks once, right after it, about this folder.
+            // "No" keeps v1 and the usual line.
+            answer(&asked, false);
+            unlock();
+            assert_eq!(asked.borrow().len(), 1);
+            assert!(asked.borrow()[0].starts_with("이 금고 옆에 동기화 폴더(vault.goyo.sync)가"));
+            assert!(ANSWER.with(|a| a.borrow().is_none()) && !SYNC_OFFER.with(Cell::get));
+            with_app(|a| {
+                let s = a.session.as_ref().unwrap();
+                assert!(s.format() == Format::V1 && a.sync_badge.is_none());
+                assert!(a.status.starts_with("잠금 해제됨 · "));
+            });
+            assert_eq!(format(), b"GOYOVA01");
+            assert!(!outgoing.exists());
+            SendMessageW(h, 0, 0, 0); // only an unlock asks
+            assert_eq!(asked.borrow().len(), 1);
+
+            // A flag left up is not taken by another program's message.
+            answer(&asked, true);
+            SYNC_OFFER.with(|f| f.set(true));
+            let worker = std::thread::spawn(move || {
+                SendNotifyMessageW(h, 0, 0, 0);
+                SendMessageW(h, 0, 0, 0)
+            });
+            serve_sent(worker);
+            assert!(SYNC_OFFER.with(Cell::get) && asked.borrow().len() == 1);
+            SYNC_OFFER.with(|f| f.set(false));
+            ANSWER.with(|a| a.borrow_mut().take());
+
+            // "Yes" counts only for the vault it asked about, still open.
+            with_app(|a| a.lock("synthetic lock", true));
+            type_password();
+            ANSWER.with(|a| {
+                *a.borrow_mut() = Some(Box::new(|_: &str| {
+                    with_app(|a| a.lock("synthetic lock", true));
+                    true
+                }))
+            });
+            unlock();
+            assert!(with_app(|a| a.session.is_none()));
+            assert_eq!(format(), b"GOYOVA01");
+            assert!(!outgoing.exists());
+            assert_eq!(
+                with_app(|a| a.status.to_string()),
+                "대화상자가 열린 동안 잠겼습니다. 다시 인증하세요."
+            );
+
+            // Nor once its folder is gone: the vault stays v1.
+            type_password();
+            let dir = syncfile::sync_dir(&vault).unwrap();
+            ANSWER.with(|a| {
+                *a.borrow_mut() = Some(Box::new(move |_: &str| {
+                    std::fs::remove_dir_all(&dir).unwrap();
+                    true
+                }))
+            });
+            unlock();
+            with_app(|a| {
+                assert!(a.session.as_ref().unwrap().format() == Format::V1);
+                assert!(a.sync_badge.is_none() && a.status.starts_with("잠금 해제됨 · "));
+            });
+            assert_eq!(format(), b"GOYOVA01");
+            with_app(|a| a.lock("synthetic lock", true));
+            Server::default().helper(&vault);
+
+            // "Yes": v2 from now on, the first upload made from no server
+            // version, and the pill shows it under way.
+            type_password();
+            answer(&asked, true);
+            unlock();
+            assert_eq!(asked.borrow().len(), 2);
+            with_app(|a| {
+                assert!(a.session.as_ref().unwrap().format() == Format::V2);
+                assert_eq!(a.sync_badge, Some(SyncBadge::Uploading));
+                assert_eq!(*sync_line(&SyncNotice::SyncOn).0, *a.status);
+                assert!(painted(a).contains(&"열림 · 올리는 중 · vault.goyo".to_owned()));
+            });
+            assert_eq!(format(), b"GOYOVA02");
+            let bytes = std::fs::read(&outgoing).unwrap();
+            let (base, blob) = syncfile::parse_outgoing(&bytes).unwrap();
+            assert!(base == 0 && blob.starts_with(b"GOYOVA02"));
+
+            // Once v2, an unlock asks nothing.
+            with_app(|a| a.lock("synthetic lock", true));
+            type_password();
+            answer(&asked, false);
+            unlock();
+            assert!(with_app(|a| a.session.is_some()));
+            assert!(ANSWER.with(|a| a.borrow_mut().take()).is_some());
+            assert_eq!(asked.borrow().len(), 2);
+
+            APP.with(|cell| {
+                cell.borrow_mut().take();
+            });
+            DestroyWindow(h);
+            WINDOW_GONE.with(|p| p.set(false));
+            PENDING_EVENTS.with(|p| p.set(0));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// DELETE removes the entry the user confirmed, found by its ID after
+    /// the question, even if the list moved meanwhile; one deleted on the
+    /// other PC meanwhile is not replaced by its neighbour. Sync adds no
+    /// command: what each screen accepts is as before.
+    #[test]
+    fn delete_finds_the_entry_by_id() {
+        let always = [THEME_DARK, THEME_LIGHT, LANG_KO, LANG_EN];
+        let commands = |app: &App, ids: &[i32]| {
+            let mut want: Vec<i32> = ids.iter().chain(&always).copied().collect();
+            want.sort();
+            let allowed: Vec<i32> = (0..=400).filter(|&id| app.allows(id)).collect();
+            assert_eq!(allowed, want, "{}", app.screen as u8);
+        };
+        let dir = test_dir("sync-delete");
+        let mut app = App::new(0);
+        for (screen, ids) in [
+            (Screen::Welcome, &[CREATE, OPEN, RESTORE][..]),
+            (
+                Screen::Login,
+                &[
+                    CREATE, RESTORE, BACK, SUBMIT, BROWSE_V, BROWSE_K, VPATH, KPATH, PASS,
+                    PEEK_PASS, OTP,
+                ],
+            ),
+            (
+                Screen::Create,
+                &[
+                    BACK,
+                    SUBMIT,
+                    OTP_TOGGLE,
+                    BROWSE_V,
+                    BROWSE_K,
+                    VPATH,
+                    KPATH,
+                    PASS,
+                    CONFIRM,
+                    PEEK_PASS,
+                    PEEK_CONFIRM,
+                    OTP,
+                ],
+            ),
+            (
+                Screen::Restore,
+                &[
+                    BACK, SUBMIT, BROWSE_V, BROWSE_K, BROWSE_D, VPATH, KPATH, DEST, PASS,
+                    PEEK_PASS, OTP,
+                ],
+            ),
+        ] {
+            app.screen = screen;
+            commands(&app, ids);
+        }
+        for screen in [
+            Screen::Vault,
+            Screen::Edit,
+            Screen::Password,
+            Screen::OtpBackup,
+        ] {
+            app.screen = screen;
+            assert!((0..=400).all(|id| !app.allows(id)), "no vault open");
+        }
+        app.session = Some(synthetic_session(&dir, "synthetic allows password"));
+        let auto_lock: Vec<i32> = (AUTO_LOCK..=AUTO_LOCK_LAST).collect();
+        let presets: Vec<i32> = (PRESET..=PRESET_LAST).collect();
+        let vault = [
+            LOCK, BACKUP, KEYBACKUP, CHANGE, OTP_SETUP, LIST, NEW, EDIT, DELETE, REVEAL, TOGGLE,
+            COPY, PREVIOUS, NEXT,
+        ];
+        let edit = [TITLE, KIND, SECRET, NOTES, SAVE, CANCEL];
+        for (screen, ids) in [
+            (Screen::Vault, [&vault[..], &auto_lock].concat()),
+            (Screen::Edit, [&edit[..], &presets].concat()),
+            (
+                Screen::Password,
+                vec![
+                    PASS,
+                    CONFIRM,
+                    CURRENT_PASS,
+                    PEEK_PASS,
+                    PEEK_CONFIRM,
+                    PEEK_CURRENT,
+                    OTP,
+                    SUBMIT,
+                    CANCEL,
+                ],
+            ),
+            (
+                Screen::OtpBackup,
+                vec![CURRENT_PASS, PEEK_CURRENT, SUBMIT, CANCEL],
+            ),
+        ] {
+            app.screen = screen;
+            commands(&app, &ids);
+        }
+        drop(app);
+
+        let mut server = Server::default();
+        let titles = ["entry 0", "entry 1", "entry 2", "entry 3"];
+        let (mut a, vault, key) = two_pcs(&dir, &mut server, &titles);
+        let ids: Vec<_> = (0..titles.len()).map(|i| a.entry_id(i).unwrap()).collect();
+        let b = Session::unlock(&vault, &key, SYNC_PASSWORD, "").unwrap();
+        let titles_of = |app: &App| -> Vec<String> {
+            let s = app.session.as_ref().unwrap();
+            s.entries.iter().map(|e| e.title.to_string()).collect()
+        };
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            WINDOW_GONE.with(|p| p.set(false));
+            let mut app = App::new(h);
+            app.session = Some(b);
+            app.screen = Screen::Vault;
+            app.selected = Some(2);
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+
+            // B asks to delete entry 2 while A's deletion of entry 0 waits.
+            a.delete(a.entry_index(&ids[0]).unwrap()).unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            ANSWER.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(|text: &str| {
+                    assert_eq!(
+                        text,
+                        "선택한 항목을 삭제할까요? 기존 백업 사본은 삭제되지 않습니다."
+                    );
+                    with_app(|a| {
+                        // No merge while the question is open...
+                        a.sync_ticks = 0;
+                        tick(a, 2 * SYNC_TICKS);
+                        assert_eq!(a.session.as_ref().unwrap().entries.len(), 4);
+                        // ...and had the list moved under the selection, the
+                        // index would now point at entry 3.
+                        a.session.as_mut().unwrap().poll_sync().unwrap();
+                        assert_eq!(a.session.as_ref().unwrap().entries.len(), 3);
+                        assert_eq!(a.selected, Some(2));
+                    });
+                    true
+                }))
+            });
+            modal_command(h, DELETE).unwrap();
+            with_app(|a| {
+                assert_eq!(titles_of(a), ["entry 1", "entry 3"]);
+                assert!(a.selected.is_none());
+                assert_eq!(*a.status, "항목을 삭제했습니다.");
+                assert_eq!(a.sync_badge, Some(SyncBadge::Uploading));
+                a.selected = Some(1); // entry 3
+                a.build();
+            });
+
+            // Entry 3 is deleted on A while B asks: B deletes nothing else.
+            a.delete(a.entry_index(&ids[3]).unwrap()).unwrap();
+            upload(&mut server, &mut a);
+            server.pass(&vault);
+            ANSWER.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(|_: &str| {
+                    with_app(|a| a.session.as_mut().unwrap().poll_sync());
+                    true
+                }))
+            });
+            assert_eq!(modal_command(h, DELETE), Err("항목 선택 오류"));
+            with_app(|a| assert_eq!(titles_of(a), ["entry 1"]));
+
+            APP.with(|cell| {
+                cell.borrow_mut().take();
+            });
+            DestroyWindow(h);
+            WINDOW_GONE.with(|p| p.set(false));
+            PENDING_EVENTS.with(|p| p.set(0));
+        }
+        drop(a);
+        let _ = std::fs::remove_dir_all(&dir);
     }
     /// The self-check's planting test reports a DLL loaded from the exe's
     /// folder. A renamed copy of a System32 DLL stands in for a planted one.

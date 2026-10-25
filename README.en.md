@@ -10,13 +10,13 @@
 
 ## What it does
 
-- **Fully offline:** no network code, no server, account, sync or auto-update.
+- **The vault app is fully offline:** `goyo-vault.exe` has no network code and starts no other programs. Optionally, a separate tool, `goyo-sync.exe` (add-on ZIP), syncs **only the encrypted vault file** with your own SSH server; the key file and password are never sent. Without it, everything stays offline as before. There is no account and no auto-update.
 - **Opening a vault takes** the vault file (`.goyo`), a separate key file (`.goyokey`) and your password. A phone OTP is off by default, but **turning it on is recommended.** Only the two files and the password take part in decryption, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
 - **Auto-lock** of an open vault, by default after 60 seconds idle (2 minutes on the OTP backup screen) or 30 seconds in another app; on the vault screen you can change it to 5 minutes, 30 minutes or off. Locking the screen, sleep and Windows shutdown always lock it.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
 - **A single executable, no installer.** Dark and light themes, Korean and English interface.
-- **There is no automatic backup.** You make backups yourself; [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what and when.
+- **There is no automatic backup.** You make backups yourself; [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what and when. With sync, the server keeps the last 200 encrypted versions, but key and OTP backups are still up to you.
 
 ## Security at a glance
 
@@ -27,13 +27,13 @@
 |Second key|A **key file** holding a random 256-bit key|Someone with only the vault file cannot open it, even with your password.|
 |Phone OTP (recommended)|RFC 6238 TOTP, a used code is never accepted again|If your password leaks, nobody can open the vault with this app on this PC without your phone.|
 |Randomness|CPU hardware randomness (**RDSEED**)|Keys, nonces and the OTP secret all come from hardware randomness.|
-|Network|**None**|There is no network code, and a pre-release check confirms that no network library is in the executable's DLL list.|
+|Network|goyo-vault.exe: **none** (checked before each release) · optional goyo-sync.exe: no network code of its own; sends only ciphertext through Windows' built-in ssh.exe|The vault app has no network code. A pre-release check confirms that no network library is in either executable's DLL list.|
 |Memory|Keys, passwords and entries are wiped with `zeroize` after use|On lock and exit the app clears the secrets it manages from memory.|
 |Screen|Capture exclusion, hidden by default, auto-lock|The window does not appear in screenshots or recordings; a secret shows for 15 seconds only when you ask.|
 |Clipboard|Wiped after 15 seconds, excluded from Win+V history and cloud sync|Copying works only after you turn on "allow copy".|
 |Other programs|Window messages blocked, memory access restricted, DLL planting blocked|Other programs cannot read the input fields, fake clicks to make the app copy a secret, or read its memory.|
 |Transparency|Open source, pinned dependencies, the same source builds the same executable (`/Brepro`)|Anyone can read the code, build it and compare the result with the release.|
-|Verification|31 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
+|Verification|139 automated tests, a multi-angle AI security audit and re-checks|All findings and fixes are public in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).|
 
 **How long the password holds out if someone gets both files** (estimates, generously assuming one high-end GPU tries 100 passwords per second)
 
@@ -55,11 +55,11 @@ Some things the app **cannot stop**: malware on the PC (keyloggers, copying your
 
 ## Install
 
-1. Download `GoyoVault-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases).
+1. Download `GoyoVault-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases). `GoyoVault-Sync-<version>-windows-x64.zip` is needed only for [Sync (optional)](#sync-optional).
 2. **Check the download before running it.** The only official source is this repository (`github.com/NA-DEGEN-GIRL/goyo-vault`). In PowerShell run `Get-FileHash .\GoyoVault-<version>-windows-x64.zip` and compare it with the SHA-256 in the release notes. `SHA256SUMS.txt` inside the ZIP only detects corruption: whoever swaps the ZIP can update it too.
 3. The ZIP contains a `GoyoVault` folder. Extract it to **a folder only you use that is not synced**, for example `C:\Users\<you>\GoyoVault`. Avoid:
    - the inside of the ZIP or a temporary folder: cleaning it up deletes your vault (the app warns at start-up);
-   - `Documents`/`Desktop` backed up by OneDrive, and Dropbox or Google Drive folders: vault and key end up in the same cloud account;
+   - `Documents`/`Desktop` backed up by OneDrive, and Dropbox or Google Drive folders: the key file ends up in the same cloud account as the vault. To use the vault on several PCs, use [Sync (optional)](#sync-optional), which sends only the encrypted vault file;
    - a new folder directly under `C:\`, shared folders and USB sticks others use: someone else could replace the program.
 4. Run `GoyoVault\goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. If the hash matched in step 2, choose **More info → Run anyway**. With Smart App Control enforcing, unsigned programs may be blocked outright.
 
@@ -68,6 +68,8 @@ Some things the app **cannot stop**: malware on the PC (keyloggers, copying your
 Extract the new ZIP **to the same place, overwriting the old files.** Only the program and documents change; the vault (`.goyo`), key (`.goyokey`) and theme setting in that folder stay. Back up the vault and key first.
 
 Every vault made before 0.5.0 uses an OTP and still opens as before. A vault made **without an OTP** in 0.5.0 or later does not open in 0.4.x or earlier.
+
+From 0.8.0, **a vault with sync turned on, and its backups, open only in 0.8.0 or later.** A vault without sync keeps its format and still opens in 0.7.x and older.
 
 > [!NOTE]
 > ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault from another location**.
@@ -202,11 +204,26 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 
 **A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
 
+**With sync,** the server keeps the last 200 encrypted versions ('Get from server…' in the settings window or `goyo-sync --fetch`, then Restore). Key and OTP backups are still up to you. The server keeps that history, so it does not replace your vault backups either.
+
 **Where to keep them**
 - Keep vault backups and key backups on **different drives**, for example the vault backup on an external disk and the key backup on a USB stick.
 - Each is encrypted and safe on its own, but together they leave only the password, so never keep both on one USB stick or in one cloud account.
 - After changing the password, make a new key backup and destroy the old ones: an old key copy still opens the vault with the old password.
 - Do not let this vault be the only copy of a valuable seed phrase; also keep it on paper or metal.
+
+## Sync (optional)
+
+To use one vault on several PCs, `goyo-sync.exe` from the sync add-on ZIP exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC gets its vault with 'Get from server…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
+
+- **Every PC needs 0.8.0 or later.** A synced vault and its backups do not open in 0.7.x or older. Each vault asks at every unlock until you agree, and only vaults you agree for change.
+- The key file and password are never sent. Move the key file between PCs by USB.
+- When two PCs edit the same entry, both versions are kept. Delete the one you do not need.
+- **Deletions spread to the other PCs.** After a mistake, get entries back from the server history (the last 200 versions) or a `pre-merge-*.goyo` copy in the sync folder.
+- The server cannot read the vault, but it learns the vault ID, its size, when the contents changed and your IP address. The helper connects about once a minute, so it also learns when each PC is on. OTP-only unlocks are not uploaded, and even when the server takes no upload, a waiting upload is not made again at each unlock, so the server normally does not learn when you open the vault. The exception: when changes are still waiting to go up and a new copy arrives from the server, they go up again after the merge (at the next unlock if the app was closed), so it learns that moment.
+- While sync is on, never drop another file in place of `vault.goyo` by hand. Open other copies with Restore from backup.
+- After changing the password on one PC, copy the new key file to the others. The data key stays the same, so old key copies keep working.
+- "Synced" means "checked with the key to match the copy the server last sent or acknowledged". It neither proves that the server really stored it nor that the server keeps it safe. The same check code (`XXXX-XXXX-XXXX-XXXX`, covering the entries' text too) on two PCs means the same contents.
 
 ## Please read
 
@@ -230,7 +247,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 - The file format is documented in [docs/FORMAT.md](docs/FORMAT.md).
 
 **Memory and files**
-- On normal exit and on lock, keys, strings, serialization buffers and Argon2 working memory are wiped with `zeroize`. Copies inside Windows input controls, graphics memory, CPU registers, the page file or crash dumps are not guaranteed to be removed.
+- On normal exit and on lock, keys, strings, serialization buffers and Argon2 working memory are wiped with `zeroize`. Copies inside Windows input controls and the entry list, graphics memory, CPU registers, the page file or crash dumps are not guaranteed to be removed.
 - No plaintext file is ever written. An encrypted temporary file in the same folder is synced, renamed into place and flushed again under its final name. A file lock prevents two instances from using one vault. The lock goes by path, so two hard links to one vault can still be opened twice; it stops cooperating programs, not malware running as you.
 - `goyo-vault.theme` (theme), `goyo-vault.lang` (language) and `goyo-vault.paths` (last vault and key locations) next to the program hold no secrets. The paths file does reveal where the key is, so do not share that folder.
 - Power-loss safety depends on the drive and file system; FAT/exFAT is not guaranteed. `.goyolock` files, encrypted temporary files left after a crash, and metadata such as file names and paths are not hidden.
@@ -249,9 +266,10 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 **Process hardening**
 - Every DLL the program loads before it starts running is looked up in System32 only; other Windows DLLs are loaded from System32 only, after the defenses are on. Each release is checked by running the program with fake DLLs, and then real copies of System32 DLLs, placed next to it; the check fails if any is loaded from that folder (`scripts/check_dll_planting.py`).
 - Right after start the app disables dynamic code, legacy extension points, non-system fonts and remote or low-integrity image loads; from then on it **loads only Microsoft-signed DLLs** and **forbids child processes**. Third-party IMEs and third-party shell extensions in the file dialog therefore do not run inside the app.
+- The optional `goyo-sync.exe` also looks up DLLs in System32 only and turns on the same defenses, except the ban on child processes, because it has to start `ssh.exe`. It holds no secrets, so it skips the memory-access restriction below. It never opens the vault or key file. Like the vault app, its settings window ignores clicks, commands and input that other programs send or post to it.
 - Access to the process and all its threads is narrowed so other programs running as you cannot read or write the app's memory or start threads in it to inject code. Threads Windows starts later (for example for a file dialog) get the same restriction within 0.5 seconds. Programs with administrator (debug) rights are not stopped.
 - An attached user-mode debugger or a Remote Desktop (RDP) session locks the vault or blocks actions. These are best-effort checks that can be bypassed; they do not detect remote-control tools such as TeamViewer, memory reading or keyloggers, and the app never claims that the PC is "safe".
-- Rolling a vault back to an old backup, resetting the retry delay by restarting the app, and malicious apps bypassing the checks cannot be fully prevented without a server or separate trusted hardware.
+- Rolling a vault back to an old backup, resetting the retry delay by restarting the app, and malicious apps bypassing the checks cannot be fully prevented without a server or separate trusted hardware. With sync, a server replaying old data cannot delete entries and is reported; a PC receiving its first copy trusts it, so compare the check code.
 - 256-bit symmetric keys are used, but no post-quantum certification or guarantee is claimed.
 
 Review notes (in Korean): [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).
@@ -268,14 +286,15 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --release --locked
 python scripts/check_dependencies.py
 target/release/goyo-vault.exe --self-check
+target/release/goyo-sync.exe --self-check
 ```
 
-- `python scripts/package_release.py` builds the release ZIP. It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executable (and stops if any remain), and only packages a binary that passes the PE flag and DLL list check (`scripts/inspect_pe.py`) and the DLL planting check (`scripts/check_dll_planting.py`).
+- `python scripts/package_release.py` builds the two release ZIPs (main and sync add-on). It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executables (and stops if any remain), and packages only when both executables pass their PE flag and DLL list checks (`scripts/inspect_pe.py --profile vault|sync`) and the DLL planting check (`scripts/check_dll_planting.py`), and the server script's selftest prints `PASS`. The main ZIP holds no network-capable program.
 - Releases are built with rustc 1.98.1. The `/Brepro` linker option makes builds comparable: the same toolchain and commit should give the same executable.
 - `scripts/make_icon.ps1` regenerates the icon; `build.rs` embeds `assets/goyo.ico` into the executable.
-- `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window.
+- `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window. `cargo test --bin goyo-sync sync_ui_preview -- --ignored` does the same for the goyo-sync settings window, to `test-output/sync-ui-preview/`.
 
-There is no network code, telemetry, auto-update or code that starts other programs. The C runtime is linked statically.
+goyo-vault.exe has no network code, telemetry, auto-update or code that starts other programs. goyo-sync.exe starts only `ssh.exe` and `ssh-keygen.exe` (host key fingerprints) from System32\OpenSSH, and itself (`--background`) for background sync. The C runtime is linked statically.
 
 ## License
 
