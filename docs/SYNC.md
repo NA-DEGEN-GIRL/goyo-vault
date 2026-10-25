@@ -36,7 +36,7 @@
 
 ## 1. 설치하고 설정 창 열기
 
-README의 '설치'대로 빌드하면 `dist\`에 동기화 추가 ZIP `GoyoVault-Sync-<버전>-windows-x64.zip`도 생깁니다. 이 ZIP을 **본체 ZIP을 풀었던 곳(GoyoVault 폴더가 들어 있는 폴더)에** 풉니다. ZIP 안에도 `GoyoVault` 폴더가 있어서, 기존 GoyoVault 폴더에 `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example`, `SHA256SUMS-sync.txt`가 더해집니다. GoyoVault 폴더 안에 풀면 `GoyoVault\GoyoVault`가 생기니 주의하세요.
+`goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example`은 README의 '설치'대로 만든 고요 금고 ZIP의 `GoyoVault` 폴더에 함께 들어 있습니다. 따로 설치할 것은 없습니다.
 
 GoyoVault 폴더에서 **`goyo-sync.exe`를 더블클릭**하면 설정 창이 열립니다. 고요 금고와 같은 모양이고, 다크·라이트와 한국어·English는 금고 앱에서 고른 대로 따라갑니다. 창은 하나만 열리며, 다시 실행하면 열려 있는 창이 앞으로 옵니다.
 
@@ -171,7 +171,7 @@ PC가 여러 대면 PC마다 키를 따로 만들어 각각 한 줄씩 넣으세
 
 ## 6. 두 번째 PC 추가
 
-1. 새 PC에 고요 금고 0.8.0 이상과 동기화 추가 ZIP을 설치하고, 위 '준비물'처럼 서버에 ssh로 접속되게 합니다(키나 ssh-agent).
+1. 새 PC에 고요 금고 0.8.0 이상을 설치하고, 위 '준비물'처럼 서버에 ssh로 접속되게 합니다(키나 ssh-agent).
 2. **열쇠 파일(`.goyokey`)을 USB로 옮깁니다.** 서버, 메일, 클라우드로 보내지 마세요.
 3. `goyo-sync.exe`를 실행하고 서버를 적은 뒤 **연결 확인**을 누릅니다(처음 연결이면 지문을 비교하세요).
 4. 금고 파일을 가져옵니다. 둘 중 하나를 고르세요.
@@ -213,7 +213,7 @@ PC가 여러 대면 PC마다 키를 따로 만들어 각각 한 줄씩 넣으세
 
 **한 PC에서 끄기:**
 1. 설정 창에서 **Windows에 로그인하면 자동으로 시작**을 끄고(바로 적용) **중지**를 누릅니다. 먼저 멈춰야 합니다. 도우미가 돌고 있으면 폴더를 다시 만듭니다.
-2. 금고 하나만 끄려면 그 금고를 **빼기**하고 **저장하고 시작**을 누릅니다. 모두 끄려면 도우미 파일(`goyo-sync.exe`, `goyo-sync.conf`, `goyo-sync.log*`, `server\`, `goyo-sync.conf.example`, `SHA256SUMS-sync.txt`)을 지웁니다.
+2. 금고 하나만 끄려면 그 금고를 **빼기**하고 **저장하고 시작**을 누릅니다. 모두 끄려면 도우미 설정과 기록(`goyo-sync.conf`, `goyo-sync.log*`)을 지웁니다. `goyo-sync.exe`는 열지 않으면 아무것도 하지 않으므로 남겨 둬도 됩니다.
 3. `vault.goyo.sync` 폴더를 지웁니다. 남기고 싶은 `pre-merge-*.goyo`가 있으면 먼저 옮기세요.
 
 금고는 동기화 형식 그대로 남고, 0.8.0 이상에서 오프라인으로 계속 열립니다. 0.7 이하 형식으로 되돌리는 기능은 없습니다.

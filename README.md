@@ -10,7 +10,7 @@
 
 ## 어떤 프로그램인가요?
 
-- **금고 앱은 완전 오프라인:** `goyo-vault.exe`에는 네트워크 코드도, 다른 프로그램을 실행하는 코드도 없습니다. 원하면 별도 도구 `goyo-sync.exe`(추가 ZIP)로 **암호화된 금고 파일만** 내 SSH 서버와 동기화할 수 있습니다. 열쇠 파일과 비밀번호는 보내지 않습니다. 설치하지 않으면 이전과 똑같이 오프라인입니다. 계정과 자동 업데이트는 없습니다.
+- **금고 앱은 완전 오프라인:** `goyo-vault.exe`에는 네트워크 코드도, 다른 프로그램을 실행하는 코드도 없습니다. 원하면 함께 들어 있는 별도 도구 `goyo-sync.exe`로 **암호화된 금고 파일만** 내 SSH 서버와 동기화할 수 있습니다. 열쇠 파일과 비밀번호는 보내지 않습니다. `goyo-sync.exe`를 직접 열어 설정하기 전에는 아무것도 하지 않고, 금고 앱은 그것을 실행할 수 없습니다. 계정과 자동 업데이트는 없습니다.
 - **금고를 열 때 필요한 것:** 금고 파일(`.goyo`), 열쇠 파일(`.goyokey`), 비밀번호. 휴대폰 OTP는 기본으로 꺼져 있지만 **켜 두는 것을 권장합니다.** 암호를 푸는 데 쓰이는 건 두 파일과 비밀번호뿐이라, **두 파일을 함께 가져간 사람에게는 비밀번호가 유일한 방어선**입니다. 그래서 열쇠 파일은 금고와 다른 곳에 두세요.
 - **비밀값을 기본으로 가립니다:** 15초 보기, 허용한 뒤에만 복사, 복사한 값은 15초 뒤 클립보드에서 지웁니다.
 - **자동 잠금:** 금고가 열려 있을 때 기본은 60초 미사용(OTP 백업 화면은 2분)이나 다른 앱에 30초 넘게 머무르면 잠깁니다. 금고 화면에서 5분·30분·끔으로 바꿀 수 있습니다. 화면 잠금, 절전, Windows 종료 때는 설정과 관계없이 잠깁니다.
@@ -64,7 +64,7 @@
    cd goyo-vault
    python scripts/package_release.py
    ```
-   `dist\` 폴더에 본체 `GoyoVault-<버전>-windows-x64.zip`과 동기화 추가 `GoyoVault-Sync-<버전>-windows-x64.zip`이 생깁니다. 스크립트는 빌드하면서 실행 파일 보호 검사, DLL 심기 검사, 서버 스크립트 selftest를 하고, 하나라도 실패하면 ZIP을 만들지 않습니다. 처음 빌드는 의존성을 받느라 몇 분 걸립니다. 동기화 추가 ZIP은 [동기화(선택)](#동기화선택)를 쓸 때만 필요합니다.
+   `dist\` 폴더에 `GoyoVault-<버전>-windows-x64.zip`이 생깁니다. 금고 앱 `goyo-vault.exe`와 동기화 도구 `goyo-sync.exe`가 함께 들어 있습니다. 스크립트는 빌드하면서 실행 파일 보호 검사, DLL 심기 검사, 서버 스크립트 selftest를 하고, 하나라도 실패하면 ZIP을 만들지 않습니다. 처음 빌드는 의존성을 받느라 몇 분 걸립니다.
 3. ZIP 안에는 `GoyoVault` 폴더가 들어 있습니다. **나만 쓰고 동기화되지 않는 폴더**에 푸세요. 예: `C:\Users\<내 이름>\GoyoVault`. 피해야 할 곳은 다음과 같습니다.
    - ZIP 안이나 임시 폴더: 정리될 때 금고도 사라집니다(앱이 시작할 때 경고합니다).
    - OneDrive가 백업하는 `문서`·`바탕 화면`, Dropbox·Google Drive 폴더: 열쇠 파일까지 금고와 같은 클라우드 계정에 올라갑니다. 여러 PC에서 쓰려면 암호화된 금고 파일만 보내는 [동기화(선택)](#동기화선택)를 쓰세요.
@@ -222,7 +222,7 @@ OTP를 켠 금고에만 있는 기능입니다. 금고 화면 아래 **OTP 백�
 
 ## 동기화(선택)
 
-여러 PC에서 같은 금고를 쓰려면 동기화 추가 ZIP의 `goyo-sync.exe`로 **암호화된 금고 파일만** 내 SSH 서버(python3가 있는 Linux 등)와 주고받을 수 있습니다. `goyo-sync.exe`를 더블클릭하면 고요 금고와 같은 모양의 설정 창이 열립니다. 서버 연결 확인(처음 연결이면 호스트 키 지문 확인), 서버 스크립트 설치, 동기화할 금고 고르기, 자동 시작과 백그라운드 동기화 시작을 한곳에서 하고, 두 번째 PC는 '서버에서 받기…'로 금고를 받습니다. 설치·설정·문제 해결과 명령줄 사용법은 [docs/SYNC.md](docs/SYNC.md)에 있습니다.
+여러 PC에서 같은 금고를 쓰려면 함께 들어 있는 `goyo-sync.exe`로 **암호화된 금고 파일만** 내 SSH 서버(python3가 있는 Linux 등)와 주고받을 수 있습니다. `goyo-sync.exe`를 더블클릭하면 고요 금고와 같은 모양의 설정 창이 열립니다. 서버 연결 확인(처음 연결이면 호스트 키 지문 확인), 서버 스크립트 설치, 동기화할 금고 고르기, 자동 시작과 백그라운드 동기화 시작을 한곳에서 하고, 두 번째 PC는 '서버에서 받기…'로 금고를 받습니다. 설치·설정·문제 해결과 명령줄 사용법은 [docs/SYNC.md](docs/SYNC.md)에 있습니다.
 
 - **모든 PC에 0.8.0 이상이 필요합니다.** 동기화를 켠 금고와 그 백업은 0.7.x 이하에서 열리지 않습니다. 금고를 열 때마다 동의할 때까지 묻고, 동의한 금고만 바뀝니다.
 - 열쇠 파일과 비밀번호는 보내지 않습니다. 열쇠 파일은 PC끼리 USB로 옮기세요.
@@ -297,7 +297,7 @@ target/release/goyo-vault.exe --self-check
 target/release/goyo-sync.exe --self-check
 ```
 
-- 설치에 쓰는 ZIP 두 개(본체, 동기화 추가)는 `python scripts/package_release.py`로 만듭니다. 커밋되지 않은 소스나 `RUSTFLAGS`가 있으면 멈추고, 실행 파일에서 빌드한 PC의 경로를 지우며(남아 있으면 멈춤), 두 실행 파일이 각각의 PE 보호 플래그·DLL 목록 검사(`scripts/inspect_pe.py --profile vault|sync`)와 DLL 심기 검사(`scripts/check_dll_planting.py`)를 통과하고 서버 스크립트의 selftest가 `PASS`여야 패키징합니다. 본체 ZIP에는 네트워크를 쓸 수 있는 프로그램이 들어가지 않습니다.
+- 설치에 쓰는 ZIP은 `python scripts/package_release.py`로 만듭니다. 커밋되지 않은 소스나 `RUSTFLAGS`가 있으면 멈추고, 실행 파일에서 빌드한 PC의 경로를 지우며(남아 있으면 멈춤), 두 실행 파일이 각각의 PE 보호 플래그·DLL 목록 검사(`scripts/inspect_pe.py --profile vault|sync`)와 DLL 심기 검사(`scripts/check_dll_planting.py`)를 통과하고 서버 스크립트의 selftest가 `PASS`여야 패키징합니다. ZIP에 들어가는 프로그램은 `goyo-vault.exe`, `goyo-sync.exe`, 서버 스크립트뿐입니다.
 - 아이콘은 `scripts/make_icon.ps1`로 다시 만들 수 있습니다. `build.rs`가 `assets/goyo.ico`를 실행 파일에 넣습니다.
 - 화면 미리보기는 `cargo test ui_preview -- --ignored`로 만듭니다. 결과는 `test-output/ui-preview/`에 저장되며, 이때 미리보기 창이 잠깐 화면에 뜹니다. goyo-sync 설정 창은 `cargo test --bin goyo-sync sync_ui_preview -- --ignored`로 `test-output/sync-ui-preview/`에 만듭니다.
 

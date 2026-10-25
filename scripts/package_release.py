@@ -1,8 +1,8 @@
 """Build and package only explicitly allowed artifacts; never collects vault data.
 
-Two ZIPs: the main one has goyo-vault.exe and the documents and holds no
-network-capable program; the optional sync add-on has goyo-sync.exe, the
-server script and the example settings, to be extracted into the same folder.
+One ZIP with goyo-vault.exe, the optional sync helper goyo-sync.exe, the
+server script, the example settings and the documents. goyo-sync.exe does
+nothing until the user opens it, and goyo-vault.exe cannot start it.
 """
 import hashlib, json, os, pathlib, shutil, subprocess, sys, zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
@@ -55,11 +55,11 @@ for package in sorted(metadata['packages'], key=lambda p: p['name']):
 (root/'docs/THIRD_PARTY_NOTICES.md').write_text('\n'.join(notices), encoding='utf-8')
 version = metadata['packages'][next(i for i,p in enumerate(metadata['packages']) if p['name']=='goyo-vault')]['version']
 
-def stage(folder, exe, files):
-    """Copies exactly `exe` and `files` into `folder`; returns the copies."""
+def stage(folder, exes, files):
+    """Copies exactly `exes` and `files` into `folder`; returns the copies."""
     folder.mkdir(parents=True, exist_ok=True)
     staged = []
-    for source, name in [(release/exe, exe)] + [(root/name, name) for name in files]:
+    for source, name in [(release/exe, exe) for exe in exes] + [(root/name, name) for name in files]:
         destination = folder/name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
@@ -68,7 +68,7 @@ def stage(folder, exe, files):
 PROGRAMS = ('.exe', '.dll', '.py', '.ps1', '.bat', '.cmd', '.vbs', '.js')
 def pack(folder, staged, sums, archive, programs, exact=None):
     """SHA256SUMS file plus a ZIP of `staged` under GoyoVault/, and a
-    `<zip>.sha256` line ("<hex>  <name>") for the release page. Every check
+    `<zip>.sha256` line ("<hex>  <name>"). Every check
     runs before the ZIP is written, so a refused release leaves no ZIP."""
     hashes = '\n'.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(folder).as_posix()}' for p in staged)+'\n'
     checksums = folder/sums
@@ -97,29 +97,23 @@ def pack(folder, staged, sums, archive, programs, exact=None):
 # One unversioned folder: extracting a new release over the old one keeps the
 # vault and key files that live next to the executable.
 docs = ['README.md','README.en.md','시작하기.txt','START-HERE.txt','LICENSE-MIT','LICENSE-APACHE','docs/FORMAT.md','docs/SECURITY_REVIEW.md',
-        'docs/SYNC.md','docs/SYNC.en.md','docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json']
+        'docs/SYNC.md','docs/SYNC.en.md','docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json',
+        'docs/binary-inspection-sync.json','server/goyo-sync-server.py','goyo-sync.conf.example']
 docs += sorted(p.relative_to(root).as_posix() for p in (root/'docs/images').rglob('*.png'))
 if (root/'docs/OPUS_FINAL.md').exists(): docs.append('docs/OPUS_FINAL.md')
-main_folder = root/'dist'/'GoyoVault'
-main_staged = stage(main_folder, 'goyo-vault.exe', docs)
+folder = root/'dist'/'GoyoVault'
+# Files an earlier build left in the staging folder must not linger there.
+if folder.exists():
+    shutil.rmtree(folder)
+staged = stage(folder, ['goyo-vault.exe', 'goyo-sync.exe'], docs)
 archive = root/'dist'/f'GoyoVault-{version}-windows-x64.zip'
-# The main ZIP must work offline as before: its only program is goyo-vault.exe.
-main_names, main_digest = pack(main_folder, main_staged, 'SHA256SUMS.txt', archive, ['GoyoVault/goyo-vault.exe'])
+# Exactly these programs, nothing else that could run.
+names, digest = pack(folder, staged, 'SHA256SUMS.txt', archive,
+                     ['GoyoVault/goyo-vault.exe', 'GoyoVault/goyo-sync.exe', 'GoyoVault/server/goyo-sync-server.py'])
 
-# The add-on stages in its own folder, so its SHA256SUMS never mixes with the
-# main one and nothing else from dist/ can slip in.
-sync_folder = root/'dist'/'sync'/'GoyoVault'
-sync_staged = stage(sync_folder, 'goyo-sync.exe', ['server/goyo-sync-server.py', 'goyo-sync.conf.example'])
-sync_archive = root/'dist'/f'GoyoVault-Sync-{version}-windows-x64.zip'
-sync_names, sync_digest = pack(sync_folder, sync_staged, 'SHA256SUMS-sync.txt', sync_archive,
-                               ['GoyoVault/goyo-sync.exe', 'GoyoVault/server/goyo-sync-server.py'],
-                               exact=['GoyoVault/goyo-sync.exe', 'GoyoVault/server/goyo-sync-server.py',
-                                      'GoyoVault/goyo-sync.conf.example', 'GoyoVault/SHA256SUMS-sync.txt'])
-
-exe, sync_exe = main_folder/'goyo-vault.exe', sync_folder/'goyo-sync.exe'
-report = {'zip':str(archive),'zip_bytes':archive.stat().st_size,'zip_sha256':main_digest,
+exe, sync_exe = folder/'goyo-vault.exe', folder/'goyo-sync.exe'
+report = {'zip':str(archive),'zip_bytes':archive.stat().st_size,'zip_sha256':digest,
           'exe':str(exe),'exe_bytes':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),
-          'sync_zip':str(sync_archive),'sync_zip_bytes':sync_archive.stat().st_size,'sync_zip_sha256':sync_digest,
           'sync_exe':str(sync_exe),'sync_exe_bytes':sync_exe.stat().st_size,'sync_exe_sha256':hashlib.sha256(sync_exe.read_bytes()).hexdigest()}
 (root/'dist/release.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
 print(json.dumps(report, indent=2))

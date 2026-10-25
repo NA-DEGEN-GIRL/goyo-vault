@@ -10,7 +10,7 @@
 
 ## What it does
 
-- **The vault app is fully offline:** `goyo-vault.exe` has no network code and starts no other programs. Optionally, a separate tool, `goyo-sync.exe` (add-on ZIP), syncs **only the encrypted vault file** with your own SSH server; the key file and password are never sent. Without it, everything stays offline as before. There is no account and no auto-update.
+- **The vault app is fully offline:** `goyo-vault.exe` has no network code and starts no other programs. Optionally, the separate tool `goyo-sync.exe` that comes with it syncs **only the encrypted vault file** with your own SSH server; the key file and password are never sent. `goyo-sync.exe` does nothing until you open it and set it up, and the vault app cannot start it. There is no account and no auto-update.
 - **Opening a vault takes** the vault file (`.goyo`), a separate key file (`.goyokey`) and your password. A phone OTP is off by default, but **turning it on is recommended.** Only the two files and the password take part in decryption, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
 - **Auto-lock** of an open vault, by default after 60 seconds idle (2 minutes on the OTP backup screen) or 30 seconds in another app; on the vault screen you can change it to 5 minutes, 30 minutes or off. Locking the screen, sleep and Windows shutdown always lock it.
@@ -64,7 +64,7 @@ Goyo Vault does not ship ready-made executables or ZIPs. **Build it yourself fro
    cd goyo-vault
    python scripts/package_release.py
    ```
-   The `dist\` folder then holds the main `GoyoVault-<version>-windows-x64.zip` and the sync add-on `GoyoVault-Sync-<version>-windows-x64.zip`. While building, the script runs the executable protection checks, the DLL planting check and the server script's selftest, and makes no ZIP if any of them fails. The first build takes a few minutes to fetch dependencies. The sync add-on is needed only for [Sync (optional)](#sync-optional).
+   The `dist\` folder then holds `GoyoVault-<version>-windows-x64.zip`, with the vault app `goyo-vault.exe` and the sync tool `goyo-sync.exe`. While building, the script runs the executable protection checks, the DLL planting check and the server script's selftest, and makes no ZIP if any of them fails. The first build takes a few minutes to fetch dependencies.
 3. The ZIP contains a `GoyoVault` folder. Extract it to **a folder only you use that is not synced**, for example `C:\Users\<you>\GoyoVault`. Avoid:
    - the inside of the ZIP or a temporary folder: cleaning it up deletes your vault (the app warns at start-up);
    - `Documents`/`Desktop` backed up by OneDrive, and Dropbox or Google Drive folders: the key file ends up in the same cloud account as the vault. To use the vault on several PCs, use [Sync (optional)](#sync-optional), which sends only the encrypted vault file;
@@ -222,7 +222,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 
 ## Sync (optional)
 
-To use one vault on several PCs, `goyo-sync.exe` from the sync add-on ZIP exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC gets its vault with 'Get from server…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
+To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC gets its vault with 'Get from server…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
 
 - **Every PC needs 0.8.0 or later.** A synced vault and its backups do not open in 0.7.x or older. Each vault asks at every unlock until you agree, and only vaults you agree for change.
 - The key file and password are never sent. Move the key file between PCs by USB.
@@ -297,7 +297,7 @@ target/release/goyo-vault.exe --self-check
 target/release/goyo-sync.exe --self-check
 ```
 
-- `python scripts/package_release.py` builds the two ZIPs used for installing (main and sync add-on). It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executables (and stops if any remain), and packages only when both executables pass their PE flag and DLL list checks (`scripts/inspect_pe.py --profile vault|sync`) and the DLL planting check (`scripts/check_dll_planting.py`), and the server script's selftest prints `PASS`. The main ZIP holds no network-capable program.
+- `python scripts/package_release.py` builds the ZIP used for installing. It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executables (and stops if any remain), and packages only when both executables pass their PE flag and DLL list checks (`scripts/inspect_pe.py --profile vault|sync`) and the DLL planting check (`scripts/check_dll_planting.py`), and the server script's selftest prints `PASS`. The only programs in the ZIP are `goyo-vault.exe`, `goyo-sync.exe` and the server script.
 - This version was built and checked with rustc 1.98.1. The `/Brepro` linker option makes builds comparable: the same toolchain and commit should give the same executable.
 - `scripts/make_icon.ps1` regenerates the icon; `build.rs` embeds `assets/goyo.ico` into the executable.
 - `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window. `cargo test --bin goyo-sync sync_ui_preview -- --ignored` does the same for the goyo-sync settings window, to `test-output/sync-ui-preview/`.

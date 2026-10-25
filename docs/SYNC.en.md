@@ -36,7 +36,7 @@ The vault app and the helper talk only through files in the `<vault file name>.s
 
 ## 1. Install and open the settings window
 
-Building as the README's "Install" section describes also puts the sync add-on `GoyoVault-Sync-<version>-windows-x64.zip` in `dist\`. Extract it **where you extracted the main ZIP (the folder that contains GoyoVault)**. The ZIP has its own `GoyoVault` folder, so `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example` and `SHA256SUMS-sync.txt` are added to your existing GoyoVault folder. Extracting it inside GoyoVault would make `GoyoVault\GoyoVault`.
+`goyo-sync.exe`, `server\goyo-sync-server.py` and `goyo-sync.conf.example` come in the `GoyoVault` folder of the Goyo Vault ZIP you built as the README's "Install" section describes. There is nothing else to install.
 
 In the GoyoVault folder, **double-click `goyo-sync.exe`** to open the settings window. It looks like Goyo Vault, and follows the dark or light theme and the Korean or English language chosen in the vault app. Only one window opens; starting it again brings the open one to the front.
 
@@ -171,7 +171,7 @@ Status-line messages:
 
 ## 6. Add a second PC
 
-1. Install Goyo Vault 0.8.0 or later and the sync add-on on the new PC, and make ssh to the server work as in Requirements (a key or ssh-agent).
+1. Install Goyo Vault 0.8.0 or later on the new PC, and make ssh to the server work as in Requirements (a key or ssh-agent).
 2. **Copy the key file (`.goyokey`) by USB.** Never send it through the server, mail or a cloud service.
 3. Start `goyo-sync.exe`, enter the server and press **Check connection** (on a first connection, compare the fingerprint).
 4. Get the vault file, one of two ways:
@@ -213,7 +213,7 @@ Open `vault.goyo.sync\pre-merge-*.goyo` the same way (Restore from backup, new n
 
 **Off on one PC:**
 1. In the settings window, turn off **Start automatically when I sign in to Windows** (applies at once) and press **Stop**. Stop it first: a running helper creates the folder again.
-2. To turn off one vault, **Remove** it and press **Save and start**. To turn off all, delete the helper files (`goyo-sync.exe`, `goyo-sync.conf`, `goyo-sync.log*`, `server\`, `goyo-sync.conf.example`, `SHA256SUMS-sync.txt`).
+2. To turn off one vault, **Remove** it and press **Save and start**. To turn off all, delete the helper's settings and log (`goyo-sync.conf`, `goyo-sync.log*`). `goyo-sync.exe` does nothing unless you open it, so it can stay.
 3. Delete the `vault.goyo.sync` folder. Move any `pre-merge-*.goyo` you want to keep out of it first.
 
 The vault stays in the sync format and keeps opening offline in 0.8.0 or later. There is no way back to the 0.7 format.
