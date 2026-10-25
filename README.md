@@ -32,7 +32,7 @@
 |화면|캡처 차단, 기본 가림, 자동 잠금|스크린샷·화면 녹화에 금고 창이 찍히지 않고, 비밀값은 누를 때만 15초 보입니다.|
 |클립보드|15초 뒤 자동 삭제, Win+V 기록·클라우드 동기화 제외|복사는 '복사 허용'을 켠 뒤에만 됩니다.|
 |다른 프로그램|창 메시지 차단, 메모리 접근 제한, DLL 심기 차단|다른 프로그램이 입력 칸을 읽거나, 가짜 클릭으로 복사시키거나, 메모리를 읽지 못하게 막습니다.|
-|투명성|오픈소스, 고정된 의존성, 같은 소스면 같은 실행 파일(`/Brepro`)|누구나 코드를 읽고 직접 빌드해 배포 파일과 비교할 수 있습니다.|
+|투명성|오픈소스, 고정된 의존성, 같은 소스면 같은 실행 파일(`/Brepro`)|누구나 코드를 읽고 직접 빌드해 쓰며, 다른 사람이 빌드한 파일과 비교할 수 있습니다.|
 |검증|자동 테스트 139개, 다각도 AI 보안 감사와 재검증|감사 결과와 고친 내용은 [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md)에 모두 공개합니다.|
 
 **두 파일을 모두 빼앗겼을 때 비밀번호가 버티는 시간** (추정치. 고성능 GPU 한 대가 초당 100번 시험한다고 크게 잡은 값입니다)
@@ -55,17 +55,25 @@
 
 ## 설치
 
-1. [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases)에서 `GoyoVault-<버전>-windows-x64.zip`을 받습니다. `GoyoVault-Sync-<버전>-windows-x64.zip`은 [동기화(선택)](#동기화선택)를 쓸 때만 필요합니다.
-2. **실행 전에 받은 파일이 진짜인지 확인하세요.** 공식 배포처는 이 저장소(`github.com/NA-DEGEN-GIRL/goyo-vault`)뿐입니다. PowerShell에서 `Get-FileHash .\GoyoVault-<버전>-windows-x64.zip`을 실행해 릴리스 설명에 적힌 SHA-256과 같은지 봅니다. ZIP 안의 `SHA256SUMS.txt`는 파일 손상 확인용일 뿐, ZIP을 바꿔치기한 사람이 함께 고칠 수 있으니 위조 확인은 되지 않습니다.
+고요 금고는 완성된 실행 파일이나 ZIP을 배포하지 않습니다. **이 저장소(`github.com/NA-DEGEN-GIRL/goyo-vault`)의 소스로 직접 빌드해서 쓰세요.** 다른 곳에서 받은 실행 파일이나 ZIP을 쓰는 것은 그 파일을 만든 사람을 믿는 것과 같습니다.
+
+1. 빌드에 필요한 것을 설치합니다: [Rust](https://rustup.rs)(stable, `x86_64-pc-windows-msvc`)와 Visual Studio Build Tools의 'C++를 사용한 데스크톱 개발', Git, Python 3.
+2. PowerShell에서 소스를 받아 ZIP을 만듭니다.
+   ```powershell
+   git clone https://github.com/NA-DEGEN-GIRL/goyo-vault.git
+   cd goyo-vault
+   python scripts/package_release.py
+   ```
+   `dist\` 폴더에 본체 `GoyoVault-<버전>-windows-x64.zip`과 동기화 추가 `GoyoVault-Sync-<버전>-windows-x64.zip`이 생깁니다. 스크립트는 빌드하면서 실행 파일 보호 검사, DLL 심기 검사, 서버 스크립트 selftest를 하고, 하나라도 실패하면 ZIP을 만들지 않습니다. 처음 빌드는 의존성을 받느라 몇 분 걸립니다. 동기화 추가 ZIP은 [동기화(선택)](#동기화선택)를 쓸 때만 필요합니다.
 3. ZIP 안에는 `GoyoVault` 폴더가 들어 있습니다. **나만 쓰고 동기화되지 않는 폴더**에 푸세요. 예: `C:\Users\<내 이름>\GoyoVault`. 피해야 할 곳은 다음과 같습니다.
    - ZIP 안이나 임시 폴더: 정리될 때 금고도 사라집니다(앱이 시작할 때 경고합니다).
    - OneDrive가 백업하는 `문서`·`바탕 화면`, Dropbox·Google Drive 폴더: 열쇠 파일까지 금고와 같은 클라우드 계정에 올라갑니다. 여러 PC에서 쓰려면 암호화된 금고 파일만 보내는 [동기화(선택)](#동기화선택)를 쓰세요.
    - `C:\` 바로 아래 새 폴더, 공유 폴더, 여러 사람이 쓰는 USB: 다른 사용자가 실행 파일을 바꿔치기할 수 있습니다.
-4. `GoyoVault\goyo-vault.exe`를 실행합니다. 코드 서명이 없는 프로그램이라 Windows SmartScreen 경고가 나올 수 있습니다. 2번에서 해시를 확인했다면 **추가 정보 → 실행**을 누르세요. '스마트 앱 컨트롤'이 켜진 PC에서는 서명 없는 프로그램이 아예 막힐 수 있습니다.
+4. `GoyoVault\goyo-vault.exe`를 실행합니다. 직접 빌드한 파일은 인터넷에서 받은 표시가 없어 보통 SmartScreen 경고가 나오지 않습니다. 코드 서명이 없는 프로그램이라 '스마트 앱 컨트롤'이 켜진 PC에서는 막힐 수 있습니다.
 
 ### 새 버전으로 업데이트
 
-새 ZIP을 **처음 풀었던 곳에 그대로 덮어써서** 풉니다. 프로그램과 설명서만 바뀌고, 같은 폴더의 금고(`.goyo`)·열쇠(`.goyokey`) 파일과 테마 설정은 그대로 남습니다. 업데이트 전에는 금고·열쇠 백업을 해 두세요.
+소스 폴더에서 `git pull`로 새 버전을 받고 `python scripts/package_release.py`로 ZIP을 다시 만든 뒤, 새 ZIP을 **처음 풀었던 곳에 그대로 덮어써서** 풉니다. 프로그램과 설명서만 바뀌고, 같은 폴더의 금고(`.goyo`)·열쇠(`.goyokey`) 파일과 테마 설정은 그대로 남습니다. 업데이트 전에는 금고·열쇠 백업을 해 두세요.
 
 0.5.0 이전에 만든 금고는 모두 OTP를 쓰는 금고이고, 지금 버전에서도 그대로 열립니다. 반대로 0.5.0부터 **OTP 없이 만든 금고는 0.4.x 이하 버전에서 열리지 않습니다.**
 
@@ -278,7 +286,7 @@ OTP를 켠 금고에만 있는 기능입니다. 금고 화면 아래 **OTP 백�
 
 ## 직접 빌드하기
 
-Rust stable MSVC x64 툴체인과 링커가 필요합니다. 배포 파일은 rustc 1.98.1로 만들었고, 링커 옵션 `/Brepro` 덕분에 같은 툴체인으로 같은 커밋을 빌드하면 같은 실행 파일이 나오는지 비교할 수 있습니다. GUI·암호화용 별도 SDK는 쓰지 않습니다. 직접 의존성은 암호화·비밀값 처리용 Rust 라이브러리뿐이며, 버전은 `Cargo.toml`과 `Cargo.lock`에 고정했습니다.
+Rust stable MSVC x64 툴체인과 링커가 필요합니다. 이 버전은 rustc 1.98.1로 빌드해 확인했고, 링커 옵션 `/Brepro` 덕분에 같은 툴체인으로 같은 커밋을 빌드하면 같은 실행 파일이 나오는지 비교할 수 있습니다. GUI·암호화용 별도 SDK는 쓰지 않습니다. 직접 의존성은 암호화·비밀값 처리용 Rust 라이브러리뿐이며, 버전은 `Cargo.toml`과 `Cargo.lock`에 고정했습니다.
 
 ```powershell
 cargo test --locked -- --test-threads=1
@@ -289,7 +297,7 @@ target/release/goyo-vault.exe --self-check
 target/release/goyo-sync.exe --self-check
 ```
 
-- 배포용 ZIP 두 개(본체, 동기화 추가)는 `python scripts/package_release.py`로 만듭니다. 커밋되지 않은 소스나 `RUSTFLAGS`가 있으면 멈추고, 실행 파일에서 빌드한 PC의 경로를 지우며(남아 있으면 멈춤), 두 실행 파일이 각각의 PE 보호 플래그·DLL 목록 검사(`scripts/inspect_pe.py --profile vault|sync`)와 DLL 심기 검사(`scripts/check_dll_planting.py`)를 통과하고 서버 스크립트의 selftest가 `PASS`여야 패키징합니다. 본체 ZIP에는 네트워크를 쓸 수 있는 프로그램이 들어가지 않습니다.
+- 설치에 쓰는 ZIP 두 개(본체, 동기화 추가)는 `python scripts/package_release.py`로 만듭니다. 커밋되지 않은 소스나 `RUSTFLAGS`가 있으면 멈추고, 실행 파일에서 빌드한 PC의 경로를 지우며(남아 있으면 멈춤), 두 실행 파일이 각각의 PE 보호 플래그·DLL 목록 검사(`scripts/inspect_pe.py --profile vault|sync`)와 DLL 심기 검사(`scripts/check_dll_planting.py`)를 통과하고 서버 스크립트의 selftest가 `PASS`여야 패키징합니다. 본체 ZIP에는 네트워크를 쓸 수 있는 프로그램이 들어가지 않습니다.
 - 아이콘은 `scripts/make_icon.ps1`로 다시 만들 수 있습니다. `build.rs`가 `assets/goyo.ico`를 실행 파일에 넣습니다.
 - 화면 미리보기는 `cargo test ui_preview -- --ignored`로 만듭니다. 결과는 `test-output/ui-preview/`에 저장되며, 이때 미리보기 창이 잠깐 화면에 뜹니다. goyo-sync 설정 창은 `cargo test --bin goyo-sync sync_ui_preview -- --ignored`로 `test-output/sync-ui-preview/`에 만듭니다.
 

@@ -55,17 +55,25 @@ Some things the app **cannot stop**: malware on the PC (keyloggers, copying your
 
 ## Install
 
-1. Download `GoyoVault-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases). `GoyoVault-Sync-<version>-windows-x64.zip` is needed only for [Sync (optional)](#sync-optional).
-2. **Check the download before running it.** The only official source is this repository (`github.com/NA-DEGEN-GIRL/goyo-vault`). In PowerShell run `Get-FileHash .\GoyoVault-<version>-windows-x64.zip` and compare it with the SHA-256 in the release notes. `SHA256SUMS.txt` inside the ZIP only detects corruption: whoever swaps the ZIP can update it too.
+Goyo Vault does not ship ready-made executables or ZIPs. **Build it yourself from the source in this repository (`github.com/NA-DEGEN-GIRL/goyo-vault`).** Using an executable or ZIP from anywhere else means trusting whoever made it.
+
+1. Install the build tools: [Rust](https://rustup.rs) (stable, `x86_64-pc-windows-msvc`) with Visual Studio Build Tools' "Desktop development with C++", Git and Python 3.
+2. In PowerShell, get the source and build the ZIPs.
+   ```powershell
+   git clone https://github.com/NA-DEGEN-GIRL/goyo-vault.git
+   cd goyo-vault
+   python scripts/package_release.py
+   ```
+   The `dist\` folder then holds the main `GoyoVault-<version>-windows-x64.zip` and the sync add-on `GoyoVault-Sync-<version>-windows-x64.zip`. While building, the script runs the executable protection checks, the DLL planting check and the server script's selftest, and makes no ZIP if any of them fails. The first build takes a few minutes to fetch dependencies. The sync add-on is needed only for [Sync (optional)](#sync-optional).
 3. The ZIP contains a `GoyoVault` folder. Extract it to **a folder only you use that is not synced**, for example `C:\Users\<you>\GoyoVault`. Avoid:
    - the inside of the ZIP or a temporary folder: cleaning it up deletes your vault (the app warns at start-up);
    - `Documents`/`Desktop` backed up by OneDrive, and Dropbox or Google Drive folders: the key file ends up in the same cloud account as the vault. To use the vault on several PCs, use [Sync (optional)](#sync-optional), which sends only the encrypted vault file;
    - a new folder directly under `C:\`, shared folders and USB sticks others use: someone else could replace the program.
-4. Run `GoyoVault\goyo-vault.exe`. The program is not code-signed, so Windows SmartScreen may warn you. If the hash matched in step 2, choose **More info → Run anyway**. With Smart App Control enforcing, unsigned programs may be blocked outright.
+4. Run `GoyoVault\goyo-vault.exe`. Files you built yourself carry no downloaded-from-the-internet mark, so SmartScreen usually does not warn. The program is not code-signed, so with Smart App Control enforcing it may be blocked.
 
 ### Updating
 
-Extract the new ZIP **to the same place, overwriting the old files.** Only the program and documents change; the vault (`.goyo`), key (`.goyokey`) and theme setting in that folder stay. Back up the vault and key first.
+In the source folder, get the new version with `git pull`, rebuild the ZIPs with `python scripts/package_release.py`, and extract the new ZIP **to the same place, overwriting the old files.** Only the program and documents change; the vault (`.goyo`), key (`.goyokey`) and theme setting in that folder stay. Back up the vault and key first.
 
 Every vault made before 0.5.0 uses an OTP and still opens as before. A vault made **without an OTP** in 0.5.0 or later does not open in 0.4.x or earlier.
 
@@ -289,8 +297,8 @@ target/release/goyo-vault.exe --self-check
 target/release/goyo-sync.exe --self-check
 ```
 
-- `python scripts/package_release.py` builds the two release ZIPs (main and sync add-on). It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executables (and stops if any remain), and packages only when both executables pass their PE flag and DLL list checks (`scripts/inspect_pe.py --profile vault|sync`) and the DLL planting check (`scripts/check_dll_planting.py`), and the server script's selftest prints `PASS`. The main ZIP holds no network-capable program.
-- Releases are built with rustc 1.98.1. The `/Brepro` linker option makes builds comparable: the same toolchain and commit should give the same executable.
+- `python scripts/package_release.py` builds the two ZIPs used for installing (main and sync add-on). It refuses to run with uncommitted sources or `RUSTFLAGS` set, strips the build machine's paths from the executables (and stops if any remain), and packages only when both executables pass their PE flag and DLL list checks (`scripts/inspect_pe.py --profile vault|sync`) and the DLL planting check (`scripts/check_dll_planting.py`), and the server script's selftest prints `PASS`. The main ZIP holds no network-capable program.
+- This version was built and checked with rustc 1.98.1. The `/Brepro` linker option makes builds comparable: the same toolchain and commit should give the same executable.
 - `scripts/make_icon.ps1` regenerates the icon; `build.rs` embeds `assets/goyo.ico` into the executable.
 - `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window. `cargo test --bin goyo-sync sync_ui_preview -- --ignored` does the same for the goyo-sync settings window, to `test-output/sync-ui-preview/`.
 

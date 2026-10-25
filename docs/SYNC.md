@@ -36,7 +36,7 @@
 
 ## 1. 설치하고 설정 창 열기
 
-[Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases)에서 동기화 추가 ZIP `GoyoVault-Sync-<버전>-windows-x64.zip`을 받습니다. README의 설치 방법대로 `Get-FileHash`로 해시를 확인한 뒤, **본체 ZIP을 풀었던 곳(GoyoVault 폴더가 들어 있는 폴더)에** 풉니다. ZIP 안에도 `GoyoVault` 폴더가 있어서, 기존 GoyoVault 폴더에 `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example`, `SHA256SUMS-sync.txt`가 더해집니다. GoyoVault 폴더 안에 풀면 `GoyoVault\GoyoVault`가 생기니 주의하세요.
+README의 '설치'대로 빌드하면 `dist\`에 동기화 추가 ZIP `GoyoVault-Sync-<버전>-windows-x64.zip`도 생깁니다. 이 ZIP을 **본체 ZIP을 풀었던 곳(GoyoVault 폴더가 들어 있는 폴더)에** 풉니다. ZIP 안에도 `GoyoVault` 폴더가 있어서, 기존 GoyoVault 폴더에 `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example`, `SHA256SUMS-sync.txt`가 더해집니다. GoyoVault 폴더 안에 풀면 `GoyoVault\GoyoVault`가 생기니 주의하세요.
 
 GoyoVault 폴더에서 **`goyo-sync.exe`를 더블클릭**하면 설정 창이 열립니다. 고요 금고와 같은 모양이고, 다크·라이트와 한국어·English는 금고 앱에서 고른 대로 따라갑니다. 창은 하나만 열리며, 다시 실행하면 열려 있는 창이 앞으로 옵니다.
 

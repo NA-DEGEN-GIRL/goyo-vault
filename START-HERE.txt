@@ -3,8 +3,8 @@ Goyo Vault 0.8.0
 1. Extract the whole ZIP to a folder only you use that is not synced
    (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
    folders, Documents/Desktop backed up by OneDrive, and folders directly under C:\.
-   Before running it, check with PowerShell's Get-FileHash that the ZIP's SHA-256
-   matches the release notes.
+   Use only a ZIP you built yourself from this repository's source; see "Install"
+   in README.en.md.
 2. Run goyo-vault.exe and press 'Create a new vault'.
    (The program is unsigned; if SmartScreen warns, choose 'More info -> Run anyway'.)
    Switch the language with '한국어 | English' in the top-right corner.

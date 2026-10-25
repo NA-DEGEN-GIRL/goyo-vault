@@ -36,7 +36,7 @@ The vault app and the helper talk only through files in the `<vault file name>.s
 
 ## 1. Install and open the settings window
 
-Download the sync add-on `GoyoVault-Sync-<version>-windows-x64.zip` from [Releases](https://github.com/NA-DEGEN-GIRL/goyo-vault/releases). Check its hash with `Get-FileHash` as the README describes, then extract it **where you extracted the main ZIP (the folder that contains GoyoVault)**. The ZIP has its own `GoyoVault` folder, so `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example` and `SHA256SUMS-sync.txt` are added to your existing GoyoVault folder. Extracting it inside GoyoVault would make `GoyoVault\GoyoVault`.
+Building as the README's "Install" section describes also puts the sync add-on `GoyoVault-Sync-<version>-windows-x64.zip` in `dist\`. Extract it **where you extracted the main ZIP (the folder that contains GoyoVault)**. The ZIP has its own `GoyoVault` folder, so `goyo-sync.exe`, `server\goyo-sync-server.py`, `goyo-sync.conf.example` and `SHA256SUMS-sync.txt` are added to your existing GoyoVault folder. Extracting it inside GoyoVault would make `GoyoVault\GoyoVault`.
 
 In the GoyoVault folder, **double-click `goyo-sync.exe`** to open the settings window. It looks like Goyo Vault, and follows the dark or light theme and the Korean or English language chosen in the vault app. Only one window opens; starting it again brings the open one to the front.
 
