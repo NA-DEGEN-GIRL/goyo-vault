@@ -30,6 +30,11 @@ for program in ('goyo-vault.exe', 'goyo-sync.exe'):
         for form in (private, private.replace('\\', '/')):
             if form.lower().encode() in binary.lower() or form.lower().encode('utf-16-le') in binary.lower():
                 sys.exit(f'Refusing to package: {program} contains a local path or user name ({form!r}).')
+    # The cheap test KDF exists only in builds with debug assertions
+    # (src/crypto.rs); its marker in a release exe means they were on.
+    marker = 'goyo-test-kdf'
+    if marker.encode() in binary.lower() or marker.encode('utf-16-le') in binary.lower():
+        sys.exit(f'Refusing to package: {program} contains the test KDF hook ({marker}).')
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe', 'target/release/goyo-sync.exe'], cwd=root)

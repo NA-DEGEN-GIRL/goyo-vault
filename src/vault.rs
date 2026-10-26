@@ -13,7 +13,9 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+mod recover;
 mod sync;
+pub use recover::Recovery;
 pub use sync::{SyncBadge, SyncEvent, SyncNotice};
 
 /// Key file with the TOTP secret: the app also asks for the phone's code.
@@ -32,6 +34,15 @@ pub const MAX_TEXT: usize = 8192;
 pub const MAX_TOMBSTONES: usize = 65_536;
 const NEWER_FORMAT: &str = "더 새로운 버전에서 만든 금고 형식입니다. 고요 금고를 업데이트하세요.";
 const TOMBSTONE_LIMIT: &str = "삭제·수정 기록이 한도(65,536개)에 도달했습니다.";
+const TOO_LARGE: &str = "파일 크기 제한 초과";
+/// A file is missing and a temp file of it is there that no unlock took
+/// back: only the user can tell what it holds.
+pub const LEFTOVER_TEMP: &str = "파일이 없고, 저장이 끊기며 남은 임시 파일(.goyotmp)이 같은 폴더에 있습니다. 지우지 마세요. 그 파일 이름을 원래 이름으로 바꾸면 복구될 수 있습니다.";
+/// A vault or key file save whose replace was cut off (see atomic_write):
+/// the file is gone and its temp file holds the new state. The app locks,
+/// so that the next unlock takes it back.
+pub const GAP_KEPT: &str =
+    "파일 교체가 끊겨 임시 파일(.goyotmp)을 남겼습니다. 다음에 열 때 자동으로 복구합니다.";
 
 /// Identifies one version of an entry across copies of a vault. Random for
 /// new and edited entries, derived for v1 entries (`v1_ids`); never zero.
@@ -125,10 +136,21 @@ fn tag(id: &[u8; 16]) -> String {
 }
 /// The tag of the vault file at `path`, read from its plaintext header.
 pub fn vault_tag(path: &Path) -> Option<String> {
+    vault_id(path).map(|id| tag(&id))
+}
+/// The vault ID in the plaintext header of the vault file at `path`.
+fn vault_id(path: &Path) -> Option<[u8; 16]> {
     let mut head = [0u8; 24];
     File::open(path).ok()?.read_exact(&mut head).ok()?;
-    let magic = &head[..8];
-    (magic == DATA_MAGIC_V1 || magic == DATA_MAGIC_V2).then(|| tag(head[8..24].try_into().unwrap()))
+    data_header(&head)
+}
+/// The vault ID of vault file bytes of a format this build reads.
+fn data_header(data: &[u8]) -> Option<[u8; 16]> {
+    let magic = data.get(..8)?;
+    if magic != DATA_MAGIC_V1 && magic != DATA_MAGIC_V2 {
+        return None;
+    }
+    data.get(8..24)?.try_into().ok()
 }
 /// Whether `data` starts with GOYOVA03 or later: a newer build wrote it. The
 /// magic is public, so saying so before any decryption reveals nothing.
@@ -154,6 +176,23 @@ pub fn key_uses_otp(path: &Path) -> Option<bool> {
         KEY_MAGIC_NO_OTP => Some(false),
         _ => None,
     }
+}
+/// The temp file an unlock with the key file `key` reads in its place
+/// (temp-candidate recovery, rule i): `key` is missing or unparseable, and
+/// a save cut off mid-way left a copy of a key file of the vault `vault`
+/// names. A successful unlock gives that copy the key file's name back.
+pub fn key_candidate(vault: &Path, key: &Path) -> Option<PathBuf> {
+    match recover::read_key(key) {
+        Ok(recover::KeyRead::Lost { .. }) => {
+            recover::key_candidate(&recover::vault_ids(vault), key).map(|c| c.path)
+        }
+        _ => None,
+    }
+}
+/// Whether the vault file `vault` is missing while a save cut off mid-way
+/// left copies of it, which an unlock tries to take back (rule iii).
+pub fn vault_candidates(vault: &Path) -> bool {
+    !vault.exists() && !recover::vault_ids(vault).is_empty()
 }
 /// The TOTP secret in the forms an authenticator app accepts.
 pub struct OtpSetup {
@@ -253,6 +292,8 @@ impl Provision {
             sync: None,
             unlock_notice: None,
             sync_refused: false,
+            recovered: Recovery::default(),
+            gap_kept: false,
             key_bytes,
             _locks: locks,
         };
@@ -260,7 +301,7 @@ impl Provision {
         atomic_write(&session.key_path, &session.key_bytes, false)?;
         if let Err(e) = atomic_write(&session.path, &data, false) {
             let _ = fs::remove_file(&session.key_path);
-            return Err(e);
+            return Err(e.into());
         }
         session.entries.shrink_to_fit();
         Ok(session)
@@ -391,6 +432,10 @@ pub struct Session {
     unlock_notice: Option<SyncNotice>,
     /// The key file is inside the sync folder: never link this session.
     sync_refused: bool,
+    /// What the unlock took back from temp files, for the first status line.
+    recovered: Recovery,
+    /// A save of the vault file hit the replace gap (GAP_KEPT): see write.
+    gap_kept: bool,
     key_bytes: Vec<u8>,
     _locks: Vec<FileLock>,
 }
@@ -427,14 +472,42 @@ impl Session {
         } else {
             Vec::new()
         };
-        let key_bytes = read_bounded(&key_path, 1024)?;
+        // A key file missing or unparseable after a save was cut off: the
+        // temp copy of a key file of this vault stands in (rule i).
+        let (key_bytes, key_temp) = match recover::read_key(&key_path)? {
+            recover::KeyRead::Found(bytes) => (bytes, None),
+            recover::KeyRead::Lost { before, .. } => {
+                match recover::key_candidate(&recover::vault_ids(&source), &key_path) {
+                    Some(c) => (c.bytes, Some(c.path)),
+                    None => (before?, None),
+                }
+            }
+        };
         // A malformed code fails before the slow key derivation.
         if key_bytes.starts_with(KEY_MAGIC) && !otp_format(input) {
             return Err(AUTH_ERROR);
         }
         let (id, key, otp) = decode_key(&key_bytes, password)?;
-        let data = read_bounded(&source, MAX_FILE)?;
-        let (format, contents) = decode_data(&id, &key, &data)?;
+        let (format, contents, vault_temp) = match read_bounded(&source, MAX_FILE) {
+            Ok(data) => {
+                let (format, contents) = decode_data(&id, &key, &data)?;
+                (format, contents, None)
+            }
+            // A vault file missing after a save was cut off comes back from
+            // its temp copy under this key (rule iii). A restore never
+            // takes a temp copy: its source is the file the user picked.
+            Err(e) if destination.is_none() && !source.exists() => {
+                let (temp, format, contents) = recover::vault_candidate(&source, &id, &key).ok_or(
+                    if leftover_temp(&source) {
+                        LEFTOVER_TEMP
+                    } else {
+                        e
+                    },
+                )?;
+                (format, contents, Some(temp))
+            }
+            Err(e) => return Err(e),
+        };
         // A synced copy is merged (in memory) before the OTP check, so that a
         // code already used on another PC is refused once its content synced.
         let pending = sync::Pending::find(
@@ -491,12 +564,30 @@ impl Session {
             sync: None,
             unlock_notice: None,
             sync_refused: false,
+            recovered: Recovery::default(),
+            gap_kept: false,
             key_bytes,
             _locks: locks,
         };
+        // The vault file's name back first, without replacing a file that
+        // appeared meanwhile; if the rename fails, the contents are saved
+        // under it instead.
+        if let Some(temp) = vault_temp {
+            if publish(&temp, &s.path, false).is_ok() {
+                flush(&s.path);
+            } else {
+                atomic_write(&s.path, &s.encode()?, false)?;
+            }
+            s.recovered.vault = true;
+        }
         // Only now that the code passed: save a merge that changed anything,
         // with the consumed OTP. If that fails it opens unmerged instead.
         let merged = s.settle(pending);
+        // That save hit the replace gap: the merge is only in a temp file,
+        // which the next unlock takes back.
+        if s.gap_kept {
+            return Err(GAP_KEPT);
+        }
         // Persist the consumed OTP before exposing any secret. Backup rollback
         // and modified clients cannot be prevented by this local watermark.
         // Without an OTP an unlock changes nothing, so only a restore writes.
@@ -506,7 +597,28 @@ impl Session {
         // Outgoing only after the vault file: the server never holds content
         // the file lacks.
         s.flush_outgoing();
+        // The unlock succeeded: the key file's name goes back to the temp
+        // copy it came from, or the session keeps using the copy. A restore
+        // only reads its inputs, which may be on read-only media: the key
+        // file stays missing until the next unlock takes the copy back.
+        let key_path = s.key_path.clone();
+        if let Some(temp) = key_temp
+            && destination.is_none()
+            && !recover::restore_key(&temp, &key_path)
+        {
+            s.key_path = temp.clone();
+            s.recovered.key_kept = Some(temp);
+        }
+        // Temp files that hold nothing the opened files lack (rule iv).
+        if destination.is_none() {
+            recover::clean(&s, &key_path);
+        }
         Ok(s)
+    }
+    /// What this unlock took back from temp files an interrupted save left;
+    /// the next call returns nothing.
+    pub fn take_recovery(&mut self) -> Recovery {
+        std::mem::take(&mut self.recovered)
     }
     fn data(&self) -> DataRef<'_> {
         DataRef {
@@ -520,8 +632,24 @@ impl Session {
     fn encode(&self) -> Result<Vec<u8>> {
         encode_data(&self.id, &self.key, self.format, self.data())
     }
-    pub fn save(&self) -> Result<()> {
-        atomic_write(&self.path, &self.encode()?, true)
+    pub fn save(&mut self) -> Result<()> {
+        let data = self.encode()?;
+        self.write(&data)
+    }
+    /// Writes `data`, a state of this session, as the vault file. A replace
+    /// cut off by the FAT/exFAT gap leaves the vault file gone and the new
+    /// state only in its temp file, which the next unlock takes back (rule
+    /// iii) while the vault file is missing. So from then on this session
+    /// writes the vault file no more: a later save would give the name to a
+    /// state without that change, and the temp file would never be read
+    /// again. The app locks on GAP_KEPT.
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        if self.gap_kept {
+            return Err(GAP_KEPT);
+        }
+        let result = atomic_write(&self.path, data, true);
+        self.gap_kept = matches!(result, Err(AtomicError::GapKept(_)));
+        result.map_err(Into::into)
     }
     /// Adds an entry (`None`) or replaces entry `index`. An edit gets a new
     /// ID whose parent is the old one, and the old ID becomes a tombstone: a
@@ -655,7 +783,7 @@ impl Session {
         distinct(&path, &self.path)?;
         distinct(&path, &self.key_path)?;
         let _lock = FileLock::acquire(&path)?;
-        atomic_write(&path, &self.encode()?, false)
+        atomic_write(&path, &self.encode()?, false).map_err(Into::into)
     }
     pub fn backup_key(&self, path: &Path) -> Result<()> {
         if read_bounded(&self.key_path, 1024)? != self.key_bytes {
@@ -665,7 +793,7 @@ impl Session {
         distinct(&path, &self.path)?;
         distinct(&path, &self.key_path)?;
         let _lock = FileLock::acquire(&path)?;
-        atomic_write(&path, &self.key_bytes, false)
+        atomic_write(&path, &self.key_bytes, false).map_err(Into::into)
     }
     /// Whether this vault asks for an OTP code when it opens.
     pub fn uses_otp(&self) -> bool {
@@ -1117,30 +1245,37 @@ fn distinct(a: &Path, b: &Path) -> Result<()> {
         Ok(())
     }
 }
+/// BY_HANDLE_FILE_INFORMATION.
 #[cfg(windows)]
-fn file_identity(path: &Path) -> Result<(u32, u64)> {
+#[repr(C)]
+#[derive(Default)]
+struct FileInfo {
+    attributes: u32,
+    /// Creation, last access and last write (FILETIME, low part first).
+    times: [u32; 6],
+    volume: u32,
+    size_hi: u32,
+    size_lo: u32,
+    links: u32,
+    index_hi: u32,
+    index_lo: u32,
+}
+#[cfg(windows)]
+fn file_info(f: &File) -> Result<FileInfo> {
     use std::os::windows::io::AsRawHandle;
-    #[repr(C)]
-    #[derive(Default)]
-    struct Info {
-        attributes: u32,
-        times: [u32; 6],
-        volume: u32,
-        size_hi: u32,
-        size_lo: u32,
-        links: u32,
-        index_hi: u32,
-        index_lo: u32,
-    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetFileInformationByHandle(h: *mut std::ffi::c_void, info: *mut Info) -> i32;
+        fn GetFileInformationByHandle(h: *mut std::ffi::c_void, info: *mut FileInfo) -> i32;
     }
-    let f = File::open(path).map_err(|_| "파일 식별 실패")?;
-    let mut i = Info::default();
+    let mut i = FileInfo::default();
     if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut i) } == 0 {
         return Err("파일 식별 실패");
     }
+    Ok(i)
+}
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Result<(u32, u64)> {
+    let i = file_info(&File::open(path).map_err(|_| "파일 식별 실패")?)?;
     Ok((i.volume, ((i.index_hi as u64) << 32) | i.index_lo as u64))
 }
 #[cfg(not(windows))]
@@ -1169,15 +1304,44 @@ impl Drop for FileLock {
         let _ = self.0.unlock();
     }
 }
-fn atomic_write(path: &Path, data: &[u8], replace: bool) -> Result<()> {
+/// What a failed atomic_write left behind.
+#[derive(Debug, PartialEq, Eq)]
+enum AtomicError {
+    /// The target is as it was, and the temp file is gone.
+    Failed(&'static str),
+    /// The replace deleted the target but could not rename the temp file in
+    /// its place (FAT and exFAT replace in two steps), and a second try
+    /// without replace failed too. The temp file at this path is now the
+    /// only full copy; it stays for the next unlock to take back. A key
+    /// change reads it back to commit (spec §5.5 S2); so far only the tests
+    /// read the path.
+    #[cfg_attr(not(test), allow(dead_code))]
+    GapKept(PathBuf),
+}
+impl From<&'static str> for AtomicError {
+    fn from(e: &'static str) -> Self {
+        Self::Failed(e)
+    }
+}
+impl From<AtomicError> for &'static str {
+    fn from(e: AtomicError) -> Self {
+        match e {
+            AtomicError::Failed(e) => e,
+            AtomicError::GapKept(_) => GAP_KEPT,
+        }
+    }
+}
+/// Writes `data` to a new temp file next to `path`, flushes it and renames
+/// it over `path` (only if `path` is new unless `replace`).
+fn atomic_write(path: &Path, data: &[u8], replace: bool) -> std::result::Result<(), AtomicError> {
     if !replace && path.exists() {
-        return Err("기존 파일을 덮어쓰지 않습니다. 새 파일 이름을 선택하세요.");
+        return Err("기존 파일을 덮어쓰지 않습니다. 새 파일 이름을 선택하세요.".into());
     }
     let suffix = crypto::random::<16>()?;
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{:032x}.goyotmp", u128::from_le_bytes(*suffix)));
     let temp = PathBuf::from(name);
-    let result = (|| {
+    let written = (|| {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1185,20 +1349,101 @@ fn atomic_write(path: &Path, data: &[u8], replace: bool) -> Result<()> {
             .map_err(|_| "임시 암호화 파일 생성 실패")?;
         f.write_all(data)
             .and_then(|_| f.sync_all())
-            .map_err(|_| "저장 실패: 디스크 공간과 권한을 확인하세요.")?;
-        drop(f);
-        publish(&temp, path, replace)?;
-        // The rename is only metadata. Flush the file under its final name so a
-        // power cut right after "saved" cannot undo it (FAT/exFAT included).
-        if let Ok(f) = OpenOptions::new().write(true).open(path) {
-            let _ = f.sync_all();
-        }
-        Ok(())
+            .map_err(|_| "저장 실패: 디스크 공간과 권한을 확인하세요.")
     })();
-    if result.is_err() {
+    if let Err(e) = written {
         let _ = fs::remove_file(&temp);
+        return Err(e.into());
     }
-    result
+    #[cfg(test)]
+    point("tmp_synced")?;
+    // Only a replace can delete the target before the temp file has its name.
+    let existed = replace && path.exists();
+    if let Err(e) = publish_temp(&temp, path, replace) {
+        // FAT and exFAT replace by deleting the target first. Once it is
+        // gone the temp file is the only full copy and is never deleted:
+        // one more try without replace, else it stays for the next unlock.
+        if !existed || !replaced_away(path, &temp) {
+            let _ = fs::remove_file(&temp);
+            return Err(e.into());
+        }
+        if publish_temp(&temp, path, false).is_err() {
+            return Err(AtomicError::GapKept(temp));
+        }
+    }
+    #[cfg(test)]
+    point("renamed")?;
+    flush(path);
+    Ok(())
+}
+/// Whether a failed replace deleted `path` and left `temp`: the target is
+/// not found while the temp file next to it is there. A pulled USB stick or
+/// a dropped share makes both unreachable; the target may still be intact.
+fn replaced_away(path: &Path, temp: &Path) -> bool {
+    temp.is_file()
+        && fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+/// The rename is only metadata. Flushing the file under its final name
+/// keeps a power cut right after "saved" from undoing it (FAT/exFAT too).
+fn flush(path: &Path) {
+    if let Ok(f) = OpenOptions::new().write(true).open(path) {
+        let _ = f.sync_all();
+    }
+}
+/// The error a simulated crash returns. The process is taken to have died
+/// there: nothing is cleaned up, and the test drops the session.
+#[cfg(test)]
+const SIMULATED_CRASH: &str = "simulated crash";
+#[cfg(test)]
+thread_local! {
+    /// Where the next atomic_write of this thread stops: "tmp_synced" (the
+    /// temp file is written and flushed), "renamed" (it has the target's
+    /// name, not flushed again), "gap" (the replace deletes the target and
+    /// fails, and so does the retry), "gap_once" (the retry succeeds) or
+    /// "unplugged" (the replace fails as the target and the temp file
+    /// become unreachable: both get a ".away" suffix).
+    static CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// A handle on the target that the next replace of this thread closes
+    /// once a try failed, before it waits: a scanner or reader that lets go
+    /// soon. A thread meant to close it 10 ms later can be kept off the CPU
+    /// for over 100 ms in a busy test run, longer than the retries last.
+    static CLOSES_SOON: std::cell::RefCell<Option<File>> = const { std::cell::RefCell::new(None) };
+}
+/// Err(SIMULATED_CRASH) once if a test set this point.
+#[cfg(test)]
+fn point(name: &'static str) -> Result<()> {
+    if CRASH.with(|c| c.get()) == Some(name) {
+        CRASH.with(|c| c.set(None));
+        return Err(SIMULATED_CRASH);
+    }
+    Ok(())
+}
+/// `publish` for atomic_write; under test it can also act out the replace
+/// gap of a FAT or exFAT volume (see CRASH).
+fn publish_temp(temp: &Path, target: &Path, replace: bool) -> Result<()> {
+    #[cfg(test)]
+    match (CRASH.with(|c| c.get()), replace) {
+        (Some(step @ ("gap" | "gap_once")), true) => {
+            let _ = fs::remove_file(target);
+            CRASH.with(|c| c.set((step == "gap").then_some("gap_retry")));
+            return Err(SIMULATED_CRASH);
+        }
+        (Some("gap_retry"), false) => {
+            CRASH.with(|c| c.set(None));
+            return Err(SIMULATED_CRASH);
+        }
+        (Some("unplugged"), true) => {
+            CRASH.with(|c| c.set(None));
+            for path in [temp, target] {
+                let mut away = path.as_os_str().to_owned();
+                away.push(".away");
+                let _ = fs::rename(path, away);
+            }
+            return Err(SIMULATED_CRASH);
+        }
+        _ => {}
+    }
+    publish(temp, target, replace)
 }
 
 /// Whether an interrupted save left `<path>.<random>.goyotmp` next to `path`.
@@ -1246,6 +1491,8 @@ fn publish(temp: &Path, target: &Path, replace: bool) -> Result<()> {
         if retry == 5 || !matches!(unsafe { GetLastError() }, 5 | 32) {
             break;
         }
+        #[cfg(test)]
+        drop(CLOSES_SOON.take());
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Err("파일 저장/교체 실패: 기존 파일, 저장장치 연결과 쓰기 권한을 확인하세요.")
@@ -1321,6 +1568,8 @@ mod workflow_tests {
             sync: None,
             unlock_notice: None,
             sync_refused: false,
+            recovered: Recovery::default(),
+            gap_kept: false,
             key_bytes: Vec::new(),
             _locks: Vec::new(),
         };
@@ -1358,6 +1607,7 @@ mod workflow_tests {
     }
     #[test]
     fn lifecycle_backup_restore_password_and_failed_save() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let v = t.file("vault.goyo");
         let k = t.file("key.goyokey");
@@ -1452,6 +1702,7 @@ mod workflow_tests {
     }
     #[test]
     fn vault_without_otp() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let v = t.file("vault.goyo");
         let k = t.file("key.goyokey");
@@ -1506,6 +1757,7 @@ mod workflow_tests {
     }
     #[test]
     fn restore_needs_no_sidecars_next_to_inputs() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let src = t.file("readonly-backup.goyo");
         let key = t.file("readonly-key.goyokey");
@@ -1610,6 +1862,7 @@ mod workflow_tests {
     }
     #[test]
     fn password_change_failure_stages_preserve_recoverability() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let v = t.file("vault.goyo");
         let k = t.file("key.goyokey");
@@ -1970,6 +2223,7 @@ mod workflow_tests {
     }
     #[test]
     fn restore_and_backup_keep_sync_state() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let p = Provision::new().unwrap();
         let pass = "synthetic sync password";
@@ -2019,6 +2273,480 @@ mod workflow_tests {
         assert!(format == Format::V2 && c.last > 0);
         check(&c);
         drop(s);
+    }
+    /// The temp files next to `path`, sorted.
+    fn temps(path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", path.file_name().unwrap().to_string_lossy());
+        let mut found: Vec<PathBuf> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                name.starts_with(&prefix) && name.ends_with(".goyotmp")
+            })
+            .collect();
+        found.sort();
+        found
+    }
+    /// A temp file of `path` as atomic_write names them, with `data`.
+    fn plant(path: &Path, n: u128, data: &[u8]) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{n:032x}.goyotmp"));
+        fs::write(&name, data).unwrap();
+        PathBuf::from(name)
+    }
+    /// Sets a file's last write time `seconds` back.
+    fn age(path: &Path, seconds: u64) {
+        let f = OpenOptions::new().write(true).open(path).unwrap();
+        let time = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        f.set_modified(time).unwrap();
+    }
+    /// What a FAT or exFAT replace that deleted `path` and could not put the
+    /// temp file in its place leaves: no `path`, and the temp file.
+    fn gap(path: &Path, data: &[u8]) -> PathBuf {
+        CRASH.with(|c| c.set(Some("gap")));
+        match atomic_write(path, data, true) {
+            Err(AtomicError::GapKept(temp)) => temp,
+            other => panic!("expected a kept temp file, got {other:?}"),
+        }
+    }
+    #[test]
+    fn atomic_write_keeps_the_only_copy_through_a_replace_gap() {
+        let t = Temp::new();
+        let p = t.file("vault.goyo");
+        atomic_write(&p, b"old", false).unwrap();
+        // The replace deleted the target and the retry failed too: the temp
+        // file stays with the new bytes, under a name recovery looks for.
+        let temp = gap(&p, b"new");
+        assert!(!p.exists());
+        assert_eq!(fs::read(&temp).unwrap(), b"new");
+        assert_eq!(temps(&p), std::slice::from_ref(&temp));
+        let found = recover::candidates(&p, MAX_FILE);
+        assert!(found.len() == 1 && found[0].path == temp && found[0].bytes == b"new");
+        assert_eq!(<&str>::from(AtomicError::GapKept(temp.clone())), GAP_KEPT);
+        fs::remove_file(&temp).unwrap();
+        // The retry without replace worked: the new file is in place.
+        atomic_write(&p, b"old", false).unwrap();
+        CRASH.with(|c| c.set(Some("gap_once")));
+        atomic_write(&p, b"new", true).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        assert!(temps(&p).is_empty());
+        // A crash once the temp file is flushed leaves it and the old file.
+        CRASH.with(|c| c.set(Some("tmp_synced")));
+        assert_eq!(
+            atomic_write(&p, b"newer", true),
+            Err(AtomicError::Failed(SIMULATED_CRASH))
+        );
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        let left = temps(&p);
+        assert!(left.len() == 1 && fs::read(&left[0]).unwrap() == b"newer");
+        fs::remove_file(&left[0]).unwrap();
+        // One right after the rename leaves the new file and no temp file.
+        CRASH.with(|c| c.set(Some("renamed")));
+        assert_eq!(
+            atomic_write(&p, b"newest", true),
+            Err(AtomicError::Failed(SIMULATED_CRASH))
+        );
+        assert_eq!(fs::read(&p).unwrap(), b"newest");
+        assert!(temps(&p).is_empty());
+        // A replace that failed with the target still there deletes the
+        // temp file, as before.
+        let reader = File::open(&p).unwrap();
+        assert!(matches!(
+            atomic_write(&p, b"blocked", true),
+            Err(AtomicError::Failed(_))
+        ));
+        drop(reader);
+        assert_eq!(fs::read(&p).unwrap(), b"newest");
+        assert!(temps(&p).is_empty());
+        // A target that only cannot be reached (a pulled USB stick) is not
+        // taken for one the replace deleted: no temp file is kept as the only
+        // copy, and the error asks for the device.
+        CRASH.with(|c| c.set(Some("unplugged")));
+        assert_eq!(
+            atomic_write(&p, b"unreached", true),
+            Err(AtomicError::Failed(SIMULATED_CRASH))
+        );
+        assert!(!p.exists());
+        // The stick is back: the file is intact, next to the temp file that
+        // could not be deleted while it was away.
+        for e in fs::read_dir(&t.0).unwrap().flatten() {
+            let path = e.path();
+            if let Some(back) = path.to_str().and_then(|n| n.strip_suffix(".away")) {
+                fs::rename(&path, back).unwrap();
+            }
+        }
+        assert_eq!(fs::read(&p).unwrap(), b"newest");
+        let left = temps(&p);
+        assert!(left.len() == 1 && fs::read(&left[0]).unwrap() == b"unreached");
+    }
+    /// A save whose replace hit the gap leaves the new state only in its
+    /// temp file. The session writes the vault file no more, so no later
+    /// save gives the name to a state without it, and the next unlock takes
+    /// it back.
+    #[test]
+    fn after_a_replace_gap_the_next_unlock_takes_the_save_back() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let pass = "synthetic replace gap password";
+        let mut s = Provision::new()
+            .unwrap()
+            .finish(&v, &k, pass, None)
+            .unwrap();
+        s.put(None, entry("first")).unwrap();
+        let key = fs::read(&k).unwrap();
+        CRASH.with(|c| c.set(Some("gap")));
+        assert_eq!(s.put(None, entry("in the temp file")), Err(GAP_KEPT));
+        assert!(!v.exists());
+        let kept = temps(&v);
+        assert_eq!(kept.len(), 1);
+        // Each of these would write the vault file without that entry.
+        assert_eq!(s.put(None, entry("another")), Err(GAP_KEPT));
+        assert_eq!(s.put(Some(0), entry("edited")), Err(GAP_KEPT));
+        assert_eq!(s.delete(0), Err(GAP_KEPT));
+        assert_eq!(s.enable_sync(), Err(GAP_KEPT));
+        assert_eq!(s.format(), Format::V1);
+        assert_eq!(
+            s.change_password(pass, "synthetic other gap password", ""),
+            Err(GAP_KEPT)
+        );
+        assert!(!v.exists() && temps(&v) == kept);
+        assert_eq!(fs::read(&k).unwrap(), key);
+        drop(s);
+        let secrets = |s: &Session| -> Vec<String> {
+            s.entries
+                .iter()
+                .map(|e| e.secret.as_str().to_owned())
+                .collect()
+        };
+        let mut s = Session::unlock(&v, &k, pass, "").unwrap();
+        assert!(s.take_recovery().vault);
+        assert_eq!(secrets(&s), ["first", "in the temp file"]);
+        assert!(v.exists() && temps(&v).is_empty());
+        s.put(None, entry("another")).unwrap();
+        drop(s);
+        let s = Session::unlock(&v, &k, pass, "").unwrap();
+        assert_eq!(secrets(&s), ["first", "in the temp file", "another"]);
+        drop(s);
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+    #[test]
+    fn unlock_takes_the_key_file_back_from_its_temp_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let (pass, next) = ("synthetic recovery password", "synthetic changed password");
+        let p = Provision::new().unwrap();
+        let mut s = p.finish(&v, &k, pass, None).unwrap();
+        s.put(None, entry("kept")).unwrap();
+        drop(s);
+        // A password change whose key file replace hit the gap: the new key
+        // file exists only as the temp file.
+        let changed = encode_key(&p.id, &p.key, None, next).unwrap();
+        let temp = gap(&k, &changed);
+        assert_eq!(key_candidate(&v, &k), Some(temp.clone()));
+        assert!(!vault_candidates(&v));
+        // The old password does not open it, and nothing moves.
+        assert_eq!(Session::unlock(&v, &k, pass, "").err(), Some(AUTH_ERROR));
+        assert!(!k.exists() && temp.exists());
+        // The new one does, and the key file gets its name back.
+        let derived = crypto::derive_count();
+        let mut s = Session::unlock(&v, &k, next, "").unwrap();
+        assert_eq!(crypto::derive_count(), derived + 1);
+        assert_eq!(s.take_recovery(), Recovery::default());
+        assert_eq!(s.key_path, normalized(&k).unwrap());
+        assert_eq!(fs::read(&k).unwrap(), changed);
+        assert!(temps(&k).is_empty());
+        assert_eq!(&*s.entries[0].secret, "kept");
+        s.backup_key(&t.file("backup.goyokey")).unwrap();
+        drop(s);
+        // A second unlock writes nothing.
+        let before = (fs::read(&v).unwrap(), fs::read(&k).unwrap());
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert_eq!((fs::read(&v).unwrap(), fs::read(&k).unwrap()), before);
+
+        // A torn key file (a known magic at the wrong length) is replaced.
+        fs::write(&k, &changed[..100]).unwrap();
+        let temp = plant(&k, 7, &changed);
+        assert_eq!(key_candidate(&v, &k), Some(temp.clone()));
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert_eq!(fs::read(&k).unwrap(), changed);
+        assert!(!temp.exists());
+        // A key file of a newer format is not damaged: nothing replaces it.
+        let mut newer = changed.clone();
+        newer[..8].copy_from_slice(b"GOYOKE03");
+        fs::write(&k, &newer).unwrap();
+        let temp = plant(&k, 8, &changed);
+        assert_eq!(key_candidate(&v, &k), None);
+        assert_eq!(Session::unlock(&v, &k, next, "").err(), Some(AUTH_ERROR));
+        assert_eq!(fs::read(&k).unwrap(), newer);
+        // Nor is one too large to read that starts like a newer build's.
+        newer.resize(recover::KEY_LIMIT * 2, 0);
+        fs::write(&k, &newer).unwrap();
+        assert_eq!(key_candidate(&v, &k), None);
+        assert_eq!(Session::unlock(&v, &k, next, "").err(), Some(TOO_LARGE));
+        assert_eq!(fs::read(&k).unwrap(), newer);
+        assert!(temp.exists());
+        // Once the key file opens again, the leftover copy of it goes.
+        fs::write(&k, &changed).unwrap();
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert!(!temp.exists());
+        // A file too large for a key file, that starts like none, is.
+        fs::write(&k, vec![0x20; recover::KEY_LIMIT * 2]).unwrap();
+        let temp = plant(&k, 10, &changed);
+        assert_eq!(key_candidate(&v, &k), Some(temp.clone()));
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert_eq!(fs::read(&k).unwrap(), changed);
+        assert!(!temp.exists());
+
+        // A key file that cannot get its name back: the session goes on with
+        // the temp file and says so; the next unlock renames it.
+        fs::remove_file(&k).unwrap();
+        let temp = plant(&k, 9, &changed);
+        let held = FileLock::acquire(&k).unwrap();
+        let mut s = Session::unlock(&v, &k, next, "").unwrap();
+        let kept = s.take_recovery().key_kept.unwrap();
+        assert_eq!(kept.file_name(), temp.file_name());
+        assert_eq!(s.key_path, kept);
+        assert!(!k.exists() && temp.exists());
+        s.backup_key(&t.file("backup-2.goyokey")).unwrap();
+        drop(s);
+        drop(held);
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert!(k.exists() && !temp.exists());
+        // The same with the key file's lock free: another program holds an
+        // unparseable key file open without delete sharing, so the temp file
+        // cannot replace it, and the cleanup after the unlock leaves the copy
+        // in use alone.
+        fs::write(&k, b"not a key file").unwrap();
+        let temp = plant(&k, 11, &changed);
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ
+            .open(&k)
+            .unwrap();
+        let mut s = Session::unlock(&v, &k, next, "").unwrap();
+        let kept = s.take_recovery().key_kept.unwrap();
+        assert_eq!(kept.file_name(), temp.file_name());
+        assert_eq!(s.key_path, kept);
+        assert!(temp.exists());
+        assert_eq!(fs::read(&k).unwrap(), b"not a key file");
+        s.backup_key(&t.file("backup-3.goyokey")).unwrap();
+        drop(s);
+        drop(held);
+        drop(Session::unlock(&v, &k, next, "").unwrap());
+        assert_eq!(fs::read(&k).unwrap(), changed);
+        assert!(!temp.exists());
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+    /// Recovery reads at most the four newest temp files of a file: a
+    /// folder full of planted ones costs little, and an older real copy
+    /// behind them is not looked at.
+    #[test]
+    fn recovery_reads_at_most_four_temp_files() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let pass = "synthetic many temps password";
+        drop(
+            Provision::new()
+                .unwrap()
+                .finish(&v, &k, pass, None)
+                .unwrap(),
+        );
+        let good = fs::read(&k).unwrap();
+        fs::remove_file(&k).unwrap();
+        let own = plant(&k, 1, &good);
+        age(&own, 600);
+        let other = Provision::new().unwrap();
+        let foreign = encode_key(&other.id, &other.key, None, pass).unwrap();
+        let planted: Vec<PathBuf> = (2..=recover::MAX_CANDIDATES as u64 + 1)
+            .map(|n| {
+                let path = plant(&k, n.into(), &foreign);
+                age(&path, 60 * n);
+                path
+            })
+            .collect();
+        let found = recover::candidates(&k, recover::KEY_LIMIT);
+        assert_eq!(found.len(), recover::MAX_CANDIDATES);
+        assert!(found.iter().all(|c| c.path != own));
+        assert_eq!(key_candidate(&v, &k), None);
+        assert!(Session::unlock(&v, &k, pass, "").is_err());
+        assert!(!k.exists() && own.exists());
+        // One planted copy fewer, and the real one is among the four.
+        fs::remove_file(&planted[0]).unwrap();
+        assert_eq!(key_candidate(&v, &k), Some(own.clone()));
+        drop(Session::unlock(&v, &k, pass, "").unwrap());
+        assert_eq!(fs::read(&k).unwrap(), good);
+        assert!(!own.exists());
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+    /// A restore reads a temp copy of a missing key file, but renames
+    /// nothing and makes no lock file next to its inputs, which may be on
+    /// read-only media. The next unlock gives the key file its name back.
+    #[test]
+    fn restore_reads_a_key_temp_file_and_writes_nothing_beside_it() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let pass = "synthetic restore temp password";
+        drop(
+            Provision::new()
+                .unwrap()
+                .finish(&v, &k, pass, None)
+                .unwrap(),
+        );
+        let backup = t.file("backup.goyo");
+        let input = t.file("input.goyokey");
+        fs::copy(&v, &backup).unwrap();
+        let temp = plant(&input, 1, &fs::read(&k).unwrap());
+        assert_eq!(key_candidate(&backup, &input), Some(temp.clone()));
+        let out = t.file("restored.goyo");
+        let mut s = Session::restore(&backup, &input, &out, pass, "").unwrap();
+        assert_eq!(s.take_recovery(), Recovery::default());
+        assert_eq!(s.key_path, normalized(&input).unwrap());
+        assert!(out.exists() && temp.exists() && !input.exists());
+        assert!(!t.file("input.goyokey.goyolock").exists());
+        drop(s);
+        drop(Session::unlock(&out, &input, pass, "").unwrap());
+        assert!(input.exists() && !temp.exists());
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+    #[test]
+    fn only_plain_temp_files_of_this_vault_stand_in_for_a_key_file() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let pass = "synthetic candidate password";
+        let p = Provision::new().unwrap();
+        drop(p.finish(&v, &k, pass, None).unwrap());
+        let good = fs::read(&k).unwrap();
+        fs::remove_file(&k).unwrap();
+        let other = Provision::new().unwrap();
+        let foreign = plant(
+            &k,
+            1,
+            &encode_key(&other.id, &other.key, None, pass).unwrap(),
+        );
+        let mut big = good.clone();
+        big.resize(recover::KEY_LIMIT + 1, 0);
+        let too_big = plant(&k, 2, &big);
+        // A second name of a good copy (a hard link) is not a plain file.
+        fs::write(t.file("elsewhere.bin"), &good).unwrap();
+        let linked = t.file(&format!("vault.goyokey.{:032x}.goyotmp", 3));
+        fs::hard_link(t.file("elsewhere.bin"), &linked).unwrap();
+        // Names atomic_write never gives.
+        let odd = [
+            format!("vault.goyokey.{}.goyotmp", "AB".repeat(16)),
+            format!("vault.goyokey.{}.goyotmp", "ab".repeat(15)),
+            format!("vault.goyokey.{:032x}.tmp", 4),
+            format!("vault.goyokey.{:032x}.goyotmp.txt", 5),
+        ];
+        for name in &odd {
+            fs::write(t.file(name), &good).unwrap();
+        }
+        assert_eq!(key_candidate(&v, &k), None);
+        assert!(Session::unlock(&v, &k, pass, "").is_err());
+        // Of two plain copies of this vault's key file the newest stands in;
+        // the other is deleted after the unlock, everything else stays.
+        let older = plant(&k, 0xa0, &good);
+        let newer = plant(&k, 0xb0, &good);
+        age(&older, 60);
+        assert_eq!(key_candidate(&v, &k), Some(newer.clone()));
+        let s = Session::unlock(&v, &k, pass, "").unwrap();
+        assert_eq!(s.key_path, normalized(&k).unwrap());
+        assert_eq!(fs::read(&k).unwrap(), good);
+        assert!(!older.exists() && !newer.exists());
+        assert!(foreign.exists() && too_big.exists() && linked.exists());
+        assert!(odd.iter().all(|name| t.file(name).exists()));
+        drop(s);
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+    #[test]
+    fn unlock_takes_the_vault_file_back_from_its_temp_file() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
+        let pass = "synthetic vault recovery password";
+        let p = Provision::new().unwrap();
+        drop(p.finish(&v, &k, pass, None).unwrap());
+        let mut es = [entry("saved"), entry("newest")];
+        es[0].set_ids([5; 16], NO_ID);
+        es[1].set_ids([6; 16], NO_ID);
+        let at = |generation: u64, n: usize| DataRef {
+            last: 0,
+            generation,
+            seen: 0,
+            entries: &es[..n],
+            tombstones: &[],
+        };
+        let v2 = |d: DataRef| encode_data(&p.id, &p.key, Format::V2, d).unwrap();
+        fs::write(&v, v2(at(4, 1))).unwrap();
+        // The save of generation 5 hit the gap. An older temp file of
+        // generation 3 is newer on disk, and one planted under another key
+        // claims the highest generation: neither wins.
+        let kept = gap(&v, &v2(at(5, 2)));
+        let stale = plant(&v, 1, &v2(at(3, 1)));
+        let planted = plant(
+            &v,
+            2,
+            &encode_data(&p.id, &[9; 32], Format::V2, at(u64::MAX, 2)).unwrap(),
+        );
+        age(&kept, 60);
+        assert!(vault_candidates(&v));
+        let mut s = Session::unlock(&v, &k, pass, "").unwrap();
+        assert_eq!(
+            s.take_recovery(),
+            Recovery {
+                vault: true,
+                key_kept: None
+            }
+        );
+        assert_eq!((s.generation, s.entries.len()), (5, 2));
+        assert!(v.exists() && !kept.exists());
+        assert_eq!(
+            decode_data(&p.id, &p.key, &fs::read(&v).unwrap())
+                .unwrap()
+                .1
+                .generation,
+            5
+        );
+        // Copies that differ from the opened vault stay.
+        assert!(stale.exists() && planted.exists());
+        drop(s);
+        // A copy equal to the vault but for the OTP watermark goes after the
+        // next unlock; one with other contents stays.
+        let mut same = at(5, 2);
+        same.last = 99;
+        let equal = plant(&v, 3, &v2(same));
+        drop(Session::unlock(&v, &k, pass, "").unwrap());
+        assert!(!equal.exists() && stale.exists() && planted.exists());
+
+        // Only a copy under another key: never taken.
+        fs::remove_file(&v).unwrap();
+        fs::remove_file(&stale).unwrap();
+        assert!(vault_candidates(&v));
+        assert_eq!(Session::unlock(&v, &k, pass, "").err(), Some(LEFTOVER_TEMP));
+        assert!(!v.exists() && planted.exists());
+        // v1 copies: the newest one.
+        fs::remove_file(&planted).unwrap();
+        let v1_file = |n: usize| encode_data(&p.id, &p.key, Format::V1, v1(0, &es[..n])).unwrap();
+        let old = plant(&v, 4, &v1_file(1));
+        let new = plant(&v, 5, &v1_file(2));
+        age(&old, 60);
+        let s = Session::unlock(&v, &k, pass, "").unwrap();
+        assert_eq!((s.format(), s.entries.len()), (Format::V1, 2));
+        assert!(!new.exists() && old.exists());
+        drop(s);
+        // Restore never takes a temp copy of its source.
+        let missing = t.file("backup.goyo");
+        plant(&missing, 6, &v1_file(2));
+        assert!(Session::restore(&missing, &k, &t.file("restored.goyo"), pass, "").is_err());
+        assert!(!t.file("restored.goyo").exists());
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 }
 #[cfg(not(windows))]
@@ -2184,6 +2912,7 @@ mod tests {
     }
     #[test]
     fn key_password_and_tamper() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let secret = Zeroizing::new([3; 20]);
         let bytes = encode_key(&[1; 16], &[2; 32], Some(&secret), "long-test-password").unwrap();
         let (_, key, otp) = decode_key(&bytes, "long-test-password").unwrap();
@@ -2231,12 +2960,10 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(atomic_write(&p, b"blocked", true).is_err());
         assert!(start.elapsed() >= std::time::Duration::from_millis(80));
-        let closer = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            drop(reader);
-        });
+        // The first try fails on it and the handle closes during the wait.
+        CLOSES_SOON.set(Some(reader));
         atomic_write(&p, b"after retry", true).unwrap();
-        closer.join().unwrap();
+        assert!(CLOSES_SOON.take().is_none());
         assert_eq!(fs::read(&p).unwrap(), b"after retry");
         fs::remove_file(&p).unwrap();
         fs::remove_file(dir.join("test.goyo.goyolock")).unwrap();

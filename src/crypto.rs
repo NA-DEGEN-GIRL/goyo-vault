@@ -4,7 +4,9 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{AeadInPlace, KeyInit},
 };
-use sha2::{Digest, Sha512};
+use hmac::{Hmac, Mac, digest::FixedOutput};
+use sha2::{Digest, Sha256, Sha512};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 pub type Result<T> = std::result::Result<T, &'static str>;
@@ -13,6 +15,46 @@ pub const KDF_MEMORY_KIB: u32 = 262_144;
 pub const KDF_PASSES: u32 = 3;
 pub const AUTH_ERROR: &str =
     "인증 실패: 비밀번호·열쇠·새 OTP·시스템 시간과 파일 상태를 확인하세요.";
+
+/// Argon2 settings for `derive`. Only builds with debug assertions (the
+/// tests) can pick the cheap ones; a release build has the constants alone.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KdfProfile {
+    /// KDF_MEMORY_KIB and KDF_PASSES, as in a release build.
+    Real,
+    /// 64 KiB and one pass, for tests that derive many keys.
+    Test,
+}
+/// Marks the test KDF hook: package_release.py refuses an exe holding it.
+#[cfg(debug_assertions)]
+const TEST_KDF_MARKER: &str = "goyo-test-kdf";
+#[cfg(debug_assertions)]
+thread_local! {
+    static KDF_PROFILE: std::cell::Cell<KdfProfile> =
+        const { std::cell::Cell::new(KdfProfile::Real) };
+    /// Calls of `derive` on this thread (the "derive counter" of the tests).
+    static DERIVES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Sets this thread's KDF profile; returns the one it replaces.
+#[cfg(debug_assertions)]
+pub fn set_kdf_profile(profile: KdfProfile) -> KdfProfile {
+    KDF_PROFILE.with(|p| p.replace(profile))
+}
+/// How often `derive` ran on this thread.
+#[cfg(debug_assertions)]
+pub fn derive_count() -> u64 {
+    DERIVES.with(std::cell::Cell::get)
+}
+/// The Argon2id memory (KiB) and passes `derive` uses on this thread.
+pub fn kdf_params() -> (u32, u32) {
+    #[cfg(debug_assertions)]
+    if KDF_PROFILE.with(std::cell::Cell::get) == KdfProfile::Test {
+        std::hint::black_box(TEST_KDF_MARKER);
+        return (64, 1);
+    }
+    (KDF_MEMORY_KIB, KDF_PASSES)
+}
 
 pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
     let mut out = Zeroizing::new([0; N]);
@@ -66,8 +108,10 @@ fn rdseed() -> Result<u64> {
 }
 
 pub fn derive(password: &[u8], salt: &[u8; 32]) -> Result<Key> {
-    let params =
-        Params::new(KDF_MEMORY_KIB, KDF_PASSES, 1, Some(32)).map_err(|_| "KDF 설정 오류")?;
+    #[cfg(debug_assertions)]
+    DERIVES.with(|n| n.set(n.get() + 1));
+    let (memory, passes) = kdf_params();
+    let params = Params::new(memory, passes, 1, Some(32)).map_err(|_| "KDF 설정 오류")?;
     let blocks = params.block_count();
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut memory = Zeroizing::new(vec![Block::default(); blocks]);
@@ -103,6 +147,173 @@ pub fn open(
     Ok(buf)
 }
 
+fn hmac(key: &[u8]) -> Hmac<Sha256> {
+    <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key size")
+}
+/// HKDF-SHA256 extract (RFC 5869 §2.2): HMAC under `salt` over the parts of
+/// `ikm` in order. The result is written straight into its heap buffer.
+pub fn hkdf_extract(salt: &[u8], ikm: &[&[u8]]) -> Box<Zeroizing<[u8; 32]>> {
+    let mut mac = hmac(salt);
+    for part in ikm {
+        mac.update(part);
+    }
+    let mut prk = Box::new(Zeroizing::new([0u8; 32]));
+    mac.finalize_into(prk.as_mut_slice().into());
+    prk
+}
+/// HKDF-SHA256 expand (RFC 5869 §2.3) of `prk` with the parts of `info` in
+/// order, filling `out` (at most 255 blocks). Every block is wiped.
+pub fn hkdf_expand(prk: &[u8; 32], info: &[&[u8]], out: &mut [u8]) {
+    assert!(out.len() <= 255 * 32, "HKDF output too long");
+    let mut block = Zeroizing::new([0u8; 32]);
+    for (i, chunk) in out.chunks_mut(32).enumerate() {
+        let mut mac = hmac(prk);
+        if i > 0 {
+            mac.update(block.as_slice());
+        }
+        for part in info {
+            mac.update(part);
+        }
+        mac.update(&[i as u8 + 1]);
+        mac.finalize_into(block.as_mut_slice().into());
+        chunk.copy_from_slice(&block[..chunk.len()]);
+    }
+}
+/// Equal contents, compared in constant time; the lengths are public.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.ct_eq(b).into()
+}
+/// RFC 5869 test cases 1-3 and the constructions of the vault formats
+/// (labels, input order, lengths), pinned from an independent Python
+/// implementation that uses hashlib and hmac only. No Argon2, so it is
+/// fast; `--self-check` runs it too.
+pub fn self_test() -> Result<()> {
+    const FAILED: &str = "암호 자체 시험(HKDF)에 실패했습니다.";
+    fn expand<const N: usize>(prk: &[u8; 32], info: &[&[u8]]) -> [u8; N] {
+        let mut out = [0; N];
+        hkdf_expand(prk, info, &mut out);
+        out
+    }
+    fn mac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+        let mut m = hmac(key);
+        for part in parts {
+            m.update(part);
+        }
+        m.finalize_fixed().into()
+    }
+    fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        for part in parts {
+            h.update(part);
+        }
+        h.finalize().into()
+    }
+    let mut ok = true;
+    let mut check = |got: &[u8], want: &str| {
+        let hex: String = got.iter().map(|b| format!("{b:02x}")).collect();
+        ok &= ct_eq(hex.as_bytes(), want.as_bytes());
+    };
+    let range = |from: u8, to: u16| (from as u16..to).map(|b| b as u8).collect::<Vec<u8>>();
+    // RFC 5869 A.1-A.3: (IKM, salt, info, PRK, OKM).
+    let cases = [
+        (
+            vec![0x0b; 22],
+            range(0x00, 0x0d),
+            range(0xf0, 0xfa),
+            "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+        ),
+        (
+            range(0x00, 0x50),
+            range(0x60, 0xb0),
+            range(0xb0, 0x100),
+            "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+            "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87",
+        ),
+        (
+            vec![0x0b; 22],
+            vec![],
+            vec![],
+            "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+        ),
+    ];
+    for (ikm, salt, info, prk, okm) in &cases {
+        // The parts of a split input count as one string.
+        let (a, b) = ikm.split_at(ikm.len() / 2);
+        let key = hkdf_extract(salt, &[a, b]);
+        check(key.as_slice(), prk);
+        let mut out = vec![0; okm.len() / 2];
+        let (a, b) = info.split_at(info.len() / 3);
+        hkdf_expand(&key, &[a, b], &mut out);
+        check(&out, okm);
+    }
+    // The constructions, on fixed synthetic inputs.
+    let id: [u8; 16] = std::array::from_fn(|i| i as u8);
+    let other_id: [u8; 16] = std::array::from_fn(|i| 0xf0 + i as u8);
+    let s: [u8; 32] = std::array::from_fn(|i| 0x20 + i as u8);
+    let dk: [u8; 32] = std::array::from_fn(|i| 0x40 + i as u8);
+    let pw_key: [u8; 32] = std::array::from_fn(|i| 0x60 + i as u8);
+    let cred = range(0x80, 0xb0);
+    let header = sha256(&[b"goyo self-test: file[0..B)"]);
+    let ks_id = |s: &[u8; 32], id: &[u8; 16]| {
+        expand::<16>(&hkdf_extract(b"goyo-vault/v2/ks-id", &[s]), &[id])
+    };
+    check(&ks_id(&s, &id), "c4681032763f8363886cff15a4aa5db9");
+    check(&ks_id(&[0; 32], &id), "00e05758b26ba1020e4917c0f09cde46");
+    check(
+        &ks_id(&[0; 32], &other_id),
+        "05dbbff54e112a43163cfd3043607e99",
+    );
+    let key_id = expand::<16>(&hkdf_extract(b"goyo-vault/v2/key-id", &[&dk]), &[&id]);
+    check(&key_id, "e8a35551018cd7f203358a34f4d4ce11");
+    let credhash = sha256(&[b"goyo-vault/v2/cred\0", &cred]);
+    check(&credhash[..16], "eae7075189d482632efecaea800c1751");
+    let body = hkdf_extract(b"goyo-vault/v2/body", &[&pw_key, &s]);
+    check(
+        &expand::<32>(&body, &[b"key\0", &header]),
+        "3eb7c4357aa110ac681e1efef18258f9cd2031b79711286ec7275f0abc1186f1",
+    );
+    check(
+        &expand::<32>(&body, &[b"commit\0", &header]),
+        "342931f2dcdfa681c7436d171865dea78fc1add85afb8d9f0377bfd0a83ec978",
+    );
+    // Without keys the keyset part is all zero.
+    let body = hkdf_extract(b"goyo-vault/v2/body", &[&pw_key, &[0; 32]]);
+    check(
+        &expand::<32>(&body, &[b"key\0", &header]),
+        "ff41d4f12b5014376f124f6d622e89365fc91dab5dd86b876bc5e1acf3178668",
+    );
+    let chain_key = expand::<32>(&hkdf_extract(b"goyo-vault/v2/chain", &[&dk]), &[&id]);
+    check(
+        &chain_key,
+        "b9a4178f5b6a65f8da8031b2410bd6d87bdc47f807524b6ad50510de4408b016",
+    );
+    let body_end = sha256(&[b"goyo self-test: file[0..E)"]);
+    check(
+        &mac(&chain_key, &[b"goyo-vault/v2/chain-msg\0", &body_end]),
+        "de51f3d425d54f72473348c64778f35d8467aad6c443209865d7dd2e62b78ae1",
+    );
+    let written = sha256(&[b"goyo self-test: file[0..W)"]);
+    let tag = sha256(&[b"goyo-vault/v2/state\0", &written]);
+    check(&tag[..16], "3d2aa8812e6c57811402bce76d161dcd");
+    let legacy = sha256(&[
+        b"goyo-vault/v2/state-legacy\0",
+        b"GOYOKE01",
+        &id,
+        &[1],
+        &key_id,
+    ]);
+    check(&legacy[..16], "6587b8d02709169936da046237e83509");
+    let code_key = expand::<32>(&hkdf_extract(b"goyo-vault/v2/key-code", &[&dk]), &[&id]);
+    let code = mac(
+        &code_key,
+        &[b"goyo key state\0", &7u64.to_le_bytes(), &tag[..16]],
+    );
+    check(&code[..8], "cd8acfb3a5e496f0");
+    if ok { Ok(()) } else { Err(FAILED) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +326,7 @@ mod tests {
     #[test]
     fn independent_implementation_vectors() {
         // Cross-checked with Python cryptography Argon2id and libsodium/PyNaCl.
+        set_kdf_profile(KdfProfile::Real);
         let salt = std::array::from_fn(|i| i as u8);
         let key = derive(b"Goyo compatibility test password", &salt).unwrap();
         assert_eq!(
@@ -154,5 +366,63 @@ mod tests {
     #[test]
     fn hardware_entropy_available() {
         assert_ne!(*random::<32>().unwrap(), *random::<32>().unwrap());
+    }
+    #[test]
+    fn hkdf_and_construction_vectors() {
+        self_test().unwrap();
+        // Shorter outputs are prefixes of longer ones, and split inputs
+        // count as their concatenation.
+        let prk = hkdf_extract(b"salt", &[b"input key"]);
+        assert_eq!(*prk, *hkdf_extract(b"salt", &[b"input", b" ", b"key"]));
+        assert_ne!(*prk, *hkdf_extract(b"other salt", &[b"input key"]));
+        let mut long = [0; 100];
+        hkdf_expand(&prk, &[b"info"], &mut long);
+        let mut short = [0; 16];
+        hkdf_expand(&prk, &[b"in", b"fo"], &mut short);
+        assert_eq!(short, long[..16]);
+        let mut other = [0; 16];
+        hkdf_expand(&prk, &[b"inf"], &mut other);
+        assert_ne!(short, other);
+        // The longest output RFC 5869 allows.
+        let mut most = vec![0; 255 * 32];
+        hkdf_expand(&prk, &[], &mut most);
+        assert!(most[255 * 32 - 32..].iter().any(|b| *b != 0));
+    }
+    #[test]
+    #[should_panic(expected = "HKDF output too long")]
+    fn hkdf_expand_refuses_more_than_255_blocks() {
+        hkdf_expand(&[1; 32], &[], &mut vec![0; 255 * 32 + 1]);
+    }
+    #[test]
+    fn constant_time_equality() {
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"same bytes", b"same bytes"));
+        assert!(!ct_eq(b"same bytes", b"same bytez"));
+        assert!(!ct_eq(b"Same bytes", b"same bytes"));
+        // Lengths are public: a prefix is not equal.
+        assert!(!ct_eq(b"same", b"same bytes"));
+        assert!(!ct_eq(b"", b"x"));
+    }
+    #[test]
+    fn test_kdf_profile_is_cheap_and_counted() {
+        let start = derive_count();
+        assert_eq!(kdf_params(), (KDF_MEMORY_KIB, KDF_PASSES));
+        assert_eq!(set_kdf_profile(KdfProfile::Test), KdfProfile::Real);
+        assert_eq!(kdf_params(), (64, 1));
+        let salt = [7; 32];
+        let cheap = derive(b"synthetic password", &salt).unwrap();
+        assert_eq!(*cheap, *derive(b"synthetic password", &salt).unwrap());
+        assert_eq!(derive_count(), start + 2);
+        // Another thread keeps the real settings and its own count.
+        std::thread::spawn(|| {
+            assert_eq!(kdf_params(), (KDF_MEMORY_KIB, KDF_PASSES));
+            assert_eq!(derive_count(), 0);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(set_kdf_profile(KdfProfile::Real), KdfProfile::Test);
+        let real = derive(b"synthetic password", &salt).unwrap();
+        assert_ne!(*cheap, *real);
+        assert_eq!(derive_count(), start + 3);
     }
 }

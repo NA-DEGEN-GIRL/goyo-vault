@@ -602,7 +602,7 @@ impl Session {
                 if report.changed {
                     let bytes = encode_data(&self.id, &self.key, Format::V2, merged.view())
                         .map_err(|_| ())?;
-                    atomic_write(&self.path, &bytes, true).map_err(|_| ())?;
+                    self.write(&bytes).map_err(|_| ())?;
                     taken.wrote = true;
                 }
                 // Counted only once saved: a retried merge would count twice.
@@ -1095,6 +1095,7 @@ mod tests {
 
     #[test]
     fn two_pcs_converge() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, b, mut sb) = pair(&t, &mut server, 2);
@@ -1187,6 +1188,7 @@ mod tests {
 
     #[test]
     fn merges_over_a_limit_wait_for_room() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
@@ -1250,6 +1252,7 @@ mod tests {
 
     #[test]
     fn unlock_merges_before_the_otp_check() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let (a, b) = (t.pc("a"), t.pc("b"));
         let p = Provision::new().unwrap();
@@ -1310,6 +1313,7 @@ mod tests {
 
     #[test]
     fn unlock_never_fails_because_of_sync() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
@@ -1416,6 +1420,7 @@ mod tests {
 
     #[test]
     fn poll_saves_merges_before_uploading() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, b, mut sb) = pair(&t, &mut server, 6);
@@ -1486,6 +1491,7 @@ mod tests {
 
     #[test]
     fn busy_outgoing_is_retried_quietly() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
@@ -1545,6 +1551,7 @@ mod tests {
     /// instead of still showing "Synced" to a helper that fetches nothing.
     #[test]
     fn a_reset_folder_is_offered_again() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, _b, _sb) = pair(&t, &mut server, 2);
@@ -1563,6 +1570,7 @@ mod tests {
 
     #[test]
     fn bad_or_old_server_copies_warn() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, b, mut sb) = pair(&t, &mut server, 2);
@@ -1628,6 +1636,7 @@ mod tests {
 
     #[test]
     fn status_picks_the_badge() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut s, _b, _sb) = pair(&t, &mut server, 1);
@@ -1716,6 +1725,7 @@ mod tests {
 
     #[test]
     fn enable_sync_links_and_uploads() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
@@ -1778,6 +1788,7 @@ mod tests {
     /// "both versions were kept".
     #[test]
     fn a_takeover_under_the_same_ids_makes_a_copy() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         for drop_moved in [true, false] {
             let t = Temp::new();
             let mut server = Server::default();
@@ -1827,6 +1838,7 @@ mod tests {
     /// before the first of them.
     #[test]
     fn small_losses_add_up_to_a_copy() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, b, mut sb) = pair(&t, &mut server, 30);
@@ -1915,6 +1927,7 @@ mod tests {
     /// It goes up once the server moves again.
     #[test]
     fn a_frozen_server_learns_no_unlocks() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let mut server = Server::default();
         let (a, mut sa, b, mut sb) = pair(&t, &mut server, 2);

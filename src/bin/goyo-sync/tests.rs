@@ -1916,7 +1916,7 @@ fn real_vault(pc: &Pc) -> (Session, [u8; 16]) {
 }
 /// A fresh encryption of the session's current content, as the app writes
 /// for each upload.
-fn encode(s: &Session) -> Vec<u8> {
+fn encode(s: &mut Session) -> Vec<u8> {
     s.save().unwrap();
     fs::read(&s.path).unwrap()
 }
@@ -1951,7 +1951,7 @@ fn end_to_end_seed_join_and_landed() {
     // base 0 loses to the head, which B's app then merges.
     fs::write(&b.vault, b"B's copy of the vault").unwrap();
     fs::create_dir(&b.dir).unwrap();
-    let fb = b.outgoing(0, &encode(&s));
+    let fb = b.outgoing(0, &encode(&mut s));
     let mut eb = b.engine(local(), &clock);
     assert_eq!(eb.pass(0, false), done(SyncState::Ok, 1, None, Some(1)));
     assert_eq!(b.incoming(), Some((1, v1.clone())));

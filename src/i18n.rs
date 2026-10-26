@@ -178,6 +178,10 @@ pub const EN: &[(&str, &str)] = &[
         "Vault file not found. Check the path or choose it with 'Browse'.",
     ),
     (
+        "금고 파일이 없어, 저장이 끊기며 남은 임시 파일에서 복구했습니다.",
+        "The vault file was missing; it was recovered from the temporary file an interrupted save left.",
+    ),
+    (
         "금고·열쇠 파일을 확인하고 비밀번호를 입력하세요.",
         "Check the vault and key files and enter your password.",
     ),
@@ -459,6 +463,10 @@ pub const EN: &[(&str, &str)] = &[
         "아직 저장된 항목이 없습니다.\n'+ 새 항목'으로 첫 비밀정보를 추가하세요.",
         "No entries yet.\nAdd your first secret with '+ New entry'.",
     ),
+    (
+        "암호 자체 시험(HKDF)에 실패했습니다.",
+        "The cryptographic self-test (HKDF) failed.",
+    ),
     ("암호화 실패", "Encryption failed"),
     (
         "암호화된 열쇠를 백업했습니다. 금고와 분리하여 보관하세요.",
@@ -486,6 +494,10 @@ pub const EN: &[(&str, &str)] = &[
         "Key file · in a cloud-synced folder together with the vault",
     ),
     (
+        "열쇠 파일 이름을 되돌리지 못했습니다. 잠근 뒤 {temp}를 {name}(으)로 바꾸세요.",
+        "Could not give the key file its name back. After locking, rename {temp} to {name}.",
+    ),
+    (
         "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠·OTP를 우회하는 복구 기능은 없습니다.",
         "The key file is encrypted with your password; keeping it apart from the vault adds protection.\r\nThere is no recovery for a lost password, key file or OTP.",
     ),
@@ -500,6 +512,10 @@ pub const EN: &[(&str, &str)] = &[
     (
         "열쇠 파일이 동기화 폴더 안에 있어 동기화하지 않습니다. 열쇠를 다른 폴더로 옮기세요.",
         "The key file is inside the sync folder, so this vault does not sync. Move the key file elsewhere.",
+    ),
+    (
+        "열쇠 파일이 없어, 저장이 끊기며 남은 임시 파일로 엽니다.",
+        "The key file is missing; opening with the temporary file an interrupted save left.",
     ),
     (
         "열쇠 파일이 변경되었습니다. 잠근 뒤 새 비밀번호로 다시 열고 백업하세요.",
@@ -700,6 +716,10 @@ pub const EN: &[(&str, &str)] = &[
     (
         "편집 중 내용이 화면에 보입니다. 잠금·화면 잠금·절전 때 저장하지 않은 내용은 지워집니다.",
         "What you edit is visible. Locking, the Windows screen lock and sleep clear unsaved changes.",
+    ),
+    (
+        "파일 교체가 끊겨 임시 파일(.goyotmp)을 남겼습니다. 다음에 열 때 자동으로 복구합니다.",
+        "Replacing the file was cut off, so its temporary file (.goyotmp) was kept. The next unlock recovers it automatically.",
     ),
     ("파일 선택", "Choose a file"),
     ("파일 식별 실패", "Could not identify the file"),

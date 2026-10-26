@@ -2863,7 +2863,21 @@ mod tests {
             ('\u{ac00}'..='\u{d7a3}').contains(&c) || ('\u{3131}'..='\u{318e}').contains(&c)
         })
     }
-    struct KoreanAfter;
+    /// The interface language is one setting for the whole process, so the
+    /// tests that switch it or check translated captions hold this for
+    /// their whole run and take turns. It puts Korean back at the end.
+    struct KoreanAfter {
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+    impl KoreanAfter {
+        fn hold() -> Self {
+            static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let turn = LANGUAGE.lock();
+            Self {
+                _turn: turn.unwrap_or_else(std::sync::PoisonError::into_inner),
+            }
+        }
+    }
     impl Drop for KoreanAfter {
         fn drop(&mut self) {
             i18n::set_english(false);
@@ -2876,7 +2890,7 @@ mod tests {
     /// its field marked.
     #[test]
     fn smoke_fill_check_and_save() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         i18n::set_english(false);
         // vault.goyo next to the exe is offered at once; the switch is on
         // before the first save.
@@ -3018,7 +3032,7 @@ mod tests {
     /// server into a new file.
     #[test]
     fn server_flows() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         let w = Window::new("server");
         w.type_in(HOST, "my-server");
         // A dedicated key, which the install must not use.
@@ -3557,7 +3571,7 @@ mod tests {
     /// row (as labels_fit_their_boxes does for the vault app).
     #[test]
     fn labels_fit_in_both_languages() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         unsafe fn measure(h: Hwnd, font: isize, text: &str, width: i32, flags: u32) -> Rect {
             unsafe {
                 let dc = GetDC(h);
@@ -3654,7 +3668,7 @@ mod tests {
     /// list rows, line messages and dialog texts.
     #[test]
     fn english_shows_no_korean() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         i18n::set_english(true);
         let mut shown = vec![];
         each_view(&mut |w, name| unsafe {
@@ -3807,7 +3821,7 @@ mod tests {
         unsafe {
             SetProcessDPIAware();
         }
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         for (english, dark) in [(false, true), (false, false), (true, true), (true, false)] {
             i18n::set_english(english);
             theme::set_dark(dark);

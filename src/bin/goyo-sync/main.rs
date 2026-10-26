@@ -625,11 +625,18 @@ fn stop() -> i32 {
     }
     OK
 }
-/// `--self-check` (used by check_dll_planting.py): the defenses applied in
-/// `main`, the settings window built hidden (so the DLLs it loads load
-/// here too), no DLL loaded from the exe's folder, a kill-on-close job, and
-/// ssh.exe where it must be. Fixed English, read by scripts.
+/// `--self-check` (used by check_dll_planting.py): the library's HKDF
+/// self-test, the defenses applied in `main`, the settings window built
+/// hidden (so the DLLs it loads load here too), no DLL loaded from the
+/// exe's folder, a kill-on-close job, and ssh.exe where it must be. Fixed
+/// English, read by scripts.
 fn self_check() -> i32 {
+    // RFC 5869 and the key derivations of the vault formats; no Argon2.
+    if goyo_vault::crypto::self_test().is_err() {
+        sys::print("FAIL: HKDF self-test\n", true);
+        return ERROR;
+    }
+    sys::print("HKDF self-test: PASS\n", false);
     let mut ok = true;
     if !gui::self_check() {
         sys::print("FAIL: the settings window could not be built\n", true);

@@ -7,8 +7,8 @@ mod win;
 use goyo_vault::{
     crypto, syncfile,
     vault::{
-        Entry, Format, OtpSetup, Provision, Session, SyncBadge, SyncNotice, key_uses_otp,
-        leftover_temp, vault_tag,
+        Entry, Format, GAP_KEPT, LEFTOVER_TEMP, OtpSetup, Provision, Recovery, Session, SyncBadge,
+        SyncNotice, key_candidate, key_uses_otp, leftover_temp, vault_candidates, vault_tag,
     },
 };
 use i18n::{fill, tr};
@@ -249,6 +249,28 @@ struct App {
     /// The word on the "open" pill for a vault that syncs, as of the last
     /// unlock, edit or poll that changed it.
     sync_badge: Option<SyncBadge>,
+    /// Raised by lock(), scrub() and every screen change (show), so that a
+    /// phased command finds out when what it started on is gone.
+    serial: u64,
+}
+/// What phase 1 of a phased command took (see phased_command): the typed
+/// secrets, wiped when the flow ends however it ends, and what phase 3 must
+/// find unchanged.
+struct Flow {
+    screen: Screen,
+    serial: u64,
+    /// A session was open. Only an unlock opens one, and that changes the
+    /// screen, so with the serial this names the session.
+    session: bool,
+    vault: PathBuf,
+    key: PathBuf,
+    pass: Zeroizing<String>,
+    otp: Zeroizing<String>,
+    /// Password: the current password.
+    current: Zeroizing<String>,
+    /// Login: the key file is missing or unparseable, and the unlock reads
+    /// the temp file an interrupted save left in its place.
+    key_temp: bool,
 }
 impl App {
     fn new(hwnd: Hwnd) -> Self {
@@ -298,11 +320,12 @@ impl App {
             auto_lock: load_auto_lock(),
             sync_ticks: 0,
             sync_badge: None,
+            serial: 0,
         };
         // The last vault and key that opened, so a key kept on a USB drive does
         // not have to be picked with "찾기" on every start.
         if let Some((vault, key)) = load_paths()
-            && vault.is_file()
+            && (vault.is_file() || vault_candidates(&vault))
         {
             app.vault_path = vault;
             app.key_path = key;
@@ -557,12 +580,23 @@ impl App {
         if !matches!(self.screen, Screen::Login | Screen::Restore) {
             return false;
         }
-        let wanted = key_uses_otp(&self.key_path) == Some(true);
+        let wanted = self.key_otp();
         if wanted == (self.handle(OTP) != 0) {
             return false;
         }
         self.rebuild_keeping(&[PASS]);
         wanted
+    }
+    /// Whether the key file an unlock reads asks for an OTP code: the chosen
+    /// one, or the temp file an interrupted save left in its place.
+    fn key_otp(&self) -> bool {
+        let vault = if self.screen == Screen::Restore {
+            &self.backup_path
+        } else {
+            &self.vault_path
+        };
+        let key = key_candidate(vault, &self.key_path).unwrap_or_else(|| self.key_path.clone());
+        key_uses_otp(&key) == Some(true)
     }
     /// Masks every password field, whatever its recorded state, and never
     /// moves focus, so it is safe while another app is being activated.
@@ -709,7 +743,13 @@ impl App {
         self.set_status(text, TONE_MUTED);
     }
     /// Errors stay on the screen in the status line instead of a modal box.
+    /// A save cut off by the replace gap also locks: the newest state is
+    /// only in a temp file, which the next unlock takes back, and the
+    /// session writes nothing more meanwhile.
     fn error(&mut self, text: &str) {
+        if text == GAP_KEPT && self.session.is_some() {
+            self.lock(text, true);
+        }
         self.set_status(text, TONE_DANGER);
         unsafe {
             MessageBeep(0x30);
@@ -747,9 +787,15 @@ impl App {
         }
         Ok(())
     }
-    /// Login when a vault exists at the current path, otherwise Welcome.
+    /// Every screen change goes through here (see serial).
+    fn show(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.serial += 1;
+    }
+    /// Login when a vault exists at the current path (or only its temp file,
+    /// which the unlock takes back), otherwise Welcome.
     fn home(&self) -> Screen {
-        if self.vault_path.is_file() {
+        if self.vault_path.is_file() || vault_candidates(&self.vault_path) {
             Screen::Login
         } else {
             Screen::Welcome
@@ -1063,7 +1109,7 @@ impl App {
             self.refresh_key_note();
             // Only a key file that uses an OTP gets the OTP field; a key
             // chosen later is handled by fit_otp_field.
-            let otp = key_uses_otp(&self.key_path) == Some(true);
+            let otp = self.key_otp();
             self.password_field(PASS, "비밀번호", AX, y, if otp { AW - 196 } else { AW });
             if otp {
                 let source = if restore {
@@ -1443,7 +1489,7 @@ impl App {
     }
     /// First run (no vault at the default location) starts on Welcome.
     fn start_screen(&mut self) {
-        self.screen = self.home();
+        self.show(self.home());
         if self.screen == Screen::Welcome {
             self.status.clear();
         }
@@ -1490,7 +1536,7 @@ impl App {
             }
         }
         if self.otp_setup.take().is_some() {
-            self.screen = Screen::Vault;
+            self.show(Screen::Vault);
             self.status = line("다른 앱으로 전환되어 OTP 화면을 닫았습니다.");
             self.build();
         }
@@ -1546,7 +1592,7 @@ impl App {
             self.expire_clipboard();
         }
         self.sync_badge = None;
-        self.screen = self.home();
+        self.show(self.home());
         self.from_welcome = false;
         // The line may name an entry (a sync conflict).
         self.status.zeroize();
@@ -1557,6 +1603,7 @@ impl App {
     /// without touching the controls; a pending lock rebuilds the screen
     /// moments later (see window_proc).
     fn scrub(&mut self) {
+        self.serial += 1;
         self.session = None;
         self.provision = None;
         self.otp_setup = None;
@@ -1573,7 +1620,14 @@ impl App {
             }
         }
     }
+    /// SUBMIT. Login and Password run in phases (see phased_command); a
+    /// call from here runs both phases at once, as nothing is asked between
+    /// them yet.
     fn submit(&mut self) -> crypto::Result<()> {
+        if matches!(self.screen, Screen::Login | Screen::Password) {
+            let flow = self.begin(SUBMIT)?;
+            return self.finish(flow);
+        }
         if self.input_failed {
             return Err("입력 보호 설정 실패로 저장/인증을 중단합니다.");
         }
@@ -1614,34 +1668,133 @@ impl App {
                 }
             };
         }
+        self.check_files()?;
+        if self.screen == Screen::Create && pass.as_str() != self.read(CONFIRM)?.as_str() {
+            return Err("비밀번호 확인이 일치하지 않습니다.");
+        }
+        let key_temp = self.working();
+        unsafe {
+            UpdateWindow(self.hwnd);
+        }
+        let screen = self.screen;
+        let result = match self.screen {
+            Screen::Create => {
+                goyo_vault::vault::password_policy(&pass)?;
+                // Verify before consuming the provisioning object; a typo must
+                // not replace the enrollment secret already entered on the phone.
+                let provision = self
+                    .provision
+                    .as_ref()
+                    .ok_or("새 금고 등록을 다시 시작하세요.")?;
+                let code = self.create_otp.then_some(otp.as_str());
+                provision.finish(&self.new_vault_path, &self.new_key_path, &pass, code)
+            }
+            _ => Session::restore(
+                &self.backup_path,
+                &self.key_path,
+                &self.dest_path,
+                &pass,
+                &otp,
+            ),
+        };
+        self.opened(screen, result, key_temp)
+    }
+    /// Phase 1 of SUBMIT on Login and Password (see phased_command): every
+    /// check command() and submit() make before the slow part, under a
+    /// short borrow, and a snapshot of what was typed.
+    fn begin(&mut self, id: i32) -> crypto::Result<Flow> {
+        if !self.allows(id) {
+            return Err("현재 화면에서 허용되지 않는 작업입니다.");
+        }
+        if self.closing {
+            return Err("클립보드 정리 후 종료를 기다리고 있습니다.");
+        }
+        self.activity = Instant::now();
+        if self.input_failed {
+            return Err("입력 보호 설정 실패로 저장/인증을 중단합니다.");
+        }
+        check_environment(self.hwnd)?;
+        if Instant::now() < self.retry {
+            return Err("인증 실패 후 대기 중입니다. 잠시 후 다시 시도하세요.");
+        }
+        self.paths()?;
+        let pass = self.read(PASS)?;
+        let otp = self.read(OTP)?;
+        let mut current = Zeroizing::new(String::new());
+        let mut key_temp = false;
         if self.screen == Screen::Password {
             if pass.as_str() != self.read(CONFIRM)?.as_str() {
                 return Err("비밀번호 확인이 일치하지 않습니다.");
             }
-            let current = self.read(CURRENT_PASS)?;
-            let result = self
-                .session
-                .as_mut()
-                .ok_or("먼저 금고를 열어주세요.")?
-                .change_password(&current, &pass, &otp);
-            if let Err(e) = result {
-                self.failed = self.failed.saturating_add(1);
-                self.retry =
-                    Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
-                return Err(e);
-            }
-            self.failed = 0;
-            self.screen = Screen::Vault;
-            self.status = line(
-                "비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.",
-            );
-            self.build();
+            current = self.read(CURRENT_PASS)?;
+        } else {
+            self.check_files()?;
+            key_temp = self.working();
+        }
+        Ok(Flow {
+            screen: self.screen,
+            serial: self.serial,
+            session: self.session.is_some(),
+            vault: self.vault_path.clone(),
+            key: self.key_path.clone(),
+            pass,
+            otp,
+            current,
+            key_temp,
+        })
+    }
+    /// Phase 3 (see phased_command): only on the screen, serial and session
+    /// phase 1 saw, not while closing and with the environment checked
+    /// again. Then the library call, and the screen for its result.
+    fn finish(&mut self, flow: Flow) -> crypto::Result<()> {
+        // Only a lock or a close in between changes these, and it wrote its
+        // own line. No dialog was open, so none is blamed.
+        if self.closing
+            || self.serial != flow.serial
+            || self.screen != flow.screen
+            || self.session.is_some() != flow.session
+        {
             return Ok(());
         }
-        // Missing files are a navigation problem, not a failed authentication:
-        // say what to do and do not start the retry delay.
+        if let Err(e) = check_environment(self.hwnd) {
+            self.lock(e, true);
+            return Err(e);
+        }
+        if flow.screen == Screen::Login {
+            let result = Session::unlock(&flow.vault, &flow.key, &flow.pass, &flow.otp);
+            return self.opened(Screen::Login, result, flow.key_temp);
+        }
+        let result = self
+            .session
+            .as_mut()
+            .ok_or("먼저 금고를 열어주세요.")?
+            .change_password(&flow.current, &flow.pass, &flow.otp);
+        if let Err(e) = result {
+            self.failed = self.failed.saturating_add(1);
+            self.retry = Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
+            return Err(e);
+        }
+        self.failed = 0;
+        self.show(Screen::Vault);
+        self.status = line(
+            "비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.",
+        );
+        self.build();
+        Ok(())
+    }
+    /// Login, Restore and Create: the files must be there before any key
+    /// derivation. Missing files are a navigation problem, not a failed
+    /// authentication: say what to do and do not start the retry delay. A
+    /// file an interrupted save left only as its temp file is not missing:
+    /// the unlock takes it back.
+    fn check_files(&mut self) -> crypto::Result<()> {
+        let source = if self.screen == Screen::Restore {
+            &self.backup_path
+        } else {
+            &self.vault_path
+        };
         match self.screen {
-            Screen::Login if !self.vault_path.is_file() => {
+            Screen::Login if !self.vault_path.is_file() && !vault_candidates(&self.vault_path) => {
                 return Err(if leftover_temp(&self.vault_path) {
                     LEFTOVER_TEMP
                 } else {
@@ -1651,7 +1804,9 @@ impl App {
             Screen::Restore if !self.backup_path.is_file() => {
                 return Err("복원할 백업 파일을 '찾기'로 선택하세요.");
             }
-            Screen::Login | Screen::Restore if !self.key_path.is_file() => {
+            Screen::Login | Screen::Restore
+                if !self.key_path.is_file() && key_candidate(source, &self.key_path).is_none() =>
+            {
                 return Err(if leftover_temp(&self.key_path) {
                     LEFTOVER_TEMP
                 } else {
@@ -1673,44 +1828,49 @@ impl App {
         if self.fit_otp_field() {
             return Err("이 열쇠 파일은 OTP를 씁니다. 휴대폰 OTP 앱의 6자리도 입력하세요.");
         }
-        if self.screen == Screen::Create && pass.as_str() != self.read(CONFIRM)?.as_str() {
-            return Err("비밀번호 확인이 일치하지 않습니다.");
-        }
-        self.status("인증 및 암호화 처리 중입니다…");
-        unsafe {
-            UpdateWindow(self.hwnd);
-        }
-        let screen = self.screen;
-        let result = match self.screen {
-            Screen::Create => {
-                goyo_vault::vault::password_policy(&pass)?;
-                // Verify before consuming the provisioning object; a typo must
-                // not replace the enrollment secret already entered on the phone.
-                let provision = self
-                    .provision
-                    .as_ref()
-                    .ok_or("새 금고 등록을 다시 시작하세요.")?;
-                let code = self.create_otp.then_some(otp.as_str());
-                provision.finish(&self.new_vault_path, &self.new_key_path, &pass, code)
-            }
-            Screen::Restore => Session::restore(
-                &self.backup_path,
-                &self.key_path,
-                &self.dest_path,
-                &pass,
-                &otp,
-            ),
-            _ => Session::unlock(&self.vault_path, &self.key_path, &pass, &otp),
+        Ok(())
+    }
+    /// The status line while the key derivation runs. True if the unlock
+    /// reads the temp file an interrupted save left in place of a missing or
+    /// unparseable key file (temp-candidate recovery).
+    fn working(&mut self) -> bool {
+        let source = if self.screen == Screen::Restore {
+            &self.backup_path
+        } else {
+            &self.vault_path
         };
+        let key_temp = matches!(self.screen, Screen::Login | Screen::Restore)
+            && key_candidate(source, &self.key_path).is_some();
+        self.status(if key_temp {
+            "열쇠 파일이 없어, 저장이 끊기며 남은 임시 파일로 엽니다."
+        } else {
+            "인증 및 암호화 처리 중입니다…"
+        });
+        key_temp
+    }
+    /// The screen after Create, Restore or an unlock. `key_temp`: the key
+    /// file came from a temp file, so a failed authentication may mean that
+    /// copy needs other factors than the ones typed.
+    fn opened(
+        &mut self,
+        screen: Screen,
+        result: crypto::Result<Session>,
+        key_temp: bool,
+    ) -> crypto::Result<()> {
         match result {
             Ok(mut s) => {
+                let recovery = s.take_recovery();
                 self.vault_path = s.path.clone();
-                self.key_path = s.key_path.clone();
+                // A key file still under its temp name: the field keeps the
+                // name the user is asked to give it back.
+                if recovery.key_kept.is_none() {
+                    self.key_path = s.key_path.clone();
+                }
                 self.new_vault_path = PathBuf::new();
                 self.new_key_path = PathBuf::new();
                 self.backup_path = PathBuf::new();
                 self.dest_path = PathBuf::new();
-                save_paths(&s.path, &s.key_path);
+                save_paths(&s.path, &self.key_path);
                 let warning = placement_warning(&s.path, &s.key_path);
                 let uses_otp = s.uses_otp();
                 // Only opening a vault looks at its sync folder.
@@ -1724,7 +1884,7 @@ impl App {
                 self.provision = None;
                 self.create_otp = false;
                 self.failed = 0;
-                self.screen = Screen::Vault;
+                self.show(Screen::Vault);
                 let first = match (screen == Screen::Create, uses_otp) {
                     (true, true) => {
                         "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요."
@@ -1739,29 +1899,45 @@ impl App {
                         "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다."
                     }
                 };
-                // What the unlock found in the sync folder replaces the usual
-                // line; the placement warning still follows it.
+                // What the unlock took back from temp files, and what it found
+                // in the sync folder, replace the usual line; the placement
+                // warning still follows them.
                 let (first, mut tone) = match &notice {
                     Some(n) => sync_line(n),
                     None => (Zeroizing::new(first.to_owned()), TONE_MUTED),
                 };
-                self.status = match warning {
-                    Some(w) => {
-                        tone = TONE_DANGER;
-                        joined(&[&first, w.message()])
+                let (recovered, rename) = recovery_lines(&recovery, &self.key_path);
+                if warning.is_some() || rename {
+                    tone = TONE_DANGER;
+                }
+                self.status = if recovered.is_empty() && warning.is_none() {
+                    first
+                } else {
+                    let mut parts: Vec<&str> = recovered.iter().map(|l| l.as_str()).collect();
+                    if parts.is_empty() || notice.is_some() {
+                        parts.push(&first);
                     }
-                    None => first,
+                    parts.extend(warning.map(Placement::message));
+                    joined(&parts)
                 };
                 self.status_tone = tone;
                 self.build();
                 Ok(())
             }
+            // A vault file missing with no temp file its key opens is a
+            // navigation problem, as check_files says before any key
+            // derivation: the password was right, so no retry delay.
+            Err(e) if e == LEFTOVER_TEMP => Err(e),
             Err(e) => {
                 self.failed = self.failed.saturating_add(1);
                 self.retry =
                     Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
                 self.status("인증 실패. 잠시 후 다시 시도하세요.");
-                Err(e)
+                Err(if key_temp && e == crypto::AUTH_ERROR {
+                    LEFTOVER_TEMP
+                } else {
+                    e
+                })
             }
         }
     }
@@ -1837,13 +2013,13 @@ impl App {
                 self.copy_until = None;
                 self.reveal_until = None;
                 self.from_welcome = id == OPEN;
-                self.screen = match id {
+                self.show(match id {
                     CREATE => Screen::Create,
                     RESTORE => Screen::Restore,
                     OPEN => Screen::Login,
                     _ if self.screen == Screen::Login => Screen::Welcome,
                     _ => self.home(),
-                };
+                });
                 self.status = line("");
                 self.build();
             }
@@ -1857,19 +2033,19 @@ impl App {
                 };
                 self.reset_copy();
                 self.reveal_until = None;
-                self.screen = Screen::Edit;
+                self.show(Screen::Edit);
                 self.build();
             }
             CANCEL => {
                 self.otp_setup = None;
-                self.screen = Screen::Vault;
+                self.show(Screen::Vault);
                 self.build();
             }
             OTP_SETUP => {
                 self.reset_copy();
                 self.reveal_until = None;
                 self.otp_setup = None;
-                self.screen = Screen::OtpBackup;
+                self.show(Screen::OtpBackup);
                 self.build();
             }
             OTP_TOGGLE => {
@@ -1925,14 +2101,14 @@ impl App {
                 self.sync_badge = s.badge();
                 self.selected = self.editing.or(Some(s.entries.len() - 1));
                 self.page = 0;
-                self.screen = Screen::Vault;
+                self.show(Screen::Vault);
                 self.status = line("암호화하여 저장했습니다.");
                 self.build();
             }
             CHANGE => {
                 self.reset_copy();
                 self.reveal_until = None;
-                self.screen = Screen::Password;
+                self.show(Screen::Password);
                 self.build();
             }
             TOGGLE => {
@@ -2164,7 +2340,7 @@ impl App {
             }
             if self.otp_setup.is_some() && idle >= OTP_QR_IDLE {
                 self.otp_setup = None;
-                self.screen = Screen::Vault;
+                self.show(Screen::Vault);
                 self.status = line("2분 동안 쓰지 않아 OTP 화면을 닫았습니다.");
                 self.build();
             }
@@ -2892,6 +3068,48 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     drain_pending(h);
     result
 }
+/// Runs a command in phases (spec §9.2a), so that no borrow of the app spans
+/// anything that pumps messages: phase 1 checks the screen and takes what
+/// was typed under a short borrow; questions in between (none yet for
+/// SUBMIT on Login and Password, the commands routed here) run with no
+/// borrow, like modal_command's dialogs, so timers and session notices can
+/// still lock; phase 3 makes the library call under a borrow, and only if
+/// nothing changed meanwhile, else the flow and its secrets are dropped.
+/// It returns before window_proc's tail, so it drains the deferred events
+/// and makes the sync offer itself.
+fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
+    let flow = APP.with(|cell| -> crypto::Result<Flow> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        b.as_mut().ok_or("화면이 닫혔습니다.")?.begin(id)
+    });
+    drain_pending(h);
+    let flow = flow?;
+    unsafe {
+        UpdateWindow(h);
+    }
+    let result = APP.with(|cell| -> crypto::Result<()> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        b.as_mut().ok_or("화면이 닫혔습니다.")?.finish(flow)
+    });
+    drain_pending(h);
+    // Raised only by the unlock just made.
+    if APP.with(|cell| cell.try_borrow_mut().is_ok()) && SYNC_OFFER.with(|f| f.replace(false)) {
+        offer_sync(h);
+    }
+    result
+}
+/// Whether window_proc hands command `id` to phased_command: SUBMIT (or
+/// Enter) on Login and Password. Anything else, or a busy app, goes the
+/// usual way.
+fn phased(id: i32) -> bool {
+    matches!(id, 1 | SUBMIT)
+        && APP.with(|cell| {
+            cell.try_borrow().is_ok_and(|b| {
+                b.as_ref()
+                    .is_some_and(|a| matches!(a.screen, Screen::Login | Screen::Password))
+            })
+        })
+}
 /// confirm(); a test answers in its place (see ANSWER).
 fn ask(h: Hwnd, text: &str) -> bool {
     #[cfg(test)]
@@ -3176,6 +3394,12 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
             } else {
                 report(h, e);
             }
+        }
+        return 0;
+    }
+    if m == 0x111 && (w >> 16) == 0 && phased((w & 0xffff) as i32) {
+        if let Err(e) = phased_command(h, SUBMIT) {
+            report(h, e);
         }
         return 0;
     }
@@ -3590,6 +3814,29 @@ fn sync_line(notice: &SyncNotice) -> (Zeroizing<String>, isize) {
     };
     (text, if danger { TONE_DANGER } else { TONE_MUTED })
 }
+/// Status lines for what an unlock took back from temp files an
+/// interrupted save left, and whether one asks the user to act.
+fn recovery_lines(recovery: &Recovery, key: &Path) -> (Vec<Zeroizing<String>>, bool) {
+    let mut lines = Vec::new();
+    if recovery.vault {
+        lines.push(line(
+            "금고 파일이 없어, 저장이 끊기며 남은 임시 파일에서 복구했습니다.",
+        ));
+    }
+    let name = |p: &Path| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    if let Some(temp) = &recovery.key_kept {
+        lines.push(Zeroizing::new(fill(
+            "열쇠 파일 이름을 되돌리지 못했습니다. 잠근 뒤 {temp}를 {name}(으)로 바꾸세요.",
+            &[&name(temp), &name(key)],
+        )));
+    }
+    (lines, recovery.key_kept.is_some())
+}
 /// Placements that leave only the password between a thief and the data.
 fn placement_warning(vault: &Path, key: &Path) -> Option<Placement> {
     let folder = |p: &Path| p.parent().map(|d| d.to_string_lossy().to_lowercase());
@@ -3622,7 +3869,6 @@ fn in_cloud_folder(p: &Path) -> bool {
         .iter()
         .any(|n| path.contains(n))
 }
-const LEFTOVER_TEMP: &str = "파일이 없고, 저장이 끊기며 남은 임시 파일(.goyotmp)이 같은 폴더에 있습니다. 지우지 마세요. 그 파일 이름을 원래 이름으로 바꾸면 복구될 수 있습니다.";
 /// Title bar colours follow the palette (Windows 11 immersive dark mode).
 fn apply_window_theme(h: Hwnd) {
     let dark: i32 = theme::is_dark().into();
@@ -3797,6 +4043,17 @@ fn main() {
             UnregisterSuspendResumeNotification(suspend);
             WTSUnRegisterSessionNotification(h);
             DestroyWindow(h);
+            // The key derivations of the vault formats, with the KDF settings
+            // every release build has.
+            #[cfg(debug_assertions)]
+            crypto::set_kdf_profile(crypto::KdfProfile::Real);
+            if crypto::self_test().is_err() {
+                eprintln!("FAIL: HKDF self-test");
+                std::process::exit(1);
+            }
+            let (memory, passes) = crypto::kdf_params();
+            println!("HKDF self-test: PASS");
+            println!("KDF: Argon2id, {memory} KiB, {passes} passes, 1 lane");
             // Planting check: a DLL loaded from the program folder fails here
             // even if it loaded silently.
             for planted in modules_beside_exe() {
@@ -3949,9 +4206,22 @@ mod tests {
         std::fs::remove_file(dir.join("vault.goyo")).unwrap();
         std::fs::remove_dir(&dir).unwrap();
     }
-    /// Puts the interface back in Korean when a test that switched to
-    /// English ends, even by a failed assertion.
-    struct KoreanAfter;
+    /// The interface language is one setting for the whole process. Tests
+    /// that switch it, or that check text translated while they run, hold
+    /// this for their whole run, so they take turns. It puts the interface
+    /// back in Korean when the test ends, even by a failed assertion.
+    struct KoreanAfter {
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+    impl KoreanAfter {
+        fn hold() -> Self {
+            static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let turn = LANGUAGE.lock();
+            Self {
+                _turn: turn.unwrap_or_else(std::sync::PoisonError::into_inner),
+            }
+        }
+    }
     impl Drop for KoreanAfter {
         fn drop(&mut self) {
             i18n::set_english(false);
@@ -4116,7 +4386,7 @@ mod tests {
     /// fits the status line.
     #[test]
     fn labels_fit_their_boxes() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         unsafe fn measure(h: Hwnd, font: isize, text: &str, width: i32, flags: u32) -> Rect {
             unsafe {
                 let dc = GetDC(h);
@@ -4227,9 +4497,12 @@ mod tests {
                             ));
                         }
                     }
-                    // Sync notices filled with their longest values.
-                    for notice in sync_notices() {
-                        let (line, _) = sync_line(&notice);
+                    // Sync notices filled with their longest values, and the
+                    // recovery lines with the longest temp file name.
+                    let notices = sync_notices().into_iter().map(|n| sync_line(&n).0);
+                    let recovered =
+                        recovery_lines(&kept_key_recovery(), Path::new("vault.goyokey"));
+                    for line in notices.chain(recovered.0) {
                         let text = tr(&line);
                         let need = measure(status, font, text, r.right, 0x10 | 0x40).bottom;
                         if need > r.bottom {
@@ -4321,7 +4594,7 @@ mod tests {
     /// no screen shows Korean, whether in a control or painted.
     #[test]
     fn english_is_complete() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         let main = include_str!("main.rs");
         let main = &main[..main.find("#[cfg(test)]\nmod tests").unwrap()];
         let (mut missing, mut scanned) = (vec![], vec![]);
@@ -4330,6 +4603,7 @@ mod tests {
             include_str!("win.rs"),
             include_str!("theme.rs"),
             include_str!("vault.rs"),
+            include_str!("vault/recover.rs"),
             include_str!("crypto.rs"),
             include_str!("otp.rs"),
             // goyo-sync's settings window draws with this app's i18n.rs.
@@ -4410,11 +4684,28 @@ mod tests {
             let text = tr(&line);
             assert!(!has_korean(text), "Korean in English mode: {text:?}");
         }
+        // So are the lines on what an unlock took back from temp files.
+        let (lines, _) = recovery_lines(&kept_key_recovery(), Path::new("vault.goyokey"));
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            let text = tr(&line);
+            assert!(!has_korean(text), "Korean in English mode: {text:?}");
+        }
+    }
+    /// Both recoveries, with the longest temp file name atomic_write gives.
+    fn kept_key_recovery() -> Recovery {
+        Recovery {
+            vault: true,
+            key_kept: Some(PathBuf::from(format!(
+                "vault.goyokey.{:032x}.goyotmp",
+                u128::MAX
+            ))),
+        }
     }
     /// Switching the language keeps what was typed and the screen's state.
     #[test]
     fn language_switch_keeps_input() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         let dir = test_dir("switch");
         unsafe {
             SetProcessDPIAware();
@@ -4550,7 +4841,7 @@ mod tests {
     /// buffer frees an unwiped copy.
     #[test]
     fn sync_lines_and_status_buffers() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         let mass = SyncNotice::MassDelete {
             removed: 5,
             file: r"vault.goyo.sync\pre-merge-1792000000.goyo".into(),
@@ -5239,7 +5530,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         // GOYO_PREVIEW_LANG=en renders the English interface to en-*.bmp.
         let english = std::env::var("GOYO_PREVIEW_LANG").is_ok_and(|v| v == "en");
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         i18n::set_english(english);
         let pick = |ko: &'static str, en: &'static str| if english { en } else { ko };
         let temp = std::env::temp_dir().join(format!(
@@ -5738,7 +6029,7 @@ mod tests {
     /// ID. Polling never counts as use.
     #[test]
     fn timer_merges_on_the_vault_list() {
-        let _korean = KoreanAfter;
+        let _korean = KoreanAfter::hold();
         let dir = test_dir("sync-timer");
         let mut server = Server::default();
         let titles = ["entry 0", "entry 1", "entry 2", "entry 3"];
@@ -5930,6 +6221,8 @@ mod tests {
             peek();
             worker.join().unwrap()
         }
+        // The question is checked in Korean.
+        let _korean = KoreanAfter::hold();
         let dir = test_dir("sync-offer");
         let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
         let mut s = Provision::new()
@@ -6088,6 +6381,164 @@ mod tests {
             assert!(with_app(|a| a.session.is_some()));
             assert!(ANSWER.with(|a| a.borrow_mut().take()).is_some());
             assert_eq!(asked.borrow().len(), 2);
+
+            APP.with(|cell| {
+                cell.borrow_mut().take();
+            });
+            DestroyWindow(h);
+            WINDOW_GONE.with(|p| p.set(false));
+            PENDING_EVENTS.with(|p| p.set(0));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// SUBMIT on Login and Password runs in phases through window_proc. A
+    /// lock that arrives between the phases drops the flow before any key
+    /// derivation. An unlock that finds the vault and key files only as the
+    /// temp files of a cut-off save takes them back and says so; a wrong
+    /// password then gets the leftover-temp advice, not just a failure.
+    #[test]
+    fn phased_submit_and_temp_recovery() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("phased");
+        let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
+        let (pass, next) = ("synthetic phased password", "synthetic phased change");
+        drop(
+            Provision::new()
+                .unwrap()
+                .finish(&vault, &key, pass, None)
+                .unwrap(),
+        );
+        let vault_temp = dir.join(format!("vault.goyo.{:032x}.goyotmp", 0xabc));
+        let key_temp = dir.join(format!("vault.goyokey.{:032x}.goyotmp", 0xdef));
+        std::fs::rename(&vault, &vault_temp).unwrap();
+        std::fs::rename(&key, &key_temp).unwrap();
+        unsafe {
+            let name = wide("GoyoPhasedTest");
+            let instance = GetModuleHandleW(null());
+            let wc = WndClass {
+                style: 0,
+                proc: Some(window_proc),
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: 0,
+                cursor: 0,
+                background: 6,
+                menu: null(),
+                class: name.as_ptr(),
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let h = CreateWindowExW(
+                0,
+                name.as_ptr(),
+                wide("Synthetic phased test").as_ptr(),
+                0x00ca0000,
+                0,
+                0,
+                900,
+                800,
+                0,
+                0,
+                instance,
+                null_mut(),
+            );
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            WINDOW_GONE.with(|p| p.set(false));
+            let mut app = App::new(h);
+            app.vault_path = vault.clone();
+            app.key_path = key.clone();
+            // Only temp files are left, and still the vault opens from Login.
+            app.show(app.home());
+            assert!(app.screen == Screen::Login);
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            let type_in = |id: i32, text: &str| {
+                with_app(|a| SetWindowTextW(a.handle(id), wide(text).as_ptr()));
+            };
+            let submit = |id: i32| SendMessageW(h, 0x111, id as usize, 0);
+
+            // A wrong password: the key file's temp copy may need the
+            // factors of the change that left it.
+            type_in(PASS, "wrong synthetic password");
+            submit(SUBMIT);
+            with_app(|a| {
+                assert!(a.session.is_none() && a.failed == 1);
+                assert_eq!(*a.status, *LEFTOVER_TEMP);
+                a.retry = Instant::now();
+            });
+            assert!(vault_temp.exists() && key_temp.exists());
+
+            // A lock between the phases: no unlock, the password is wiped.
+            type_in(PASS, pass);
+            let derived = crypto::derive_count();
+            PENDING_EVENTS.with(|p| p.set(2));
+            submit(SUBMIT);
+            assert_eq!(crypto::derive_count(), derived);
+            with_app(|a| {
+                assert!(a.session.is_none() && a.screen == Screen::Login);
+                assert!(a.read(PASS).unwrap().is_empty());
+                assert_eq!(*a.status, *"화면 또는 시스템 세션 변경으로 잠갔습니다.");
+            });
+            assert!(vault_temp.exists() && key_temp.exists());
+
+            // Enter: both files come back under their names.
+            type_in(PASS, pass);
+            submit(1);
+            with_app(|a| {
+                assert!(a.session.is_some() && a.screen == Screen::Vault);
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(
+                    lines,
+                    [
+                        "금고 파일이 없어, 저장이 끊기며 남은 임시 파일에서 복구했습니다.",
+                        Placement::SameFolder.message()
+                    ]
+                );
+                assert_eq!(a.key_path, a.session.as_ref().unwrap().key_path);
+            });
+            assert!(vault.is_file() && key.is_file());
+            assert!(!vault_temp.exists() && !key_temp.exists());
+
+            // A password change runs through the phases as well.
+            with_app(|a| a.command(CHANGE, 0)).unwrap();
+            type_in(CURRENT_PASS, pass);
+            type_in(PASS, next);
+            type_in(CONFIRM, next);
+            submit(SUBMIT);
+            with_app(|a| {
+                assert!(a.screen == Screen::Vault && a.failed == 0);
+                assert!(a.status.starts_with("비밀번호 변경 완료."));
+            });
+            with_app(|a| a.lock("synthetic lock", true));
+            type_in(PASS, next);
+            submit(SUBMIT);
+            assert!(with_app(|a| a.session.is_some()));
+
+            // A save cut off by the replace gap locks, so that the next
+            // unlock takes the temp file back.
+            with_app(|a| a.error(GAP_KEPT));
+            with_app(|a| {
+                assert!(a.session.is_none() && a.screen == Screen::Login);
+                assert_eq!(*a.status, *GAP_KEPT);
+            });
+
+            // The vault file is gone and its only temp file does not open
+            // with this key: the right password gets the leftover-temp
+            // advice without a retry delay.
+            let mut torn = std::fs::read(&vault).unwrap();
+            *torn.last_mut().unwrap() ^= 1;
+            std::fs::rename(&vault, dir.join("moved.goyo")).unwrap();
+            std::fs::write(&vault_temp, &torn).unwrap();
+            type_in(PASS, next);
+            submit(SUBMIT);
+            with_app(|a| {
+                assert!(a.session.is_none() && a.failed == 0);
+                assert!(a.retry <= Instant::now());
+                assert_eq!(*a.status, *LEFTOVER_TEMP);
+            });
+            assert!(vault_temp.exists() && !vault.exists());
 
             APP.with(|cell| {
                 cell.borrow_mut().take();
