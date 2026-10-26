@@ -1,0 +1,336 @@
+{
+ "kdf_profiles": {
+  "test": {
+   "m": 64,
+   "t": 1,
+   "p": 1
+  },
+  "real": {
+   "m": 262144,
+   "t": 3,
+   "p": 1
+  }
+ },
+ "draw_order": [
+  "salt (32)",
+  "body nonce (24)",
+  "nonce (24) of every new pair record, in file order",
+  "nonce (24) of every S-wrap, in slot order"
+ ],
+ "hmac_output": "HMAC-SHA256(cred_random_uv if uv else cred_random_nouv, SHA-256(\"WebAuthn PRF\" 00 \"goyo-vault/v2/hmac-salt\" 00 vault_id seed))",
+ "fixtures": [
+  {
+   "file": "goyokh01.goyokey",
+   "magic": "GOYOKH01",
+   "kdf": "test",
+   "password": "goyo security-key fixture, KH",
+   "vault_id": "3132333435363738393a3b3c3d3e3f40",
+   "epoch": 6,
+   "kind": "remove",
+   "next": 4,
+   "pin": false,
+   "pw_id": "5152535455565758595a5b5c5d5e5f60",
+   "loss": 1767139200,
+   "written": 1767225602,
+   "resume": "7172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f90",
+   "tombstones": [
+    [
+     "621f4cfef41590581446d54d185a5e0b",
+     5757570648616468486
+    ],
+    [
+     "73d3940c43b7a1f9c8998ef2a1a8e4c5",
+     3
+    ]
+   ],
+   "keys": [
+    "a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0",
+    "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0"
+   ],
+   "otp": "9192939495969798999a9b9c9d9e9fa0a1a2a3a4",
+   "s": "3d3c3f3e39383b3a35343736313033322d2c2f2e29282b2a2524272621202322",
+   "authorizer": 1,
+   "present": [
+    0,
+    1
+   ],
+   "suspended": [],
+   "pairs": [
+    {
+     "owner": 0,
+     "target": 1,
+     "new": true,
+     "nonce": "55545756515053525d5c5f5e59585b5a4544474641404342"
+    },
+    {
+     "owner": 1,
+     "target": 0,
+     "new": true,
+     "nonce": "56575455525350515e5f5c5d5a5b58594647444542434041"
+    }
+   ],
+   "wrap_nonces": [
+    "57565554535251505f5e5d5c5b5a59584746454443424140",
+    "58595a5b5c5d5e5f505152535455565748494a4b4c4d4e4f"
+   ],
+   "slots": [
+    {
+     "number": 1,
+     "flags": 1,
+     "registered": 1759449600,
+     "added_epoch": 1,
+     "added_by": null,
+     "seed": "13121110171615141b1a19181f1e1d1c03020100070605040b0a09080f0e0d0c",
+     "cred_id": "02030405060708090a0b0c0d0e0f1011",
+     "cred_random_uv": "414043424544474649484b4a4d4c4f4e515053525554575659585b5a5d5c5f5e",
+     "cred_random_nouv": "42434041464744454a4b48494e4f4c4d52535051565754555a5b58595e5f5c5d",
+     "cred_protect": 1,
+     "uv": true,
+     "credhash": "9d3f33f61f7ae6fb19472b03024ae2a3",
+     "hmac_output": "dea4c552db128f0f7146ffae2b8fa371a03e5d7b7792a3c117836d6784e808df"
+    },
+    {
+     "number": 3,
+     "flags": 0,
+     "registered": 1764633600,
+     "added_epoch": 4,
+     "added_by": 0,
+     "seed": "17161514131211101f1e1d1c1b1a191807060504030201000f0e0d0c0b0a0908",
+     "cred_id": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+     "cred_random_uv": "43424140474645444b4a49484f4e4d4c53525150575655545b5a59585f5e5d5c",
+     "cred_random_nouv": "44454647404142434c4d4e4f48494a4b54555657505152535c5d5e5f58595a5b",
+     "cred_protect": 1,
+     "uv": false,
+     "credhash": "517ce072f57cfa223004691d098ece39",
+     "hmac_output": "12dec17a4a8d7581e45cd5ded1282f02763f64d5ec9f916cfe88e939545343a9"
+    }
+   ],
+   "ks_id": "da2d85ee1414d3373c32ea188910a2d7",
+   "draws": [
+    "59585b5a5d5c5f5e515053525554575649484b4a4d4c4f4e4140434245444746",
+    "5b5a59585f5e5d5c53525150575655544b4a49484f4e4d4c",
+    "55545756515053525d5c5f5e59585b5a4544474641404342",
+    "56575455525350515e5f5c5d5a5b58594647444542434041",
+    "57565554535251505f5e5d5c5b5a59584746454443424140",
+    "58595a5b5c5d5e5f505152535455565748494a4b4c4d4e4f"
+   ],
+   "size": 1108,
+   "h": 612,
+   "w": 824,
+   "b": 912,
+   "e": 1044,
+   "tag": "506757c8238d41012b6f1972c4ee7987",
+   "key_code": "7f9163db126f5fe9"
+  },
+  {
+   "file": "goyoks01.goyokey",
+   "magic": "GOYOKS01",
+   "kdf": "test",
+   "password": "goyo security-key fixture, KS",
+   "vault_id": "3a3b3c3d3e3f40414243444546474849",
+   "epoch": 9,
+   "kind": "pair",
+   "next": 7,
+   "pin": true,
+   "pw_id": "5a5b5c5d5e5f60616263646566676869",
+   "loss": 0,
+   "written": 1767225603,
+   "resume": "0000000000000000000000000000000000000000000000000000000000000000",
+   "tombstones": [
+    [
+     "bf65dd1233649ae3aa48ba0675197d08",
+     2
+    ],
+    [
+     "1297a4a84763aec5cf347c2512d153bc",
+     281474976710664
+    ],
+    [
+     "854e5862be75feb968453368e6c2ac7e",
+     5757570648616468488
+    ]
+   ],
+   "keys": [
+    "0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a",
+    "2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a",
+    "4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a"
+   ],
+   "otp": null,
+   "s": "6d6c6f6e69686b6a65646766616063627d7c7f7e79787b7a7574777671707372",
+   "authorizer": 0,
+   "present": [
+    0,
+    1
+   ],
+   "suspended": [
+    3
+   ],
+   "pairs": [
+    {
+     "owner": 0,
+     "target": 1,
+     "new": true,
+     "nonce": "717073727574777679787b7a7d7c7f7e6160636265646766"
+    },
+    {
+     "owner": 0,
+     "target": 2,
+     "new": false,
+     "nonce": "72737071767774757a7b78797e7f7c7d6263606166676465"
+    },
+    {
+     "owner": 1,
+     "target": 0,
+     "new": true,
+     "nonce": "73727170777675747b7a79787f7e7d7c6362616067666564"
+    },
+    {
+     "owner": 2,
+     "target": 0,
+     "new": false,
+     "nonce": "74757677707172737c7d7e7f78797a7b6465666760616263"
+    },
+    {
+     "owner": 3,
+     "target": 0,
+     "new": false,
+     "nonce": "75747776717073727d7c7f7e79787b7a6564676661606362"
+    }
+   ],
+   "wrap_nonces": [
+    "76777475727370717e7f7c7d7a7b78796667646562636061",
+    "77767574737271707f7e7d7c7b7a79786766656463626160",
+    "78797a7b7c7d7e7f707172737475767768696a6b6c6d6e6f"
+   ],
+   "slots": [
+    {
+     "number": 2,
+     "flags": 3,
+     "registered": 1756857600,
+     "added_epoch": 1,
+     "added_by": null,
+     "seed": "212023222524272629282b2a2d2c2f2e313033323534373639383b3a3d3c3f3e",
+     "cred_id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+     "cred_random_uv": "616063626564676669686b6a6d6c6f6e717073727574777679787b7a7d7c7f7e",
+     "cred_random_nouv": "62636061666764656a6b68696e6f6c6d72737071767774757a7b78797e7f7c7d",
+     "cred_protect": 3,
+     "uv": true,
+     "credhash": "8eb2f0671164bced4809b71a2bdc44ae",
+     "hmac_output": "735c818274527e708cba2740dc44fc253eca988d2ea106800a3ce4db61537a5a"
+    },
+    {
+     "number": 4,
+     "flags": 3,
+     "registered": 1758585600,
+     "added_epoch": 3,
+     "added_by": 0,
+     "seed": "22232021262724252a2b28292e2f2c2d32333031363734353a3b38393e3f3c3d",
+     "cred_id": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+     "cred_random_uv": "63626160676665646b6a69686f6e6d6c73727170777675747b7a79787f7e7d7c",
+     "cred_random_nouv": "64656667606162636c6d6e6f68696a6b74757677707172737c7d7e7f78797a7b",
+     "cred_protect": 3,
+     "uv": true,
+     "credhash": "ecf1b6955b99d77b6cc84d4f12c73ff4",
+     "hmac_output": "22eb63bda1bd094c250841a8b1b837dc5790969f9e67efe16931758239625382"
+    },
+    {
+     "number": 5,
+     "flags": 3,
+     "registered": 1762041600,
+     "added_epoch": 5,
+     "added_by": 0,
+     "seed": "23222120272625242b2a29282f2e2d2c33323130373635343b3a39383f3e3d3c",
+     "cred_id": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+     "cred_random_uv": "65646766616063626d6c6f6e69686b6a75747776717073727d7c7f7e79787b7a",
+     "cred_random_nouv": "66676465626360616e6f6c6d6a6b686976777475727370717e7f7c7d7a7b7879",
+     "cred_protect": 3,
+     "uv": true,
+     "credhash": "7428af90ae0fc4b3a8dcead1f9e60b2c",
+     "hmac_output": "e6faec6f1f6ede8311f66518dd4aea1c6b29e291b32f3ef98153da009970a24f"
+    },
+    {
+     "number": 6,
+     "flags": 3,
+     "registered": 1765497600,
+     "added_epoch": 7,
+     "added_by": 1,
+     "seed": "24252627202122232c2d2e2f28292a2b34353637303132333c3d3e3f38393a3b",
+     "cred_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+     "cred_random_uv": "67666564636261606f6e6d6c6b6a696877767574737271707f7e7d7c7b7a7978",
+     "cred_random_nouv": "68696a6b6c6d6e6f606162636465666778797a7b7c7d7e7f7071727374757677",
+     "cred_protect": 3,
+     "uv": true,
+     "credhash": "4c39e7b161d31d4627e44511fb09d8d4",
+     "hmac_output": "59cf899ec609f1353c6b8e5a503c5cb565daa1e03a628fa8a3e88de8b76d01e3"
+    }
+   ],
+   "ks_id": "e704532a4ebbb61f2fa381560dbd6a09",
+   "draws": [
+    "79787b7a7d7c7f7e717073727574777669686b6a6d6c6f6e6160636265646766",
+    "7b7a79787f7e7d7c73727170777675746b6a69686f6e6d6c",
+    "717073727574777679787b7a7d7c7f7e6160636265646766",
+    "73727170777675747b7a79787f7e7d7c6362616067666564",
+    "76777475727370717e7f7c7d7a7b78796667646562636061",
+    "77767574737271707f7e7d7c7b7a79786766656463626160",
+    "78797a7b7c7d7e7f707172737475767768696a6b6c6d6e6f"
+   ],
+   "size": 1906,
+   "h": 1260,
+   "w": 1578,
+   "b": 1666,
+   "e": 1810,
+   "tag": "4cc404ad040270f44a7cc6f227bafcde",
+   "key_code": "cd3f27d44e6cf236"
+  }
+ ],
+ "variants": [
+  {
+   "file": "goyokh01-truncated.goyokey",
+   "from": "goyokh01.goyokey",
+   "change": "the last byte cut off",
+   "size": 1107
+  },
+  {
+   "file": "goyokh01-appended.goyokey",
+   "from": "goyokh01.goyokey",
+   "change": "one zero byte appended",
+   "size": 1109
+  },
+  {
+   "file": "goyokh01-reserved.goyokey",
+   "from": "goyokh01.goyokey",
+   "change": "reserved byte 43 set to 1",
+   "size": 1108
+  },
+  {
+   "file": "goyoks01-truncated.goyokey",
+   "from": "goyoks01.goyokey",
+   "change": "the last byte cut off",
+   "size": 1905
+  },
+  {
+   "file": "goyoks01-appended.goyokey",
+   "from": "goyoks01.goyokey",
+   "change": "one zero byte appended",
+   "size": 1907
+  },
+  {
+   "file": "goyoks01-reserved.goyokey",
+   "from": "goyoks01.goyokey",
+   "change": "reserved byte 43 set to 1",
+   "size": 1906
+  },
+  {
+   "file": "goyokh02.goyokey",
+   "from": "goyokh01.goyokey",
+   "change": "the magic GOYOKH02",
+   "size": 1108
+  },
+  {
+   "file": "goyoks02.goyokey",
+   "from": "goyoks01.goyokey",
+   "change": "the magic GOYOKS02",
+   "size": 1906
+  }
+ ]
+}

@@ -5,8 +5,10 @@
 //! problem never fails an unlock or a save; it shows as a badge or a notice.
 //! No Korean text: the app turns `SyncNotice` and `SyncBadge` into its own.
 use super::{
-    Contents, DataRef, Entry, EntryId, Format, Session, atomic_write, decode_data, encode_data,
-    newer_format, plain_size,
+    Contents, DataRef, Entry, EntryId, Format, Header, KEYED_OVERHEAD, LEGACY_OVERHEAD, Session,
+    VAULT_DAMAGED, atomic_write, decode_data,
+    keyfile::{Bundle, KeyState},
+    newer_format, plain_size, read_header,
 };
 use crate::{
     merge::{self, MergeError, MergeReport},
@@ -51,7 +53,7 @@ pub enum SyncBadge {
     Offline,
     /// Something needs the user: a rollback, a bad or newer server copy, a
     /// merge over the limits (for the rest of the session), or a status of
-    /// refused, config or update.
+    /// refused, config, update, oldserver or keyfile.
     Warning,
 }
 
@@ -93,6 +95,12 @@ pub enum SyncNotice {
     HostKey,
     Auth,
     HelperError,
+    /// The server's script refused this vault's format (`oldserver`): it is
+    /// older than 0.9.0 and must be updated. Changes stay on this PC.
+    OldServer,
+    /// The server refused the upload because its key file for the vault
+    /// does not match this copy (`keyfile`): another PC changed the keys.
+    KeyBehind,
 }
 impl SyncNotice {
     /// Lower wins when one event has several.
@@ -105,7 +113,13 @@ impl SyncNotice {
             Self::MassDelete { .. } => 4,
             Self::Conflicts(_) => 5,
             Self::Merged { .. } => 6,
-            Self::HostKey | Self::Auth | Self::HelperError | Self::Offline | Self::HelperOff => 7,
+            Self::HostKey
+            | Self::Auth
+            | Self::HelperError
+            | Self::Offline
+            | Self::HelperOff
+            | Self::OldServer
+            | Self::KeyBehind => 7,
             Self::Synced { .. } => 8,
             Self::SyncOn => 9,
         }
@@ -120,6 +134,8 @@ impl SyncNotice {
                 | Self::Auth
                 | Self::HelperError
                 | Self::NewerFormat
+                | Self::OldServer
+                | Self::KeyBehind
         )
     }
 }
@@ -236,7 +252,12 @@ impl SyncLink {
     fn badge(&self, now: u64) -> SyncBadge {
         use SyncState as S;
         let state = self.status.and_then(|s| s.state);
-        if self.warned || matches!(state, Some(S::Refused | S::Config | S::Update)) {
+        if self.warned
+            || matches!(
+                state,
+                Some(S::Refused | S::Config | S::Update | S::OldServer | S::KeyFile)
+            )
+        {
             SyncBadge::Warning
         } else if self.helper_off(now) {
             SyncBadge::HelperOff
@@ -265,6 +286,8 @@ impl SyncLink {
         match self.status.and_then(|s| s.state) {
             Some(S::Update) => return Some(SyncNotice::NewerFormat),
             Some(S::Refused | S::Config) => return Some(SyncNotice::HelperError),
+            Some(S::OldServer) => return Some(SyncNotice::OldServer),
+            Some(S::KeyFile) => return Some(SyncNotice::KeyBehind),
             _ if self.helper_off(now) => return Some(SyncNotice::HelperOff),
             _ => {}
         }
@@ -293,8 +316,9 @@ impl SyncLink {
             _ => {}
         }
     }
-    /// Reads and judges incoming as of `stamp` against `local`.
-    fn fetch(&self, stamp: Stamp, id: &[u8; 16], key: &[u8; 32], local: DataRef) -> Fetched {
+    /// Reads and judges incoming as of `stamp` against `local`, a state of
+    /// `own`.
+    fn fetch(&self, stamp: Stamp, own: Own, local: DataRef) -> Fetched {
         let Ok(now) = otp::now() else {
             return Fetched::Retry;
         };
@@ -318,16 +342,45 @@ impl SyncLink {
         if newer_format(blob) {
             return got(version, Verdict::Newer);
         }
-        if blob[8..24] != id[..] {
+        let header = match read_header(blob) {
+            Ok((_, header)) => Some(header),
+            Err(e) if e == VAULT_DAMAGED => return got(version, Verdict::Damaged),
+            // Decryption refuses it below, as in 0.8.
+            Err(_) => None,
+        };
+        if blob[8..24] != own.id[..] {
             return got(version, Verdict::Foreign);
         }
+        // Stage 2's interim rule (spec §7.1, until the verdicts by key class
+        // arrive): only a copy under this session's current key is decoded.
+        // A GOYOVA03/04 copy also needs this key file's state or a lower
+        // epoch. Every other copy, and in a KF2 session every GOYOVA01/02
+        // copy (sealed with the ID key, an older key there), halts as a
+        // newer format would: it is never merged, and never pushed over as
+        // unreadable, because it may come from a key change this PC has not
+        // got yet.
+        match (own.kf2, header) {
+            (None, Some(Header::Legacy) | None) | (Some(_), None) => {}
+            (
+                Some((current, state)),
+                Some(Header::Keyed {
+                    key_id,
+                    state: theirs,
+                    ..
+                }),
+            ) if key_id == current && (theirs == state || theirs.epoch < state.epoch) => {}
+            _ => return got(version, Verdict::Newer),
+        }
         // A v1 file was never on a server: someone put it there.
-        let verdict = match decode_data(id, key, blob) {
-            Ok((Format::V2, remote)) => match merge::merge(key, local, remote, now / 30) {
-                Ok((merged, report)) => Verdict::Merged(merged, report),
-                Err(MergeError::TooLarge) => Verdict::TooLarge,
-            },
-            Ok((Format::V1, _)) | Err(_) => Verdict::Unreadable,
+        let keys = own.keys;
+        let verdict = match decode_data(own.id, keys.current(), keys.id_key(), blob) {
+            Ok((Format::V2, _, remote)) => {
+                match merge::merge(keys.id_key(), local, remote, now / 30, own.overhead()) {
+                    Ok((merged, report)) => Verdict::Merged(merged, report),
+                    Err(MergeError::TooLarge) => Verdict::TooLarge,
+                }
+            }
+            Ok((Format::V1, ..)) | Err(_) => Verdict::Unreadable,
         };
         got(version, verdict)
     }
@@ -356,7 +409,8 @@ struct Arrival {
     verdict: Verdict,
 }
 enum Verdict {
-    /// GOYOVA03 or later: sync stops for this session.
+    /// GOYOVA05 or later, or a copy stage 2's interim rule does not decode
+    /// (see fetch): sync stops for this session.
     Newer,
     /// No valid wrapper: ignored. Its version means nothing, so no repair
     /// is pushed over it.
@@ -370,6 +424,26 @@ enum Verdict {
     /// The merge would exceed a limit: nothing changes.
     TooLarge,
     Merged(Contents, MergeReport),
+}
+
+/// What incoming copies are judged against: the vault ID, the session's
+/// keys and, for a KF2 key file, its current key ID and state.
+#[derive(Clone, Copy)]
+pub(super) struct Own<'a> {
+    pub id: &'a [u8; 16],
+    pub keys: &'a Bundle,
+    /// None for a 0.8 key file.
+    pub kf2: Option<([u8; 16], KeyState)>,
+}
+impl Own<'_> {
+    /// What a vault file of this session adds to its plaintext.
+    fn overhead(&self) -> usize {
+        if self.kf2.is_some() {
+            KEYED_OVERHEAD
+        } else {
+            LEGACY_OVERHEAD
+        }
+    }
 }
 
 /// What `Session::load` found in the sync folder before the OTP check.
@@ -386,8 +460,7 @@ impl Pending {
         vault: &Path,
         key_path: &Path,
         format: Format,
-        id: &[u8; 16],
-        key: &[u8; 32],
+        own: Own,
         local: DataRef,
     ) -> Self {
         let mut pending = Self {
@@ -406,7 +479,7 @@ impl Pending {
             Attach::Linked(link) => {
                 pending.fetched = Some(match syncfile::stamp(&link.dir, INCOMING) {
                     None => Fetched::Missing,
-                    Some(stamp) => link.fetch(stamp, id, key, local),
+                    Some(stamp) => link.fetch(stamp, own, local),
                 });
                 pending.link = Some(link);
             }
@@ -454,12 +527,27 @@ impl Session {
     /// Code over the live entries, text included, and the tombstones,
     /// `XXXX-XXXX-XXXX-XXXX`: equal on two PCs means equal contents.
     pub fn check_code(&self) -> String {
-        merge::check_code(&self.key, &self.entries, &self.tombstones)
+        merge::check_code(self.keys.id_key(), &self.entries, &self.tombstones)
+    }
+    /// What incoming copies are judged against.
+    fn own(&self) -> Own<'_> {
+        Own {
+            id: &self.id,
+            keys: &self.keys,
+            kf2: self
+                .key_file
+                .header()
+                .map(|h| (h.current_key_id(), self.key_state)),
+        }
     }
     /// Call every 2 s while the vault list is shown and no dialog is open: it
     /// merges a new server copy (changing `entries`), retries the upload and
     /// reads the helper's status. None when there is nothing to show.
     pub fn poll_sync(&mut self) -> Option<SyncEvent> {
+        // The unlock could not save the vault file under the current key.
+        if self.resave_due {
+            let _ = self.save();
+        }
         let mut notice = None;
         if let Some(refused) = self.connect() {
             offer(&mut notice, refused);
@@ -497,7 +585,7 @@ impl Session {
                 (link.verified, link.outgoing_due) = (false, true);
             }
             if let Some(stamp) = stamp.filter(|s| link.in_stamp != Some(*s))
-                && let Fetched::Got(arrival) = link.fetch(stamp, &self.id, &self.key, self.data())
+                && let Fetched::Got(arrival) = link.fetch(stamp, self.own(), self.data())
             {
                 match self.take(link, arrival, notice) {
                     Ok(taken) => list_changed = taken.list_changed,
@@ -577,10 +665,7 @@ impl Session {
                 let mass = lost > 0 && (since >= 5 || (since >= 2 && since * 5 >= len));
                 // This merge starts a run of losses: the state before it.
                 let start = if lost > 0 && link.losses.is_none() {
-                    Some(
-                        encode_data(&self.id, &self.key, Format::V2, self.data())
-                            .map_err(|_| ())?,
-                    )
+                    Some(self.encode_as(Format::V2, self.data()).map_err(|_| ())?)
                 } else {
                     None
                 };
@@ -600,8 +685,7 @@ impl Session {
                 // The OTP watermark of this session may be newer (unlock).
                 merged.last = merged.last.max(self.last);
                 if report.changed {
-                    let bytes = encode_data(&self.id, &self.key, Format::V2, merged.view())
-                        .map_err(|_| ())?;
+                    let bytes = self.encode_as(Format::V2, merged.view()).map_err(|_| ())?;
                     self.write(&bytes).map_err(|_| ())?;
                     taken.wrote = true;
                 }
@@ -685,7 +769,7 @@ impl Session {
             (link.outgoing_due, link.busy_skip) = (false, 0);
             return;
         }
-        let Ok(blob) = encode_data(&self.id, &self.key, Format::V2, self.data()) else {
+        let Ok(blob) = self.encode_as(Format::V2, self.data()) else {
             return;
         };
         match write_outgoing(&link.dir, link.merged_version, &blob, &self.id) {
@@ -694,7 +778,8 @@ impl Session {
         }
     }
     /// Whether outgoing already holds this state, made from the same server
-    /// version: the same entries, IDs and text, and the same tombstones. The
+    /// version under the same header (magic, key ID, key-file state and
+    /// flags): the same entries, IDs and text, and the same tombstones. The
     /// OTP watermark and the counters do not count, as they are never
     /// uploaded alone. Any doubt (missing, busy, unreadable, another size)
     /// means no.
@@ -706,13 +791,19 @@ impl Session {
         let Some((base, blob)) = syncfile::parse_outgoing(&bytes) else {
             return false;
         };
-        let size = plain_size(Format::V2, &self.entries, self.tombstones.len()) + 64;
+        let header = self.header();
+        let size = plain_size(Format::V2, &self.entries, self.tombstones.len()) + header.overhead();
         if base != link.merged_version || blob.len() != size {
             return false;
         }
-        let Ok((Format::V2, held)) = decode_data(&self.id, &self.key, blob) else {
+        let Ok((Format::V2, held_header, held)) =
+            decode_data(&self.id, self.keys.current(), self.keys.id_key(), blob)
+        else {
             return false;
         };
+        if held_header != header {
+            return false;
+        }
         let dead = |t: &[EntryId]| t.iter().copied().collect::<BTreeSet<_>>();
         held.entries.len() == self.entries.len()
             && lost(&self.entries, &held.entries) == 0
@@ -808,9 +899,10 @@ impl Session {
 }
 
 /// Gate 1 of three that keep the key file off the server: only a GOYOVA02
-/// file of this vault, fresh from `encode_data`, is offered for upload.
+/// or GOYOVA04 file of this vault, fresh from `encode_data`, is offered for
+/// upload.
 fn write_outgoing(dir: &Path, base: u64, blob: &[u8], id: &[u8; 16]) -> Result<(), FileError> {
-    if !blob.starts_with(syncfile::VAULT_MAGIC) || blob.get(8..24) != Some(&id[..]) {
+    if !syncfile::is_sync_vault(blob) || blob.get(8..24) != Some(&id[..]) {
         return Err(FileError::Io);
     }
     let bytes = syncfile::render_outgoing(base, blob).ok_or(FileError::Io)?;
@@ -880,7 +972,10 @@ mod tests {
     use crate::{
         crypto::{self, AUTH_ERROR},
         syncwire::sha256,
-        vault::{NO_ID, Provision, derived_id, encode_key},
+        vault::{
+            GAP_KEPT, NO_ID, Provision, derived_id, encode_data, encode_key,
+            keyfile::{Kind, Plan, Spec, key_id, parse, seal},
+        },
     };
     use std::{
         collections::BTreeSet,
@@ -1013,7 +1108,9 @@ mod tests {
         s.entries.iter().position(|e| *e.title == title).unwrap()
     }
     fn open(s: &Session, blob: &[u8]) -> Contents {
-        decode_data(&s.id, &s.key, blob).unwrap().1
+        decode_data(&s.id, s.keys.current(), s.keys.id_key(), blob)
+            .unwrap()
+            .2
     }
     fn saved(s: &Session) -> Contents {
         open(s, &fs::read(&s.path).unwrap())
@@ -1213,7 +1310,7 @@ mod tests {
                 entries,
                 tombstones: &[],
             };
-            encode_data(&p.id, &p.key, Format::V2, d).unwrap()
+            encode_data(&p.id, &p.key, &Header::Legacy, Format::V2, d).unwrap()
         };
         // Together 1001 entries: one more than a vault holds.
         let vault = encode(&made(1, 501));
@@ -1268,7 +1365,7 @@ mod tests {
             entries: std::slice::from_ref(&first),
             tombstones: &[],
         };
-        let vault = encode_data(&p.id, &p.key, Format::V2, d).unwrap();
+        let vault = encode_data(&p.id, &p.key, &Header::Legacy, Format::V2, d).unwrap();
         for pc in [&a, &b] {
             fs::write(pc.key(), &key).unwrap();
             fs::write(pc.vault(), &vault).unwrap();
@@ -1352,7 +1449,8 @@ mod tests {
             entries: &[],
             tombstones: &[],
         };
-        let foreign = encode_data(&other.id, &other.key, Format::V2, empty).unwrap();
+        let foreign =
+            encode_data(&other.id, &other.key, &Header::Legacy, Format::V2, empty).unwrap();
         a.incoming(4, &foreign);
         let mut s = a.unlock();
         assert_eq!(s.take_unlock_notice(), Some(SyncNotice::ForeignIncoming));
@@ -1379,7 +1477,7 @@ mod tests {
         // A newer format stops sync for the session: no upload, even after
         // an edit, while the vault still opens and saves.
         let mut newer = good.clone();
-        newer[..8].copy_from_slice(b"GOYOVA03");
+        newer[..8].copy_from_slice(b"GOYOVA05");
         a.incoming(8, &newer);
         let mut s = a.unlock();
         assert_eq!(s.take_unlock_notice(), Some(SyncNotice::NewerFormat));
@@ -1610,7 +1708,7 @@ mod tests {
         assert_eq!(ev.notice, Some(SyncNotice::BadIncoming));
         assert_eq!(link(&sa).merged_version, 5);
         // An authentic v1 file was never uploaded by a PC: repaired too.
-        let v1 = encode_data(&sa.id, &sa.key, Format::V1, sa.data()).unwrap();
+        let v1 = sa.encode_as(Format::V1, sa.data()).unwrap();
         a.incoming(6, &v1);
         let ev = sa.poll_sync().unwrap();
         assert_eq!(ev.notice, Some(SyncNotice::BadIncoming));
@@ -1618,7 +1716,7 @@ mod tests {
         assert_eq!(titles(&sa), kept);
         // A newer format halts sync for the session.
         let mut newer = server.versions[1].clone();
-        newer[..8].copy_from_slice(b"GOYOVA03");
+        newer[..8].copy_from_slice(b"GOYOVA05");
         a.incoming(7, &newer);
         let ev = sa.poll_sync().unwrap();
         assert_eq!(ev.notice, Some(SyncNotice::NewerFormat));
@@ -1672,6 +1770,20 @@ mod tests {
                 SyncState::Update,
                 SyncBadge::Warning,
                 Some(SyncNotice::NewerFormat),
+            ),
+            (SyncState::Ok, SyncBadge::Synced, None),
+            // A server script older than 0.9.0, and a server key file this
+            // copy does not match: Warning, with their own notice (spec §7.6).
+            (
+                SyncState::OldServer,
+                SyncBadge::Warning,
+                Some(SyncNotice::OldServer),
+            ),
+            (SyncState::OldServer, SyncBadge::Warning, None),
+            (
+                SyncState::KeyFile,
+                SyncBadge::Warning,
+                Some(SyncNotice::KeyBehind),
             ),
             (SyncState::Ok, SyncBadge::Synced, None),
         ];
@@ -1741,7 +1853,7 @@ mod tests {
         s.put(None, entry("mail", "two")).unwrap();
         assert_eq!(s.poll_sync(), None);
         assert!(s.sync.is_none() && s.badge().is_none() && a.outgoing().is_none());
-        let (_, v1) = decode_data(&p.id, &p.key, &fs::read(a.vault()).unwrap()).unwrap();
+        let (_, _, v1) = decode_data(&p.id, &p.key, &p.key, &fs::read(a.vault()).unwrap()).unwrap();
         // A failed save leaves it v1, unlinked, with nothing to upload.
         let actual = s.path.clone();
         s.path = a.0.join("missing").join("vault.goyo");
@@ -1759,7 +1871,7 @@ mod tests {
         // from no version, and equals the vault file.
         let (base, blob) = a.outgoing().unwrap();
         assert_eq!(base, 0);
-        let (format, up) = decode_data(&p.id, &p.key, &blob).unwrap();
+        let (format, _, up) = decode_data(&p.id, &p.key, &p.key, &blob).unwrap();
         assert_eq!(format, Format::V2);
         assert_eq!(up.generation, 1);
         let ids: Vec<EntryId> = up.entries.iter().map(Entry::id).collect();
@@ -1798,13 +1910,13 @@ mod tests {
             let mut forged = open(&sa, &server.versions[0]);
             for e in &mut forged.entries {
                 if drop_moved {
-                    let id2 = derived_id(&sa.key, b"goyo dup\0", &e.id, e.fields());
+                    let id2 = derived_id(sa.keys.id_key(), b"goyo dup\0", &e.id, e.fields());
                     forged.tombstones.push(id2);
                 }
                 *e.secret = "a".into(); // sorts before "secret"
             }
             forged.generation += 1;
-            let blob = encode_data(&sa.id, &sa.key, Format::V2, forged.view()).unwrap();
+            let blob = sa.encode_as(Format::V2, forged.view()).unwrap();
             server.versions.push(blob);
 
             server.pass(&a);
@@ -1974,5 +2086,237 @@ mod tests {
         sa.poll_sync();
         assert_eq!(sa.badge(), Some(SyncBadge::Synced));
         assert!(a.outgoing().is_none());
+    }
+
+    /// Stage 2's interim rule (spec §7.1, §14.6-23). A session whose key file
+    /// a later build made KF2 decodes only copies under its current key, at
+    /// its own state or a lower epoch. A copy under a key it does not hold,
+    /// a newer or forked state, and every GOYOVA01/02 copy (under the ID
+    /// key, an older key there) stop sync for the session like a newer
+    /// format: none is merged, and none is taken as unreadable and pushed
+    /// over. A 0.8 session stops the same way at a GOYOVA03/04 copy, and a
+    /// GOYOVA03/04 header outside the grammar is damaged, never repaired.
+    #[test]
+    fn stage_2_merges_only_copies_under_the_current_key() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let a = t.pc("a");
+        let (id, dk1, dk0) = ([0x52; 16], [0x81; 32], [0x80; 32]);
+        let spec = Spec {
+            vault_id: id,
+            epoch: 3,
+            kind: Kind::Password,
+            next: 1,
+            pw_id: [7; 16],
+            loss: 0,
+            tombstones: Vec::new(),
+            resume: [0; 32],
+        };
+        let bundle = Bundle::new(&[dk1, dk0], None).unwrap();
+        let (key, _) = seal(&spec, &bundle, PASS, Plan::PasswordOnly).unwrap();
+        let own = parse(&key).unwrap().state();
+        fs::write(a.key(), &key).unwrap();
+        let mut es = vec![entry("mine", "secret"), entry("theirs", "x")];
+        es[0].set_ids([1; 16], NO_ID);
+        es[1].set_ids([2; 16], NO_ID);
+        let copy = |dk: &[u8; 32], header: Header, n: usize| {
+            let d = DataRef {
+                last: 0,
+                generation: n as u64,
+                seen: 0,
+                entries: &es[..n],
+                tombstones: &[],
+            };
+            encode_data(&id, dk, &header, Format::V2, d).unwrap()
+        };
+        let keyed = |dk: &[u8; 32], state: KeyState| Header::Keyed {
+            key_id: key_id(&id, dk),
+            state,
+            flags: 0,
+        };
+        fs::write(a.vault(), copy(&dk1, keyed(&dk1, own), 1)).unwrap();
+        a.helper();
+        // Each of these halts at the unlock that finds it.
+        let other_tag = KeyState {
+            epoch: own.epoch,
+            tag: [9; 16],
+        };
+        let newer = KeyState {
+            epoch: own.epoch + 1,
+            tag: own.tag,
+        };
+        let mut damaged = copy(&dk1, keyed(&dk1, own), 2);
+        damaged[40..48].copy_from_slice(&0u64.to_le_bytes());
+        for (version, blob, notice) in [
+            (
+                1,
+                copy(&[0x8f; 32], keyed(&[0x8f; 32], own), 2),
+                SyncNotice::NewerFormat,
+            ),
+            (
+                2,
+                copy(&dk1, keyed(&dk1, newer), 2),
+                SyncNotice::NewerFormat,
+            ),
+            (
+                3,
+                copy(&dk1, keyed(&dk1, other_tag), 2),
+                SyncNotice::NewerFormat,
+            ),
+            (4, copy(&dk0, keyed(&dk0, own), 2), SyncNotice::NewerFormat),
+            (5, copy(&dk0, Header::Legacy, 2), SyncNotice::NewerFormat),
+            (6, damaged, SyncNotice::BadIncoming),
+        ] {
+            a.incoming(version, &blob);
+            let mut s = a.unlock();
+            let halts = notice == SyncNotice::NewerFormat;
+            assert_eq!(s.take_unlock_notice(), Some(notice), "{version}");
+            assert_eq!(titles(&s), ["mine=secret"], "{version}");
+            let l = link(&s);
+            assert_eq!(l.halted, halts, "{version}");
+            assert!(l.merged_version == 0 && !l.outgoing_due && !l.verified);
+            assert_eq!(saved(&s).entries.len(), 1);
+        }
+        // Under the current key at this state, or at a lower epoch: merged.
+        let lower = KeyState {
+            epoch: own.epoch - 1,
+            tag: [1; 16],
+        };
+        for (version, state) in [(7, own), (8, lower)] {
+            a.incoming(version, &copy(&dk1, keyed(&dk1, state), 2));
+            let mut s = a.unlock();
+            assert!(s.take_unlock_notice().is_some());
+            assert_eq!(titles(&s), ["mine=secret", "theirs=x"]);
+            assert_eq!(link(&s).merged_version, version);
+            assert!(!link(&s).halted);
+            // Saved under the current key with this key file's state.
+            let saved = fs::read(a.vault()).unwrap();
+            assert_eq!(read_header(&saved).unwrap(), (Format::V2, keyed(&dk1, own)));
+            drop(s);
+            fs::write(a.vault(), copy(&dk1, keyed(&dk1, own), 1)).unwrap();
+        }
+        // A 0.8 session halts at any GOYOVA03/04 copy of its vault.
+        let b = t.pc("b");
+        let p = Provision::new().unwrap();
+        let mut sb = p.finish(&b.vault(), &b.key(), PASS, None).unwrap();
+        sb.put(None, entry("mine", "secret")).unwrap();
+        sb.enable_sync().unwrap();
+        drop(sb);
+        b.helper();
+        let header = Header::Keyed {
+            key_id: key_id(&p.id, &p.key),
+            state: own,
+            flags: 0,
+        };
+        let d = DataRef {
+            last: 0,
+            generation: 5,
+            seen: 0,
+            entries: &es,
+            tombstones: &[],
+        };
+        b.incoming(
+            1,
+            &encode_data(&p.id, &p.key, &header, Format::V2, d).unwrap(),
+        );
+        let mut sb = b.unlock();
+        assert_eq!(sb.take_unlock_notice(), Some(SyncNotice::NewerFormat));
+        assert!(link(&sb).halted && link(&sb).merged_version == 0);
+        assert_eq!(titles(&sb), ["mine=secret"]);
+    }
+    /// Two PCs on one KF2 key file (one a later build wrote) sync as two on a
+    /// 0.8 key file do, with GOYOVA04 copies under the current key that carry
+    /// the key file's state: gate 1 offers them, the other PC merges them,
+    /// and an unchanged state is not offered again (spec §4.4, §7.6, I-S3).
+    #[test]
+    fn kf2_sessions_sync_goyova04_copies() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let mut server = Server::default();
+        let (a, b) = (t.pc("a"), t.pc("b"));
+        let (id, dk1, dk0) = ([0x53; 16], [0x91; 32], [0x90; 32]);
+        let spec = Spec {
+            vault_id: id,
+            epoch: 2,
+            kind: Kind::Password,
+            next: 1,
+            pw_id: [8; 16],
+            loss: 0,
+            tombstones: Vec::new(),
+            resume: [0; 32],
+        };
+        let bundle = Bundle::new(&[dk1, dk0], None).unwrap();
+        let (key, _) = seal(&spec, &bundle, PASS, Plan::PasswordOnly).unwrap();
+        let header = Header::Keyed {
+            key_id: key_id(&id, &dk1),
+            state: parse(&key).unwrap().state(),
+            flags: 0,
+        };
+        let d = DataRef {
+            last: 0,
+            generation: 0,
+            seen: 0,
+            entries: &[],
+            tombstones: &[],
+        };
+        let vault = encode_data(&id, &dk1, &header, Format::V2, d).unwrap();
+        for pc in [&a, &b] {
+            fs::write(pc.key(), &key).unwrap();
+            fs::write(pc.vault(), &vault).unwrap();
+            pc.helper();
+        }
+        let mut sa = a.unlock();
+        sa.put(None, entry("from a", "secret")).unwrap();
+        let (base, blob) = a.outgoing().unwrap();
+        assert_eq!(
+            (base, read_header(&blob).unwrap()),
+            (0, (Format::V2, header))
+        );
+        assert_eq!(&blob[..8], b"GOYOVA04");
+        server.pass(&a);
+        server.pass(&b);
+        let mut sb = b.unlock();
+        assert_eq!(titles(&sb), ["from a=secret"]);
+        assert_eq!(link(&sb).merged_version, 1);
+        sb.put(None, entry("from b", "x")).unwrap();
+        server.pass(&b);
+        server.pass(&a);
+        sa.poll_sync();
+        assert_eq!(titles(&sa), ["from a=secret", "from b=x"]);
+        assert_eq!(titles(&sa), titles(&sb));
+        assert_eq!(sa.check_code(), sb.check_code());
+        // A merge that changed nothing here offers nothing new.
+        let before = a.outgoing();
+        server.pass(&a);
+        sa.poll_sync();
+        assert_eq!(a.outgoing(), before);
+        for v in &server.versions {
+            assert_eq!(read_header(v).unwrap(), (Format::V2, header));
+        }
+        assert_eq!(server.head(), 2);
+    }
+    /// A merge saved by a poll that hits the replace gap: the session writes
+    /// the vault file no more, so the app locks and the next unlock takes
+    /// the merge back from the temp file (spec §5.7).
+    #[test]
+    fn a_poll_whose_save_hits_the_gap_writes_no_more() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let mut server = Server::default();
+        let (a, mut sa, b, mut sb) = pair(&t, &mut server, 1);
+        sa.put(None, entry("from a", "secret")).unwrap();
+        server.pass(&a);
+        server.pass(&b);
+        crate::vault::CRASH.with(|c| c.set(Some("gap")));
+        sb.poll_sync();
+        assert!(sb.gap_kept());
+        assert!(!b.vault().exists());
+        // Nothing reaches the vault file or the server from this session.
+        assert_eq!(sb.put(None, entry("lost", "x")), Err(GAP_KEPT));
+        sb.poll_sync();
+        assert!(b.outgoing().is_none() && !b.vault().exists());
+        drop(sb);
+        let sb = b.unlock();
+        assert_eq!(titles(&sb), titles(&sa));
     }
 }

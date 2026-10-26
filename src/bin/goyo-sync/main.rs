@@ -216,6 +216,8 @@ fn state_message(state: SyncState) -> Msg {
         SyncState::NoSsh => Msg::StateNoSsh,
         SyncState::Refused => Msg::StateRefused,
         SyncState::Update => Msg::StateUpdate,
+        SyncState::OldServer => Msg::StateOldServer,
+        SyncState::KeyFile => Msg::StateKeyFile,
         SyncState::Config => Msg::PassUnusable,
         SyncState::Ok | SyncState::Idle | SyncState::Server => Msg::StateServer,
     }
@@ -463,8 +465,8 @@ fn list(dir: &Path, log: &Log) -> i32 {
 }
 
 /// `--fetch <id> <head|N> <new file>`: one server version, checked (frame
-/// SHA, GOYOVA02, this vault's ID) and written to a new file, never over an
-/// existing one. The app's Restore screen opens it.
+/// SHA, GOYOVA02/04, this vault's ID) and written to a new file, never over
+/// an existing one. The app's Restore screen opens it.
 fn fetch(dir: &Path, log: &Log, id: &OsStr, version: &OsStr, out: &OsStr) -> i32 {
     let id = id
         .to_str()
@@ -550,7 +552,7 @@ enum Fetched {
     /// The new file could not be created or written (it may exist now).
     Write,
 }
-/// One server version, checked (frame SHA, GOYOVA02, this vault's ID) and
+/// One server version, checked (frame SHA, GOYOVA02/04, this vault's ID) and
 /// written to a new file, never over an existing one (`--fetch` and the
 /// settings window). A file it could not finish is removed again, so
 /// Restore never offers a cut-off copy.

@@ -35,9 +35,11 @@ pub const HELPER_TEMPS: [&str; 3] = ["incoming.goyosync.", "status.", "helper.st
 
 pub const OUTGOING_MAGIC: &[u8; 8] = b"GOYOSOU1";
 pub const INCOMING_MAGIC: &[u8; 8] = b"GOYOSIN1";
-/// The only vault format that is synced.
-pub const VAULT_MAGIC: &[u8; 8] = b"GOYOVA02";
-/// Smallest GOYOVA02 file: 48-byte header, 32-byte empty plaintext, tag.
+/// The vault formats that are synced, each with its smallest file: GOYOVA02
+/// (48-byte header, 32-byte empty plaintext, tag) and GOYOVA04, the same
+/// contents under a KF2 key file (92-byte header).
+pub const SYNC_MAGICS: [(&[u8; 8], usize); 2] = [(b"GOYOVA02", 96), (b"GOYOVA04", 140)];
+/// The smallest synced vault file of any format: the wrappers' lower bound.
 pub const MIN_VAULT: usize = 96;
 /// Magic and one u64 in front of the vault file.
 pub const WRAP_HEADER: usize = 16;
@@ -287,20 +289,26 @@ pub fn remove_own_temps(dir: &Path, prefixes: &[&str]) -> usize {
     removed
 }
 
-/// `GOYOVA` and two digits from `03` up: written by a newer Goyo Vault. The
+/// `GOYOVA` and two digits from `05` up: written by a newer Goyo Vault. The
 /// magic is public, so telling it apart reveals nothing.
 pub fn newer_vault_format(bytes: &[u8]) -> bool {
     match bytes.get(..8) {
         Some([b'G', b'O', b'Y', b'O', b'V', b'A', a, b])
             if a.is_ascii_digit() && b.is_ascii_digit() =>
         {
-            (a - b'0') * 10 + (b - b'0') >= 3
+            (a - b'0') * 10 + (b - b'0') >= 5
         }
         _ => false,
     }
 }
-fn synced_vault(vault: &[u8]) -> bool {
-    (MIN_VAULT..=MAX_FILE).contains(&vault.len()) && vault.starts_with(VAULT_MAGIC)
+/// A vault file that may be synced: GOYOVA02 or GOYOVA04, from the smallest
+/// file of its format up to MAX_FILE. GOYOVA01/03 (sync off), a newer format
+/// and every key file (GOYOK…) are not.
+pub fn is_sync_vault(vault: &[u8]) -> bool {
+    vault.len() <= MAX_FILE
+        && SYNC_MAGICS
+            .iter()
+            .any(|(magic, min)| vault.len() >= *min && vault.starts_with(*magic))
 }
 fn wrap(magic: &[u8; 8], number: u64, vault: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(WRAP_HEADER + vault.len());
@@ -317,18 +325,18 @@ fn unwrapped<'a>(magic: &[u8; 8], bytes: &'a [u8]) -> Option<(u64, &'a [u8])> {
     Some((number, &bytes[WRAP_HEADER..]))
 }
 /// `GOYOSOU1 · base · vault`: an upload made from server version `base`
-/// (0 = none merged yet). Only a GOYOVA02 file can be wrapped, so a key file
-/// (GOYOKE, 128 or 148 bytes) never can.
+/// (0 = none merged yet). Only a GOYOVA02 or GOYOVA04 file can be wrapped,
+/// so a key file (GOYOK…) never can.
 pub fn render_outgoing(base: u64, vault: &[u8]) -> Option<Vec<u8>> {
-    synced_vault(vault).then(|| wrap(OUTGOING_MAGIC, base, vault))
+    is_sync_vault(vault).then(|| wrap(OUTGOING_MAGIC, base, vault))
 }
 /// `(base, vault)`. The helper also checks the vault ID it pinned.
 pub fn parse_outgoing(bytes: &[u8]) -> Option<(u64, &[u8])> {
-    unwrapped(OUTGOING_MAGIC, bytes).filter(|(_, vault)| vault.starts_with(VAULT_MAGIC))
+    unwrapped(OUTGOING_MAGIC, bytes).filter(|(_, vault)| is_sync_vault(vault))
 }
 /// `GOYOSIN1 · version · vault`: the exact server bytes of `version` (≥ 1).
 pub fn render_incoming(version: u64, vault: &[u8]) -> Option<Vec<u8>> {
-    (version >= 1 && synced_vault(vault)).then(|| wrap(INCOMING_MAGIC, version, vault))
+    (version >= 1 && is_sync_vault(vault)).then(|| wrap(INCOMING_MAGIC, version, vault))
 }
 /// `(version, vault)`. The inner magic is left to the reader: the app must
 /// see a newer GOYOVA0x to stop syncing, and decryption refuses the rest.
@@ -350,9 +358,15 @@ pub enum SyncState {
     Refused,
     Config,
     Update,
+    /// The server refused a GOYOVA04 upload as a bad blob: its script is
+    /// older than 0.9.0. The upload is tried again, never given up.
+    OldServer,
+    /// The server refused an upload because its key file for the vault has
+    /// another state than the upload's header (key-file sync).
+    KeyFile,
 }
 impl SyncState {
-    pub const ALL: [SyncState; 10] = [
+    pub const ALL: [SyncState; 12] = [
         Self::Ok,
         Self::Idle,
         Self::Offline,
@@ -363,6 +377,8 @@ impl SyncState {
         Self::Refused,
         Self::Config,
         Self::Update,
+        Self::OldServer,
+        Self::KeyFile,
     ];
     pub fn token(self) -> &'static str {
         match self {
@@ -376,6 +392,8 @@ impl SyncState {
             Self::Refused => "refused",
             Self::Config => "config",
             Self::Update => "update",
+            Self::OldServer => "oldserver",
+            Self::KeyFile => "keyfile",
         }
     }
     pub fn from_token(token: &str) -> Option<Self> {
@@ -555,9 +573,15 @@ mod tests {
         }
     }
     fn vault(len: usize) -> Vec<u8> {
-        let mut v = Vec::from(*VAULT_MAGIC);
+        let mut v = Vec::from(*b"GOYOVA02");
         v.extend_from_slice(&[7; 16]);
         v.resize(len, 0xA5);
+        v
+    }
+    /// The same as GOYOVA04, the format under a KF2 key file.
+    fn keyed(len: usize) -> Vec<u8> {
+        let mut v = vault(len);
+        v[..8].copy_from_slice(b"GOYOVA04");
         v
     }
     fn temps(dir: &Path) -> Vec<String> {
@@ -602,28 +626,57 @@ mod tests {
         let mut bad = render_outgoing(3, &v).unwrap();
         bad[7] = b'2';
         assert_eq!(parse_outgoing(&bad), None);
+        // GOYOVA04 from its 140 bytes up, as GOYOVA02 from its 96.
+        for len in [140, 4096, MAX_FILE] {
+            let v = keyed(len);
+            assert!(is_sync_vault(&v), "{len}");
+            let out = render_outgoing(0, &v).unwrap();
+            assert_eq!(parse_outgoing(&out), Some((0, &v[..])));
+            let inc = render_incoming(42, &v).unwrap();
+            assert_eq!(parse_incoming(&inc), Some((42, &v[..])));
+        }
+        let long = keyed(MAX_FILE + 1);
+        for len in [MIN_VAULT, 139, MAX_FILE + 1] {
+            let v = &long[..len];
+            assert!(!is_sync_vault(v), "{len}");
+            assert_eq!(render_outgoing(1, v), None, "{len}");
+            assert_eq!(render_incoming(1, v), None, "{len}");
+            assert_eq!(parse_outgoing(&wrap(OUTGOING_MAGIC, 1, v)), None, "{len}");
+        }
         // Key files and other formats are never wrapped for upload.
-        for magic in [b"GOYOKE01", b"GOYOKE02", b"GOYOVA01", b"GOYOVA03"] {
-            let mut other = vault(148);
+        for magic in [
+            b"GOYOKE01",
+            b"GOYOKE02",
+            b"GOYOKE03",
+            b"GOYOKH01",
+            b"GOYOKS01",
+            b"GOYOVA01",
+            b"GOYOVA03",
+            b"GOYOVA05",
+        ] {
+            let mut other = vault(489);
             other[..8].copy_from_slice(magic);
+            assert!(!is_sync_vault(&other));
             assert_eq!(render_outgoing(1, &other), None);
             assert_eq!(render_incoming(1, &other), None);
             assert_eq!(parse_outgoing(&wrap(OUTGOING_MAGIC, 1, &other)), None);
         }
         // The app must see a newer format in incoming to stop syncing.
         let mut newer = vault(200);
-        newer[..8].copy_from_slice(b"GOYOVA03");
+        newer[..8].copy_from_slice(b"GOYOVA05");
         let wrapped = wrap(INCOMING_MAGIC, 9, &newer);
         assert_eq!(parse_incoming(&wrapped), Some((9, &newer[..])));
     }
     #[test]
     fn newer_formats_are_recognized() {
-        for magic in [b"GOYOVA03", b"GOYOVA10", b"GOYOVA99"] {
+        for magic in [b"GOYOVA05", b"GOYOVA10", b"GOYOVA99"] {
             assert!(newer_vault_format(magic), "{magic:?}");
         }
         for magic in [
             &b"GOYOVA01"[..],
             b"GOYOVA02",
+            b"GOYOVA03",
+            b"GOYOVA04",
             b"GOYOVA00",
             b"GOYOVAx3",
             b"GOYOKE03",
@@ -780,37 +833,49 @@ mod tests {
     /// The rule the whole design rests on: polling stamps never holds a
     /// handle on the file, so it never makes the writer's replace fail.
     /// Each rename is tried once, so a retry cannot hide a failure; a poller
-    /// that used `fs::metadata` instead fails about a quarter of them.
+    /// that used `fs::metadata` instead fails about a quarter of them. The
+    /// renames start once the poller has polled and go on past 300 until it
+    /// has polled 100 times, so a busy machine that schedules the poller
+    /// late cannot leave the renames unwatched.
     #[cfg(windows)]
     #[test]
     fn polling_stamps_never_blocks_a_replace() {
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
         let t = Temp::new();
         let target = t.file(INCOMING);
         fs::write(&target, b"0").unwrap();
         let stop = AtomicBool::new(false);
-        let (failed, polls) = std::thread::scope(|s| {
+        let polls = AtomicU32::new(0);
+        let (failed, renames) = std::thread::scope(|s| {
             let poller = s.spawn(|| {
-                let mut polls = 0u32;
                 while !stop.load(Ordering::Relaxed) {
                     assert!(stamp(&t.0, INCOMING).is_some());
-                    polls += 1;
+                    polls.fetch_add(1, Ordering::Relaxed);
                 }
-                polls
             });
+            // A poller that panicked ends both waits; join reports it.
+            while polls.load(Ordering::Relaxed) == 0 && !poller.is_finished() {
+                std::thread::yield_now();
+            }
             let mut failed = Vec::new();
-            for i in 0..300u32 {
+            let mut i = 0u32;
+            while i < 300
+                || (polls.load(Ordering::Relaxed) < 100 && i < 10_000 && !poller.is_finished())
+            {
                 let temp = t.file(&format!("{INCOMING}.{i}{TEMP_SUFFIX}"));
                 fs::write(&temp, i.to_le_bytes()).unwrap();
                 if let Err(code) = rename_over(&temp, &target) {
                     failed.push(code);
                     let _ = fs::remove_file(&temp);
                 }
+                i += 1;
             }
             stop.store(true, Ordering::Relaxed);
-            (failed, poller.join().unwrap())
+            poller.join().unwrap();
+            (failed, i)
         });
-        assert!(polls >= 100, "only {polls} polls ran alongside");
+        let polls = polls.into_inner();
+        assert!(polls >= 100, "only {polls} polls in {renames} renames");
         assert_eq!(failed, [], "renames failed while stamps were polled");
     }
     /// A reader's open handle blocks the rename. The writer then reports

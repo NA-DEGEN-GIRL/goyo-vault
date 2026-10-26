@@ -5,7 +5,10 @@
 use super::*;
 use crate::{
     config::{DEFAULT_PYTHON, DEFAULT_REMOTE, MAX_CONFIG},
-    engine::{CallError, Clock, Gate, HEARTBEAT, MAX_BACKOFF, Refusal, backoff, gate, jittered},
+    engine::{
+        CallError, Clock, Gate, HEARTBEAT, MAX_BACKOFF, RETRY_HELD, Refusal, backoff, gate,
+        jittered,
+    },
     transport::{
         Failure, Killed, MAX_STDERR, MAX_STDOUT, Output, SSH_LOG, STALE_LOG, SshLog, Transport,
         classify, first_line, run_bounded, ssh_args, ssh_program, sweep_logs,
@@ -134,6 +137,12 @@ fn blob(id: &[u8; 16], fill: u8) -> Vec<u8> {
     let mut v = Vec::from(*b"GOYOVA02");
     v.extend_from_slice(id);
     v.resize(160, fill);
+    v
+}
+/// The same as GOYOVA04, the format under a KF2 key file (140 B at least).
+fn keyed(id: &[u8; 16], fill: u8) -> Vec<u8> {
+    let mut v = blob(id, fill);
+    v[..8].copy_from_slice(b"GOYOVA04");
     v
 }
 
@@ -1205,6 +1214,234 @@ fn rejected_outgoing_waits_for_a_new_one() {
     assert_eq!(pc.status().state, Some(SyncState::Ok));
 }
 
+/// GOYOVA04, the format under a KF2 key file, passes the gate and incoming
+/// like GOYOVA02, each from its smallest file up; every other format and
+/// every key file is refused, wrapped or not (spec §7.6, §14.7-1/2).
+#[test]
+fn goyova04_passes_the_gate_and_incoming_like_goyova02() {
+    let pc = Pc::with_folder();
+    let id = [0x6D; 16];
+    let path = pc.dir.join(OUTGOING);
+    for v in [blob(&id, 1), keyed(&id, 1)] {
+        fs::write(&path, render_outgoing(0, &v).unwrap()).unwrap();
+        let ok = matches!(gate(&path, Some(&id)), Gate::Ok(g) if g.bytes[16..] == v[..]);
+        assert!(ok, "{:?}", &v[..8]);
+    }
+    let wrapped = |magic: &[u8; 8], len: usize| {
+        let mut v = blob(&id, 2);
+        v.resize(len, 2);
+        v[..8].copy_from_slice(magic);
+        [&b"GOYOSOU1"[..], &0u64.to_le_bytes(), &v].concat()
+    };
+    for (magic, len) in [
+        (b"GOYOVA01", 160),
+        (b"GOYOVA03", 160),
+        (b"GOYOVA05", 160),
+        (b"GOYOVA04", 139),
+        (b"GOYOKE01", 148),
+        (b"GOYOKE02", 128),
+        (b"GOYOKE03", 312),
+        (b"GOYOKH01", 489),
+        (b"GOYOKS01", 489),
+    ] {
+        fs::write(&path, wrapped(magic, len)).unwrap();
+        let refused = matches!(
+            gate(&path, Some(&id)),
+            Gate::Refused(Refusal::Format, Some(_))
+        );
+        assert!(refused, "{magic:?} {len}");
+    }
+    fs::remove_file(&path).unwrap();
+    // Incoming is read back with its version, SHA and ID, and a GOYOVA04
+    // copy re-seeds a wiped server.
+    let v = keyed(&id, 3);
+    seed_incoming(&pc, id, 7, &v);
+    assert_eq!(
+        engine::from_incoming(&pc.dir),
+        (7, Some(sha256(&v)), Some(id))
+    );
+    let clock = TestClock::new();
+    let replies = [reply(Status::Empty, 0, b""), reply(Status::Ok, 1, b"")];
+    let mut e = pc.engine(Mock::with(replies), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::Ok, 1, Some(1), None));
+    assert_eq!(
+        (e.transport.calls[1].op, &e.transport.calls[1].blob),
+        (Op::Put, &v)
+    );
+    assert_eq!(pc.incoming(), Some((1, v.clone())));
+    // A re-seed that a script older than 0.9.0 refuses shows `oldserver`.
+    seed_incoming(&pc, id, 7, &v);
+    let replies = [reply(Status::Empty, 0, b""), reply(Status::BadBlob, 0, b"")];
+    let mut e = pc.engine(Mock::with(replies), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::OldServer, 7, None, None));
+}
+
+/// A server script older than 0.9.0 answers a GOYOVA04 upload with
+/// BAD_BLOB. That is no refusal of the file: the helper shows `oldserver`,
+/// keeps polling, and sends the same file again after ten minutes and
+/// whenever it starts, and a new file from the app at once. A GOYOVA02
+/// BAD_BLOB stays a refusal (spec §7.6, §7.7-8, §14.7-3).
+#[test]
+fn an_old_server_script_holds_goyova04_uploads() {
+    let pc = Pc::with_folder();
+    let clock = TestClock::new();
+    let id = [0x6A; 16];
+    let v = keyed(&id, 1);
+    let fsha = pc.outgoing(0, &v);
+    let mut e = pc.engine(Mock::with([reply(Status::BadBlob, 0, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::OldServer, 0, None, None));
+    let state = pc.state();
+    assert_eq!(
+        (state.id, state.done, state.rejected),
+        (Some(id), None, None)
+    );
+    assert_eq!(pc.status().state, Some(SyncState::OldServer));
+    assert!(
+        pc.log().contains(
+            "6A6A-6A6A server refused GOYOVA04: its goyo-sync script is older than 0.9.0"
+        )
+    );
+    // Polls go on; the file waits, and the state stays.
+    for _ in 0..3 {
+        clock.advance(60);
+        assert!(e.due(0));
+        e.transport.replies.push_back(reply(Status::Empty, 0, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::OldServer, 0, None, None));
+    }
+    assert_eq!(
+        e.transport.ops(),
+        [(Op::Put, 0), (Op::Get, 0), (Op::Get, 0), (Op::Get, 0)]
+    );
+    // Ten minutes after the refusal it goes again, and lands once the
+    // server script was updated.
+    clock.advance(RETRY_HELD - 180);
+    assert!(e.due(0));
+    e.transport.replies.push_back(reply(Status::Ok, 1, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::Ok, 1, Some(1), None));
+    assert_eq!(e.transport.calls[4].sha, sha256(&v));
+    assert_eq!(pc.state().done, Some(fsha));
+    // A helper that starts again sends a held file at once, and a new
+    // file from the app goes at once too.
+    let v2 = keyed(&id, 2);
+    pc.outgoing(1, &v2);
+    clock.advance(1);
+    e.transport
+        .replies
+        .push_back(reply(Status::BadBlob, 0, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::OldServer, 1, None, None));
+    let mut e = pc.engine(Mock::with([reply(Status::BadBlob, 0, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::OldServer, 1, None, None));
+    assert_eq!(e.transport.ops(), [(Op::Put, 1)]);
+    clock.advance(1);
+    let v3 = keyed(&id, 3);
+    pc.outgoing(1, &v3);
+    assert!(e.due(0));
+    e.transport.replies.push_back(reply(Status::Ok, 2, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::Ok, 2, Some(2), None));
+    assert_eq!(pc.incoming(), Some((2, v3)));
+    // BAD_BLOB for a GOYOVA02 file is a refusal, kept as before.
+    let fsha = pc.outgoing(2, &blob(&id, 4));
+    clock.advance(1);
+    e.transport
+        .replies
+        .push_back(reply(Status::BadBlob, 0, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::Refused, 2, None, None));
+    assert_eq!(pc.state().rejected, Some(fsha));
+}
+
+/// KEY_BEHIND (status 14) answers an upload whose header does not match the
+/// server's key file: `keyfile`, nothing persisted, the file sent again
+/// after ten minutes, and a new file from the app at once (spec §7.6,
+/// §14.6-15).
+#[test]
+fn key_behind_holds_the_upload_for_a_new_key_file() {
+    let pc = Pc::with_folder();
+    let clock = TestClock::new();
+    let id = [0x6B; 16];
+    let v = keyed(&id, 1);
+    pc.outgoing(4, &v);
+    let mut e = pc.engine(Mock::with([reply(Status::KeyBehind, 0, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 0, None, None));
+    let state = pc.state();
+    assert_eq!((state.done, state.rejected), (None, None));
+    assert_eq!(pc.status().state, Some(SyncState::KeyFile));
+    assert!(pc.log().contains("PUT KEY_BEHIND"));
+    clock.advance(60);
+    e.transport.replies.push_back(reply(Status::Empty, 0, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 0, None, None));
+    clock.advance(RETRY_HELD);
+    e.transport
+        .replies
+        .push_back(reply(Status::KeyBehind, 0, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 0, None, None));
+    assert_eq!(
+        e.transport.ops(),
+        [(Op::Put, 4), (Op::Get, 0), (Op::Put, 4)]
+    );
+    // The app took the new key file and wrote a new outgoing: sent at once.
+    clock.advance(1);
+    let v2 = keyed(&id, 2);
+    pc.outgoing(4, &v2);
+    assert!(e.due(0));
+    e.transport.replies.push_back(reply(Status::Ok, 5, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::Ok, 5, Some(5), None));
+    assert_eq!(pc.incoming(), Some((5, v2)));
+}
+
+/// A helper older than 0.9.0 refused every GOYOVA04 outgoing at its gate
+/// and kept the file's SHA as rejected. This one sends such a file once
+/// when it starts; a second refusal is kept as before, and a rejected
+/// GOYOVA02 file is never sent again (spec §7.6, §14.7-4).
+#[test]
+fn a_goyova04_an_older_helper_refused_is_retried_once_at_start() {
+    let pc = Pc::with_folder();
+    let clock = TestClock::new();
+    let id = [0x6C; 16];
+    let fsha = pc.outgoing(2, &keyed(&id, 1));
+    let old = HelperState {
+        id: Some(id),
+        rejected: Some(fsha),
+        ..HelperState::default()
+    };
+    replace_file(
+        &pc.dir.join(HELPER_STATE),
+        &syncfile::render_helper_state(&old),
+    )
+    .unwrap();
+    let mut e = pc.engine(Mock::with([reply(Status::Limit, 0, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::Refused, 0, None, None));
+    assert_eq!(e.transport.ops(), [(Op::Put, 2)]);
+    assert!(
+        pc.log()
+            .contains("retrying a GOYOVA04 upload an older helper refused")
+    );
+    assert_eq!(pc.state().rejected, Some(fsha));
+    // Not again in this run.
+    clock.advance(60);
+    e.transport.replies.push_back(reply(Status::Empty, 0, b""));
+    assert_eq!(e.pass(0, false), done(SyncState::Refused, 0, None, None));
+    assert_eq!(e.transport.ops(), [(Op::Put, 2), (Op::Get, 0)]);
+    // The next start sends it once more, and it lands.
+    let mut e = pc.engine(Mock::with([reply(Status::Ok, 3, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::Ok, 3, Some(3), None));
+    let state = pc.state();
+    assert_eq!((state.done, state.rejected), (Some(fsha), None));
+    // A rejected GOYOVA02 file is not sent at a start.
+    let fsha = pc.outgoing(3, &blob(&id, 2));
+    let state = HelperState {
+        rejected: Some(fsha),
+        ..pc.state()
+    };
+    replace_file(
+        &pc.dir.join(HELPER_STATE),
+        &syncfile::render_helper_state(&state),
+    )
+    .unwrap();
+    let mut e = pc.engine(Mock::with([reply(Status::NotModified, 3, b"")]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::Refused, 3, None, None));
+    assert_eq!(e.transport.ops(), [(Op::Get, 3)]);
+}
+
 #[test]
 fn a_server_going_back_is_logged() {
     let pc = Pc::with_folder();
@@ -1606,8 +1843,17 @@ fn a_newer_format_head_is_never_written() {
     let clock = TestClock::new();
     let id = [0xCC; 16];
     seed_incoming(&pc, id, 2, &blob(&id, 2));
+    // GOYOVA03 is never synced: a server sending one is broken.
+    let mut unsynced = blob(&id, 3);
+    unsynced[..8].copy_from_slice(b"GOYOVA03");
+    let mut e = pc.engine(Mock::with([reply(Status::Ok, 3, &unsynced)]), &clock);
+    assert_eq!(e.pass(0, false), done(SyncState::Server, 2, None, None));
+    assert!(
+        pc.log()
+            .contains("frame=not a GOYOVA02/04 file of this vault")
+    );
     let mut newer = blob(&id, 3);
-    newer[..8].copy_from_slice(b"GOYOVA03");
+    newer[..8].copy_from_slice(b"GOYOVA05");
     let mut e = pc.engine(Mock::with([reply(Status::Ok, 3, &newer)]), &clock);
     assert_eq!(e.pass(0, false), done(SyncState::Update, 2, None, None));
     assert_eq!(pc.incoming().map(|(v, _)| v), Some(2));
@@ -2212,7 +2458,8 @@ fn fetch_writes_only_a_new_file() {
         root: server.0.join("data"),
     };
     let id = [0xA7; 16];
-    let (v1, v2) = (blob(&id, 1), blob(&id, 2));
+    // The head is a GOYOVA04 copy, as after a key change (spec §14.7-2).
+    let (v1, v2) = (blob(&id, 1), keyed(&id, 2));
     for (expected, v) in [(0, &v1), (1, &v2)] {
         let r = local
             .exchange(&Request::put(id, expected, v).unwrap().encode(), &mut || {})

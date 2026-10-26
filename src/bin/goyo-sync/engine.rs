@@ -6,8 +6,9 @@
 //!
 //! What it uploads must pass the gate: `outgoing.goyosync`, opened without
 //! following links, a single-link regular file, wrapped `GOYOSOU1` around a
-//! `GOYOVA02` file of the pinned vault ID. A key file can fail every one of
-//! those checks; failing any one means no ssh process is started.
+//! `GOYOVA02` or `GOYOVA04` file of the pinned vault ID. A key file can fail
+//! every one of those checks; failing any one means no ssh process is
+//! started.
 use crate::{
     sys,
     transport::{Failure, Killed, Transport, classify, first_line},
@@ -15,7 +16,7 @@ use crate::{
 use goyo_vault::{
     syncfile::{
         self, HELPER_LOCK, HELPER_STATE, HELPER_TEMPS, HelperState, INCOMING, MAX_WRAPPED,
-        MIN_VAULT, OUTGOING, STATUS, Stamp, SyncState, VAULT_MAGIC, WRAP_HEADER,
+        MIN_VAULT, OUTGOING, STATUS, Stamp, SyncState, WRAP_HEADER,
     },
     syncwire::{
         Op, RESPONSE_HEADER, Request, Response, Status, WireError, check_vault_blob, sha256,
@@ -41,6 +42,12 @@ pub const HEARTBEAT: u64 = 50;
 /// app reading it, a scanner) is not retried every 50 ms.
 pub const STATUS_GAP: u64 = 10;
 pub const MAX_LOG: u64 = 256 * 1024;
+/// An upload the server refused only for now (see [`Held`]) is tried again
+/// after this long, and at once when the app writes another one.
+pub const RETRY_HELD: u64 = 10 * 60;
+/// The vault format under a KF2 key file. A server script older than 0.9.0
+/// refuses it as a bad blob.
+const KEYED_VAULT: &[u8; 8] = b"GOYOVA04";
 
 /// Seconds and nanoseconds since the Unix epoch; tests inject their own.
 pub type Clock = Box<dyn Fn() -> Duration>;
@@ -146,6 +153,7 @@ fn status_name(status: Status) -> &'static str {
         Status::BadBlob => "BAD_BLOB",
         Status::TooLarge => "TOO_LARGE",
         Status::Limit => "LIMIT",
+        Status::KeyBehind => "KEY_BEHIND",
         Status::ServerError => "SERVER_ERROR",
     }
 }
@@ -295,7 +303,7 @@ impl Refusal {
             Self::HardLink => "a file with more than one hard link",
             Self::NotFile => "not a file",
             Self::Size => "the wrong size",
-            Self::Format => "not a GOYOSOU1-wrapped GOYOVA02 file",
+            Self::Format => "not a GOYOSOU1-wrapped GOYOVA02/04 file",
             Self::Id => "a file of another vault",
             Self::Unreadable => "unreadable",
         }
@@ -312,8 +320,9 @@ pub enum Gate {
 /// Gate 2 of 3 against uploading a key file (spec §12 S11). The file is
 /// opened without following links, so a link to a key file is refused as a
 /// link and its target is never opened; a hard link to one has a link count
-/// above 1. Then the size, the wrapper, the inner magic and the vault ID
-/// must match, which a key file (GOYOKE, 128 or 148 bytes) never does.
+/// above 1. Then the size, the wrapper, the inner magic (GOYOVA02 or
+/// GOYOVA04, each from its smallest file up) and the vault ID must match,
+/// which a key file (GOYOK…) never does.
 pub fn gate(path: &Path, pinned: Option<&[u8; 16]>) -> Gate {
     let file = match sys::open_no_follow(path) {
         Ok(file) => file,
@@ -398,6 +407,18 @@ struct Queued {
     blob: Vec<u8>,
     logged: bool,
 }
+/// An upload the server refused for a reason that goes away without a new
+/// file from the app (spec §7.6): a server script older than 0.9.0 (BAD_BLOB
+/// for a GOYOVA04 file) or a server key file this upload does not match
+/// (KEY_BEHIND). It is not remembered as rejected, so the next helper start
+/// tries it at once, and this run tries it again after [`RETRY_HELD`].
+#[derive(Clone, Copy)]
+struct Held {
+    sha: [u8; 32],
+    /// `oldserver` or `keyfile`, shown while it waits.
+    state: SyncState,
+    until: u64,
+}
 /// What the helper remembers about one vault between passes.
 struct Vault {
     path: PathBuf,
@@ -433,6 +454,22 @@ struct Vault {
     /// When a status write was last tried, written or not.
     status_tried: Option<u64>,
     folder: Option<Folder>,
+    /// The outgoing file the server refused for now.
+    held: Option<Held>,
+    /// Whether an outgoing that `helper.state` names as rejected may be
+    /// tried once more: true until this run (the background helper's start,
+    /// `--once` or "sync now") first reads an outgoing. Nothing persisted
+    /// tells a 0.8 helper's refusal from this one's, so each run tries once.
+    upgrade_retry: bool,
+}
+impl Vault {
+    /// What a held upload `sha` shows while it waits, until RETRY_HELD has
+    /// passed.
+    fn holding(&self, sha: Option<[u8; 32]>, now: u64) -> Option<SyncState> {
+        self.held
+            .filter(|h| Some(h.sha) == sha && !passed(h.until, now, RETRY_HELD))
+            .map(|h| h.state)
+    }
 }
 
 pub struct Engine<T> {
@@ -465,6 +502,8 @@ impl<T: Transport> Engine<T> {
                 shown: None,
                 status_tried: None,
                 folder: None,
+                held: None,
+                upgrade_retry: true,
             })
             .collect();
         Self {
@@ -501,7 +540,10 @@ impl<T: Transport> Engine<T> {
         match (syncfile::stamp(&v.dir, OUTGOING), v.out_seen) {
             (None, _) => false,
             (Some(stamp), Some((seen, sha))) if seen == stamp => {
-                let handled = sha.is_none() || sha == v.state.done || sha == v.state.rejected;
+                let handled = sha.is_none()
+                    || sha == v.state.done
+                    || sha == v.state.rejected
+                    || v.holding(sha, now).is_some();
                 !handled && !waiting
             }
             (Some(_), _) => !(waiting && v.withheld),
@@ -616,7 +658,7 @@ fn read_incoming(dir: &Path) -> Option<InIncoming> {
         Err(syncfile::FileError::Busy | syncfile::FileError::Io) => return None,
     };
     Some(match syncfile::parse_incoming(&bytes) {
-        Some((version, blob)) if blob.starts_with(VAULT_MAGIC) => {
+        Some((version, blob)) if syncfile::is_sync_vault(blob) => {
             let id: Option<[u8; 16]> = blob.get(8..24).and_then(|s| s.try_into().ok());
             (version, Some(sha256(blob)), id.filter(|id| *id != [0; 16]))
         }
@@ -682,7 +724,7 @@ impl<T: Transport> Pass<'_, T> {
             Ok(true) => {
                 let v = &mut *self.v;
                 (v.state, v.persisted, v.queued) = (HelperState::default(), None, None);
-                (v.out_seen, v.in_seen) = (None, None);
+                (v.out_seen, v.in_seen, v.held) = (None, None, None);
                 self.note("created the sync folder");
             }
             Ok(false) => {}
@@ -901,7 +943,8 @@ impl<T: Transport> Pass<'_, T> {
     }
     /// The outgoing file at `stamp` if it still needs uploading. A refusal
     /// is remembered by stamp and SHA, so it is logged once and not retried
-    /// until the app writes a new file; while it stands, state=refused.
+    /// until the app writes a new file; while it stands, state=refused. A
+    /// held file waits out its retry time, showing its own state.
     fn outgoing(&mut self, stamp: Stamp, pinned: Option<&[u8; 16]>) -> Option<Gated> {
         if let Some((seen, sha)) = self.v.out_seen
             && seen == stamp
@@ -913,10 +956,15 @@ impl<T: Transport> Pass<'_, T> {
             if sha == self.v.state.done {
                 return None;
             }
+            if let Some(state) = self.v.holding(sha, self.now) {
+                self.set(state);
+                return None;
+            }
         }
         match gate(&self.v.dir.join(OUTGOING), pinned) {
             Gate::Missing | Gate::Busy => None,
             Gate::Refused(why, sha) => {
+                self.v.upgrade_retry = false;
                 self.v.out_seen = Some((stamp, sha));
                 if sha.is_some() {
                     self.v.state.rejected = sha;
@@ -927,10 +975,23 @@ impl<T: Transport> Pass<'_, T> {
             }
             Gate::Ok(gated) => {
                 self.v.out_seen = Some((stamp, Some(gated.sha)));
+                let retry = std::mem::take(&mut self.v.upgrade_retry);
                 if Some(gated.sha) == self.v.state.done {
                     None
                 } else if Some(gated.sha) == self.v.state.rejected {
+                    // The gate of a helper older than 0.9.0 refused every
+                    // GOYOVA04 file: one that passes this gate is tried once
+                    // in each run of this helper (spec §7.6). Another
+                    // refusal is kept for the rest of the run.
+                    if retry && gated.bytes[WRAP_HEADER..].starts_with(KEYED_VAULT) {
+                        self.note("retrying a GOYOVA04 upload an older helper refused");
+                        self.v.state.rejected = None;
+                        return Some(gated);
+                    }
                     self.set(SyncState::Refused);
+                    None
+                } else if let Some(state) = self.v.holding(Some(gated.sha), self.now) {
+                    self.set(state);
                     None
                 } else {
                     Some(gated)
@@ -999,10 +1060,12 @@ impl<T: Transport> Pass<'_, T> {
         if (!fresh || self.v.withheld) && self.waiting() {
             // Waiting out a failure; a new outgoing gets one attempt anyway,
             // unless the server is holding back uploads.
-            if let Some((_, sha)) = self.v.out_seen
-                && (sha.is_none() || sha == self.v.state.rejected)
-            {
-                self.set(SyncState::Refused);
+            if let Some((_, sha)) = self.v.out_seen {
+                if sha.is_none() || sha == self.v.state.rejected {
+                    self.set(SyncState::Refused);
+                } else if let Some(state) = self.v.holding(sha, self.now) {
+                    self.set(state);
+                }
             }
             return true;
         }
@@ -1073,6 +1136,20 @@ impl<T: Transport> Pass<'_, T> {
                 self.note("server has no copy; uploading as the first version");
                 return self.put(gated, 0, false);
             }
+            // Refusals that a server update or a new key file clears.
+            Status::BadBlob if blob.starts_with(KEYED_VAULT) => {
+                self.note(
+                    "server refused GOYOVA04: its goyo-sync script is older than 0.9.0; \
+                     use 'Install or update on server'",
+                );
+                self.hold(gated.sha, SyncState::OldServer);
+            }
+            Status::KeyBehind => {
+                self.note(
+                    "server refused the upload: its key file for this vault has another state",
+                );
+                self.hold(gated.sha, SyncState::KeyFile);
+            }
             Status::BadBlob | Status::TooLarge | Status::Limit | Status::BadRequest => {
                 self.v.state.rejected = Some(gated.sha);
                 self.set(SyncState::Refused);
@@ -1084,6 +1161,16 @@ impl<T: Transport> Pass<'_, T> {
             }
         }
         true
+    }
+    /// The server refused upload `sha` for now: it shows `state` and is
+    /// sent again after RETRY_HELD, or never if the app writes another file
+    /// first, which is sent at once. Nothing is persisted (spec §7.6).
+    fn hold(&mut self, sha: [u8; 32], state: SyncState) {
+        let until = self.time() + RETRY_HELD;
+        self.v.held = Some(Held { sha, state, until });
+        self.set(state);
+        self.succeeded();
+        self.note(&format!("upload held; retry in {RETRY_HELD} s"));
     }
     /// A CONFLICT, with a head other than the upload, that no honest server
     /// sends: its compare-and-swap answers CONFLICT only when the head is
@@ -1154,6 +1241,14 @@ impl<T: Transport> Pass<'_, T> {
                 if self.queue(reply.version, reply.blob()) {
                     self.downloaded = Some(reply.version);
                 }
+                self.heard();
+            }
+            Status::BadBlob if blob.starts_with(KEYED_VAULT) => {
+                self.set(SyncState::OldServer);
+                self.heard();
+            }
+            Status::KeyBehind => {
+                self.set(SyncState::KeyFile);
                 self.heard();
             }
             Status::BadBlob | Status::TooLarge | Status::Limit | Status::BadRequest => {

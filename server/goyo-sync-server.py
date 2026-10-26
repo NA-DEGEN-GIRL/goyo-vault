@@ -4,8 +4,9 @@
 One run per SSH connection, like git-upload-pack: one request frame on stdin,
 one response frame on stdout, then exit. No daemon, no port, no shell, no eval
 and nothing outside the Python 3.8+ standard library. It never sees a key
-file, a password or plaintext: it stores only GOYOVA02 files whose header
-names the requested vault, so a key file (GOYOKE01/02) is refused before
+file, a password or plaintext: it stores only GOYOVA02 and GOYOVA04 files
+(the synced vault formats, the second under a 0.9 key file) whose header
+names the requested vault, so every key file (GOYOK...) is refused before
 anything is written.
 
   python3 -I goyo-sync-server.py serve [--root DIR]   answer one request
@@ -33,13 +34,18 @@ except ImportError:  # Windows, which runs this script only for tests
 # there instead).
 REQUEST = struct.Struct('<8sB16sQI32s')   # magic, op, vault id, version, blob_len, blob_sha (69 B)
 RESPONSE = struct.Struct('<8sBQI32s')     # magic, status, version, blob_len, blob_sha (53 B)
-REQUEST_MAGIC, RESPONSE_MAGIC, VAULT_MAGIC = b'GOYOSRQ1', b'GOYOSRS1', b'GOYOVA02'
+REQUEST_MAGIC, RESPONSE_MAGIC = b'GOYOSRQ1', b'GOYOSRS1'
+# The synced vault formats and the smallest file of each: GOYOVA02 is a 48-byte
+# header, a 32-byte empty plaintext and the tag; GOYOVA04, the same contents
+# under a 0.9 key file, has a 92-byte header. Everything else is refused:
+# GOYOVA01/03 (sync off), newer formats and every key file.
+VAULT_MAGICS = {b'GOYOVA02': 96, b'GOYOVA04': 140}
 HELLO, GET, PUT, LIST, FETCH = 1, 2, 3, 4, 5
 OK, NOT_MODIFIED, CONFLICT, EMPTY, NOT_FOUND = 0, 1, 2, 3, 4
 BAD_REQUEST, BAD_BLOB, TOO_LARGE, LIMIT, SERVER_ERROR = 10, 11, 12, 13, 20
 PROTOCOL = 1
 HELLO_LEN = 512                # 00..FF twice: proves the SSH channel is binary-transparent
-MIN_BLOB = 96                  # GOYOVA02 header 48 + empty plaintext 32 + tag 16
+MIN_BLOB = 96                  # the smallest synced vault file (GOYOVA02)
 MAX_BLOB = 8 * 1024 * 1024     # vault.rs MAX_FILE
 MAX_VERSION = 10 ** 12 - 1     # version names have 12 digits
 MAX_LIST = 64 * 1024
@@ -278,9 +284,9 @@ class Store:
         if hashlib.sha256(blob).digest() != sha:
             raise Refused(BAD_BLOB, 'blob checksum mismatch')
         # The last of three gates: only a vault file of this very vault, never
-        # a key file (GOYOKE01/02), an old GOYOVA01 or another vault's file.
-        if blob[:8] != VAULT_MAGIC or blob[8:24] != vid:
-            raise Refused(BAD_BLOB, 'not a GOYOVA02 file of this vault')
+        # a key file (GOYOK...), a format that is not synced or another vault's.
+        if len(blob) < VAULT_MAGICS.get(blob[:8], MAX_BLOB + 1) or blob[8:24] != vid:
+            raise Refused(BAD_BLOB, 'not a GOYOVA02/04 file of this vault')
         vault, versions_dir = self.paths(vid)
         new = not os.path.lexists(vault)
         if new and expected != 0:
@@ -527,9 +533,13 @@ def selftest_root(root, base):
     ids = [hashlib.sha256(b'goyo selftest %d' % n).digest()[:16] for n in range(80)]
     a, c, r, m, n = ids[:5]
 
-    def blob(vid, tag, size=160):
+    def blob(vid, tag, size=160, magic=b'GOYOVA02'):
         filler = hashlib.sha256(b'blob %d' % tag).digest() * (size // 32 + 1)
-        return VAULT_MAGIC + vid + filler[:size - 24]
+        return magic + vid + filler[:size - 24]
+
+    def keyed(vid, tag, size=160):
+        """GOYOVA04: a vault under a 0.9 key file."""
+        return blob(vid, tag, size, b'GOYOVA04')
 
     def put(vid, expected, data, **forged):
         return call(store, request(PUT, vid, expected, data, **forged))
@@ -675,6 +685,17 @@ def selftest_root(root, base):
         del steps[:]
         check(call(watched, data, steps.append) == answer and steps == want, 'deadlines: ' + what)
 
+    # GOYOVA04, a vault under a 0.9 key file, is stored and served like
+    # GOYOVA02, from its 140 bytes up.
+    head = list_versions(store.paths(a)[1])[-1]
+    smallest, larger = keyed(a, 8, 140), keyed(a, 9)
+    check(put(a, head, smallest) == (OK, head + 1, b'', 0) and stored(a, head + 1) == smallest,
+          'GOYOVA04 of 140 bytes is stored')
+    check(put(a, head + 1, larger) == (OK, head + 2, b'', 0) and get(a) == (OK, head + 2, larger, 0)
+          and fetch(a, head + 1) == (OK, head + 1, smallest, 0), 'GOYOVA04 is served')
+    check(put(n, 0, keyed(n, 1)) == (OK, 1, b'', 0), 'GOYOVA04 seeds a new vault')
+    shutil.rmtree(store.paths(n)[0])
+
     # EMPTY rules when the versions or the whole folder are gone (a wiped or
     # restored server): only expected 0 seeds again.
     check(put(c, 0, blob(c, 1)) == (OK, 1, b'', 0), 'seed c')
@@ -713,12 +734,20 @@ def selftest_root(root, base):
     key01 = b'GOYOKE01' + a + hashlib.sha256(b'key 1').digest() * 3 + b'\x01' * 28  # 148 B, like a key file
     key02 = b'GOYOKE02' + a + hashlib.sha256(b'key 2').digest() * 3 + b'\x02' * 8   # 128 B
     check((len(key01), len(key02)) == (148, 128), 'key file sizes')
+    # 0.9 key files: password only (312 B at least), and with security keys,
+    # local or synced (489 B at least). None of them is ever a vault upload.
+    kf2 = [blob(a, 20 + i, size, magic) for i, (magic, size) in
+           enumerate(((b'GOYOKE03', 312), (b'GOYOKH01', 489), (b'GOYOKS01', 489), (b'GOYOKS01', 2048)))]
     before = tree(root)
     head_a = list_versions(store.paths(a)[1])[-1]
     for expected, vid, data, what in (
             (head_a, a, key01, 'GOYOKE01 key file'), (0, n, key01[:8] + n + key01[24:], 'GOYOKE01 for a new vault'),
             (head_a, a, key02, 'GOYOKE02 key file'), (0, n, key02[:8] + n + key02[24:], 'GOYOKE02 for a new vault'),
+            (head_a, a, kf2[0], 'GOYOKE03 key file'), (head_a, a, kf2[1], 'GOYOKH01 key file'),
+            (head_a, a, kf2[2], 'GOYOKS01 key file'), (0, n, kf2[3][:8] + n + kf2[3][24:], 'GOYOKS01 for a new vault'),
             (head_a, a, b'GOYOVA01' + b1[8:], 'GOYOVA01'), (head_a, a, b'GOYOVA03' + b1[8:], 'GOYOVA03'),
+            (head_a, a, b'GOYOVA05' + b1[8:], 'GOYOVA05'), (head_a, a, keyed(a, 9, 139), 'GOYOVA04 of 139 bytes'),
+            (head_a, a, keyed(c, 9), 'GOYOVA04 of another vault'),
             (head_a, a, blob(c, 9), 'another vault id'), (0, n, blob(a, 9), 'another vault id, new vault'),
             (head_a, a, blob(a, 9, 95), '95 bytes'), (head_a, a, b'', 'no blob')):
         check(put(vid, expected, data) == (BAD_BLOB, 0, b'', 0), 'BAD_BLOB: ' + what)
@@ -760,7 +789,7 @@ def selftest_root(root, base):
         check(Store(root).free_space() is None, 'no reserve without os.statvfs')
 
     # The largest vault file fits exactly.
-    big = VAULT_MAGIC + m + bytes(MAX_BLOB - 24)
+    big = b'GOYOVA02' + m + bytes(MAX_BLOB - 24)
     check(put(m, 0, big) == (OK, 1, b'', 0) and fetch(m, 0) == (OK, 1, big, 0), 'an 8 MiB blob round-trips')
 
     # Version names have 12 digits: after the last one PUT is LIMIT, never a
@@ -822,16 +851,18 @@ def selftest_root(root, base):
     first = ''.join(line + '\n' for line in lines[:3]).encode('ascii')
     check(store.listing(limit=len(first)) == (OK, 3, first), 'LIST cap')
 
-    # Gate 3, end to end: every stored file is a GOYOVA02 file of its own
-    # vault and contains no key file bytes.
+    # Gate 3, end to end: every stored file is a GOYOVA02 or GOYOVA04 file of
+    # its own vault, never one starting like a key file, and contains no key
+    # file bytes.
     for folder, dirs, files in os.walk(root):
         for name in files:
             with open(os.path.join(folder, name), 'rb') as f:
                 data = f.read()
             vid = bytes.fromhex(os.path.basename(os.path.dirname(folder)) if name.endswith('.goyo')
                                 else os.path.basename(folder))
-            check(data[:8] == VAULT_MAGIC and data[8:24] == vid, 'stored file is GOYOVA02 of its vault')
-            check(key01[24:] not in data and key02[24:] not in data, 'no key bytes stored')
+            check(data[:8] in VAULT_MAGICS and data[8:24] == vid, 'stored file is GOYOVA02/04 of its vault')
+            check(not data.startswith(b'GOYOK'), 'no stored file starts like a key file')
+            check(all(key[24:] not in data for key in [key01, key02] + kf2), 'no key bytes stored')
     check(all(VAULT_NAME.fullmatch(name) for name in os.listdir(root)), 'only vault folders in the root')
 
     # A root that is a file or a link is refused before anything happens.

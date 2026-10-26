@@ -168,6 +168,10 @@ messages! {
         "{}: the upload was refused by a check or by the server. See goyo-sync.log.";
     StateUpdate = "{}: 서버 사본이 더 새로운 형식입니다. 고요 금고를 업데이트하세요.",
         "{}: the server copy uses a newer format. Update Goyo Vault.";
+    StateOldServer = "{}: 서버의 goyo-sync 스크립트가 이 금고 형식을 받지 않습니다. 설정 창의 '서버에 설치·업데이트'로 업데이트하세요. 변경은 이 PC에 저장되어 있고, 10분마다 다시 올립니다.",
+        "{}: the goyo-sync script on the server does not accept this vault's format. Update it with 'Install or update on server' in the settings window. Changes are kept on this PC and uploaded again every 10 minutes.";
+    StateKeyFile = "{}: 서버의 열쇠 파일과 이 금고 사본이 맞지 않아 서버가 받지 않았습니다. 새 열쇠 파일을 받으면 다시 올라갑니다.",
+        "{}: the server did not take this vault copy because it does not match the server's key file. It is uploaded again once this PC has the new key file.";
     StderrLine = "  ssh: {}",
         "  ssh: {}";
 }

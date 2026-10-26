@@ -174,8 +174,20 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("금고 파일", "Vault file"),
     (
+        "금고 파일을 아직 새 열쇠로 다시 저장하지 못했습니다. 저장장치를 확인하세요. 다음 저장이나 잠금 해제 때 자동으로 마칩니다.",
+        "The vault file could not be saved again under the new key yet. Check the storage device. It finishes on its own at the next save or unlock.",
+    ),
+    (
+        "금고 파일을 새 열쇠로 다시 저장하지 못했습니다. 새 형식은 머리글이 44바이트 더 길어 용량 제한(8 MiB)을 넘습니다. 항목을 지우거나 줄이면 그 저장 때 마칩니다.",
+        "The vault file could not be saved again under the new key: the new format's header is 44 bytes longer and would exceed the size limit (8 MiB). Delete or shorten entries, and that save finishes it.",
+    ),
+    (
         "금고 파일을 찾을 수 없습니다. 경로를 확인하거나 '찾기'로 선택하세요.",
         "Vault file not found. Check the path or choose it with 'Browse'.",
+    ),
+    (
+        "금고 파일의 머리글이 손상되어 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 백업에서 복원하거나 서버 기록을 확인하세요.",
+        "The vault file's header is damaged, so it cannot be opened. Your password is not wrong. Restore from a backup or check the server history.",
     ),
     (
         "금고 파일이 없어, 저장이 끊기며 남은 임시 파일에서 복구했습니다.",
@@ -245,6 +257,10 @@ pub const EN: &[(&str, &str)] = &[
     (
         "더 새로운 버전에서 만든 금고 형식입니다. 고요 금고를 업데이트하세요.",
         "This vault was saved by a newer version. Update Goyo Vault.",
+    ),
+    (
+        "더 새로운 버전에서 만든 열쇠 파일입니다. 고요 금고를 업데이트하세요.",
+        "This key file was made by a newer version. Update Goyo Vault.",
     ),
     ("도우미 꺼짐", "Helper off"),
     ("동기화 경고", "Sync warning"),
@@ -430,6 +446,10 @@ pub const EN: &[(&str, &str)] = &[
         "New key file · in a cloud-synced folder together with the vault",
     ),
     (
+        "새 열쇠 파일이 형식 검사를 통과하지 못해 쓰지 않았습니다.",
+        "The new key file failed the format check, so it was not written.",
+    ),
+    (
         "새 파일 이름을 선택하세요 (기존 파일 덮어쓰기 금지)",
         "Choose a new file name (existing files are never overwritten)",
     ),
@@ -441,6 +461,14 @@ pub const EN: &[(&str, &str)] = &[
     (
         "서버 사본이 다른 금고의 것이라 무시했습니다. goyo-sync를 멈추고 동기화 폴더를 지운 뒤 다시 실행하세요.",
         "The server copy belongs to another vault and was ignored. Stop goyo-sync, delete the sync folder and start it again.",
+    ),
+    (
+        "서버의 goyo-sync 스크립트가 이 금고 형식을 받지 않습니다. goyo-sync 설정 창에서 '서버에 설치·업데이트'를 누르세요. 변경은 이 PC에 저장되어 있습니다.",
+        "The goyo-sync script on the server does not accept this vault's format. Press 'Install or update on server' in the goyo-sync settings window. Changes are kept on this PC.",
+    ),
+    (
+        "서버의 열쇠 파일 기록과 이 PC의 금고 사본이 맞지 않아 서버가 업로드를 받지 않습니다(다른 PC가 열쇠를 바꿨거나 열쇠 파일 동기화를 껐음). 새 열쇠 파일을 받으면 다시 올라갑니다. 변경은 이 PC에 저장되어 있습니다.",
+        "The server does not take the upload because its key file record does not match this PC's vault copy (another PC changed the keys or turned key-file sync off). Uploads resume once this PC has the new key file. Changes are kept on this PC.",
     ),
     (
         "서버에서 받은 금고를 인증하지 못해 무시했습니다(손상 또는 변조). 이 PC의 상태를 다시 올립니다.",
@@ -484,6 +512,10 @@ pub const EN: &[(&str, &str)] = &[
     ("열림 · {}", "Open · {}"),
     ("열림 · {} · {}", "Open · {} · {}"),
     ("열쇠 백업", "Back up key"),
+    (
+        "열쇠 수정 번호가 한도에 닿았습니다. 새 금고를 만들어 항목을 옮기세요.",
+        "The key file's change number has reached its limit. Create a new vault and move the entries there.",
+    ),
     ("열쇠 파일", "Key file"),
     (
         "열쇠 파일 · 금고와 같은 폴더에 있습니다",
@@ -498,8 +530,16 @@ pub const EN: &[(&str, &str)] = &[
         "Could not give the key file its name back. After locking, rename {temp} to {name}.",
     ),
     (
+        "열쇠 파일과 금고 파일이 서로 다른 금고의 것입니다.",
+        "The key file and the vault file belong to different vaults.",
+    ),
+    (
         "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠·OTP를 우회하는 복구 기능은 없습니다.",
         "The key file is encrypted with your password; keeping it apart from the vault adds protection.\r\nThere is no recovery for a lost password, key file or OTP.",
+    ),
+    (
+        "열쇠 파일의 제거 기록이 가득 찼습니다(480개). 더 이상 보안 키를 뺄 수 없습니다. 새 금고를 만들어 항목을 옮기세요.",
+        "The key file's removal record is full (480). No more security keys can be removed. Create a new vault and move the entries there.",
     ),
     (
         "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요.",
@@ -522,12 +562,20 @@ pub const EN: &[(&str, &str)] = &[
         "The key file was changed. Lock, open it again with the new password and back up the key.",
     ),
     (
+        "열지 않았습니다. 백업에서 복원이나 서버 기록을 확인하세요.",
+        "Not opened. Restore from a backup or check the server history.",
+    ),
+    (
         "예비 기기에 등록한 뒤 '닫기'를 누르세요.",
         "Enroll the spare device, then press 'Close'.",
     ),
     (
         "예비 휴대폰이나 다른 OTP 앱에 등록하면 지금 휴대폰과 같은 번호가 나옵니다.",
         "A spare phone or another OTP app enrolled here shows the same codes as your phone.",
+    ),
+    (
+        "예전 열쇠로 저장된 금고 파일을 새 열쇠로 다시 저장했습니다. 항목이 예상과 다르면 백업이나 서버 기록을 확인하세요.",
+        "The vault file saved under an older key is saved again under the new key. If the entries are not what you expect, check your backups or the server history.",
     ),
     ("올리는 중", "Uploading"),
     (
@@ -548,12 +596,44 @@ pub const EN: &[(&str, &str)] = &[
         "There is a sync folder ({}) next to this vault. goyo-sync uses it to exchange only an encrypted copy of the vault with your server. The key file and password are never sent.\n\nTurning sync on changes the vault format: version 0.7 and older cannot open this vault or later backups of it. Update your other PCs to 0.8 or later first. Turn sync on?",
     ),
     (
+        "이 금고 파일은 보안 키로 잠긴 열쇠 파일로 저장되었습니다. 이 고요 금고 빌드에는 보안 키 기능이 없어 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다.",
+        "This vault file was saved with a key file locked by a security key. This Goyo Vault build has no security-key support, so it cannot open it. Your password is not wrong.",
+    ),
+    (
+        "이 금고 파일은 이 열쇠 파일에 없는 열쇠로 저장되어 있습니다. 이 금고를 마지막으로 연 열쇠 파일을 선택하세요. 다른 PC에서 이 금고 파일의 열쇠를 바꿨다면 그 PC의 새 열쇠 파일로 여세요.",
+        "This vault file is saved under a key that is not in this key file. Choose the key file that last opened this vault. If this vault file's key was changed on another PC, open it with that PC's new key file.",
+    ),
+    (
+        "이 금고 파일은 이 열쇠 파일의 형식으로 다시 저장하면 용량 제한(8 MiB)을 넘어 열지 않았습니다. 비밀번호가 틀린 것이 아닙니다. 이 금고의 예전 열쇠 파일(0.8 형식)이 있으면 그것으로 열어 항목을 줄인 뒤 다시 여세요.",
+        "This vault file was not opened: saved again in this key file's format, it would exceed the size limit (8 MiB). Your password is not wrong. If you still have this vault's earlier key file (0.8 format), open it with that one, remove entries, then open it again.",
+    ),
+    (
+        "이 금고 파일은 이 PC의 열쇠 파일보다 새로운 열쇠 파일로 저장되었습니다. 다른 PC에서 이 금고의 열쇠 파일을 바꾼 것으로 보입니다. 그 PC의 새 열쇠 파일을 USB로 가져와 그것으로 여세요.",
+        "This vault file was saved with a newer key file than this PC's. The vault's key file seems to have been changed on another PC. Bring that PC's new key file over by USB and open the vault with it.",
+    ),
+    (
+        "이 금고 파일은 이 열쇠 파일의 예전 열쇠로 저장되어 있습니다.\n다른 PC에서 열쇠를 바꾼 뒤 이 PC에서 처음 여는 것이라면 정상입니다(같은 열쇠 파일을 함께 쓰거나 새 열쇠 파일을 옮겨 온 경우).\n그런 일이 없었다면 예전 열쇠를 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 그 경우 '아니요'를 누르고 백업이나 서버 기록을 확인하세요.\n이 파일을 열고 새 열쇠로 다시 저장할까요?",
+        "This vault file is saved under an older key of this key file.\nThat is normal if this PC opens it for the first time after the key was changed on another PC (sharing one key file, or with the new key file carried over).\nIf nothing like that happened, someone holding the old key may have swapped the vault file. In that case press 'No' and check your backups or the server history.\nOpen this file and save it again under the new key?",
+    ),
+    (
         "이 금고는 OTP를 쓰지 않습니다.",
         "This vault does not use an OTP.",
     ),
     (
+        "이 백업은 이 열쇠 파일에 없는 열쇠로 잠겨 있습니다. 그 백업을 만들 때의 열쇠 파일 사본으로 복원하세요.",
+        "This backup is locked with a key that is not in this key file. Restore it with the copy of the key file from when the backup was made.",
+    ),
+    (
         "이 열쇠 파일은 OTP를 씁니다. 휴대폰 OTP 앱의 6자리도 입력하세요.",
         "This key file uses an OTP. Also enter the 6-digit code from your phone.",
+    ),
+    (
+        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md).",
+        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault is the default build without security-key support, so it cannot open this file. Your password is not wrong. Security-key support is still experimental and has to be built yourself (docs/SECURITY_KEY.md).",
+    ),
+    (
+        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md). 파일이 손상되었거나 더 새로운 버전에서 만든 파일일 수도 있습니다.",
+        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault is the default build without security-key support, so it cannot open this file. Your password is not wrong. Security-key support is still experimental and has to be built yourself (docs/SECURITY_KEY.md). The file may also be damaged, or made by a newer version.",
     ),
     ("이름 · 목록에 표시됩니다", "Name · shown in the list"),
     (
@@ -655,6 +735,10 @@ pub const EN: &[(&str, &str)] = &[
     (
         "주의: 열쇠 파일이 금고와 같은 폴더에 있어, 폴더째 가져간 사람은 비밀번호만 알아내면 됩니다. '열쇠 백업'으로 USB 등에 옮기고 원래 열쇠는 지우세요.",
         "Warning: the key file is in the vault's folder, so whoever takes the folder only needs your password. Copy it to a USB stick with 'Back up key' and delete the original.",
+    ),
+    (
+        "지난 열쇠 변경을 마저 끝내 금고 파일을 새 열쇠로 다시 저장했습니다.",
+        "The last key change is now finished: the vault file is saved again under the new key.",
     ),
     (
         "창을 선택하면\nQR이 다시 보입니다",
@@ -798,6 +882,10 @@ pub const EN: &[(&str, &str)] = &[
     ("화면 초기화 실패", "Could not initialize the window"),
     ("화면이 닫혔습니다.", "The window was closed."),
     ("확인 · 새 파일로 복원", "Restore to a new file"),
+    (
+        "확인한 뒤에 금고 파일이 바뀌어 열지 않았습니다. 다시 열어 보세요. 그런 일이 없었다면 누군가 금고 파일을 바꿔 넣었을 수 있으니 백업이나 서버 기록을 확인하세요.",
+        "The vault file changed after you confirmed it, so it was not opened. Try opening it again. If nothing like that happened, someone may have swapped the vault file: check your backups or the server history.",
+    ),
     ("휴대폰 OTP", "Phone OTP"),
     ("휴대폰 OTP 등록 · {tag}", "Enroll your phone · {tag}"),
     (
@@ -1218,6 +1306,8 @@ pub const EN: &[(&str, &str)] = &[
         "새 형식 · 고요 금고를 업데이트하세요",
         "Newer format · update Goyo Vault",
     ),
+    ("서버 스크립트 업데이트 필요", "Server script update needed"),
+    ("열쇠 파일 갱신 필요", "Key file update needed"),
     (
         "실행 중인 도우미가 처리하고 있어 건너뛰었습니다",
         "Skipped: the running helper is working on it",

@@ -56,6 +56,36 @@ pub fn kdf_params() -> (u32, u32) {
     (KDF_MEMORY_KIB, KDF_PASSES)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Recorded values that `random_into` hands out first, one per call and
+    /// in order, so that a lib unit test reproduces a file byte for byte
+    /// (spec §3.1). Release builds and the binaries compile none of this.
+    static TEST_RANDOM: std::cell::RefCell<std::collections::VecDeque<Vec<u8>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// The time `keyfile::seal` writes as `written` while it is set.
+    static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+/// Queues recorded values for the next `random_into` calls of this thread.
+#[cfg(test)]
+pub(crate) fn queue_random(values: &[&[u8]]) {
+    TEST_RANDOM.with(|q| q.borrow_mut().extend(values.iter().map(|v| v.to_vec())));
+}
+/// Recorded values that no `random_into` call took yet.
+#[cfg(test)]
+pub(crate) fn queued_random() -> usize {
+    TEST_RANDOM.with(|q| q.borrow().len())
+}
+/// Sets (or with None clears) the time `keyfile::seal` writes.
+#[cfg(test)]
+pub(crate) fn set_test_now(now: Option<u64>) {
+    TEST_NOW.with(|t| t.set(now));
+}
+#[cfg(test)]
+pub(crate) fn test_now() -> Option<u64> {
+    TEST_NOW.with(std::cell::Cell::get)
+}
+
 pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
     let mut out = Zeroizing::new([0; N]);
     random_into(out.as_mut_slice())?;
@@ -64,6 +94,17 @@ pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
 /// Fills `out` in place. Long-lived secrets use this so the bytes are never
 /// moved through a return value, which leaves unwiped copies on the stack.
 pub fn random_into(out: &mut [u8]) -> Result<()> {
+    #[cfg(test)]
+    if let Some(value) = TEST_RANDOM.with(|q| q.borrow_mut().pop_front()) {
+        // A value of another length means the test recorded the wrong draws.
+        assert_eq!(
+            value.len(),
+            out.len(),
+            "recorded random value of the wrong length"
+        );
+        out.copy_from_slice(&value);
+        return Ok(());
+    }
     for chunk in out.chunks_mut(64) {
         // Collect 1024 raw hardware bits per conditioned 512-bit block. This
         // does not create entropy: CPU/microcode and the machine remain trusted.
@@ -366,6 +407,34 @@ mod tests {
     #[test]
     fn hardware_entropy_available() {
         assert_ne!(*random::<32>().unwrap(), *random::<32>().unwrap());
+    }
+    #[test]
+    fn recorded_random_values_come_first_and_in_order() {
+        queue_random(&[&[1; 32], &[2; 24]]);
+        assert_eq!(queued_random(), 2);
+        assert_eq!(*random::<32>().unwrap(), [1; 32]);
+        let mut nonce = [0; 24];
+        random_into(&mut nonce).unwrap();
+        assert_eq!(nonce, [2; 24]);
+        // Then the hardware again.
+        assert_eq!(queued_random(), 0);
+        assert_ne!(*random::<32>().unwrap(), [1; 32]);
+        // Another thread has its own queue.
+        queue_random(&[&[3; 16]]);
+        std::thread::spawn(|| assert_eq!(queued_random(), 0))
+            .join()
+            .unwrap();
+        assert_eq!(*random::<16>().unwrap(), [3; 16]);
+        set_test_now(Some(7));
+        assert_eq!(test_now(), Some(7));
+        set_test_now(None);
+        assert_eq!(test_now(), None);
+    }
+    #[test]
+    #[should_panic(expected = "recorded random value of the wrong length")]
+    fn a_recorded_value_of_the_wrong_length_is_a_test_bug() {
+        queue_random(&[&[1; 16]]);
+        let _ = random::<32>();
     }
     #[test]
     fn hkdf_and_construction_vectors() {

@@ -12,7 +12,7 @@ From 0.8.0 a separate tool, `goyo-sync.exe`, lets you use one vault on several P
 
 ## What travels and what stays on the PC
 
-- **Sent to the server:** the whole encrypted vault file (`GOYOVA02` format).
+- **Sent to the server:** the whole encrypted vault file (`GOYOVA02` format; `GOYOVA04` for a vault whose key was changed in 0.9.0).
 - **Never leaves the PC:** the key file (`.goyokey`), the password, the OTP secret and any plaintext. Without the key file neither the server nor goyo-sync can decrypt the vault.
 - **What the server learns:** the vault ID, the file size, when the contents changed, the IP address you connect from and how many versions it keeps. The helper also connects every `interval` seconds (default 60) while you are signed in, so the server learns **when each PC is on**. A longer interval makes this coarser.
 - **OTP-only changes are not uploaded.** In a vault with an OTP each unlock updates the OTP record, but that alone is never uploaded. Even while the server takes no upload from this PC, an upload that is waiting is not made again when you open the vault. So the server normally does not learn when you open the vault. There is one exception: if changes are still waiting to go up and a new copy arrives from the server, the vault app merges it (at the next unlock if it was closed) and uploads its changes again. The server learns that moment.
@@ -33,6 +33,12 @@ The vault app and the helper talk only through files in the `<vault file name>.s
 - An ssh key without a passphrase, or the ssh-agent service. The helper runs unattended and cannot ask for a passphrase.
 - A way to see the server's host key fingerprint (its console or admin page), to compare on the first connection.
 - To use it away from home, do not expose ssh to the internet. A VPN such as Tailscale that reaches the server is recommended.
+
+**Upgrading to 0.9.0, in order.** A vault whose key (data key) was changed in 0.9.0 is uploaded in the `GOYOVA04` format. The 0.9.0 server script and helper take both `GOYOVA02` and `GOYOVA04`; older ones do not take `GOYOVA04`. So update **the server script first** ('Install or update on server'), **then Goyo Vault and goyo-sync on every PC**, and change keys only after that. When the order slips, this is what you see:
+
+- Old server script: the 0.9.0 helper shows the `oldserver` state ('Server script update needed'), and the vault app says "The goyo-sync script on the server does not accept this vault's format…". Changes stay on this PC and go up within 10 minutes of updating the script (at once if you restart the helper).
+- 0.8 helper: its own checks refuse the file to upload, so it shows only `refused` (Sync warning, "Sync error: see goyo-sync.log"); the log says `refused outgoing before upload`. Once goyo-sync is 0.9.0, its first run uploads that file once more.
+- 0.8 Goyo Vault: it refuses `GOYOVA03`/`GOYOVA04` vault files and server copies as "a vault format made by a newer version" and stops syncing. It never overwrites them.
 
 ## 1. Install and open the settings window
 
@@ -150,7 +156,7 @@ With the vault open, the label at the top reads like `Open · Synced · vault.go
 |**Uploading**|Changes wait for the helper or the server. They are already saved on this PC.|
 |**Helper off**|`goyo-sync.exe` is not running (no status file, or none written for 3 minutes).|
 |**Offline**|The helper cannot reach the server: `offline`, `auth`, `hostkey`, `nossh` or `server` under troubleshooting below.|
-|**Sync warning**|Something needs you: the server sent an older state, a copy failed authentication, merging would exceed a limit, a newer format arrived, or the helper is in `refused`, `config` or `update`. A warning from the vault side stays until you lock.|
+|**Sync warning**|Something needs you: the server sent an older state, a copy failed authentication, merging would exceed a limit, a newer format arrived, or the helper is in `refused`, `config`, `update`, `oldserver` or `keyfile`. A warning from the vault side stays until you lock.|
 
 **Check code.** When you unlock (or when the vault first becomes synced afterwards), the status line shows `Synced · check code XXXX-XXXX-XXXX-XXXX` once. It is computed over each live entry's ID and contents (all four fields) and over the deletion records, so **the same code on two PCs means the same contents.** A different code means sync is still under way, or the server shows different copies to different PCs. It is computed with the data key, so the code reveals nothing about the entries. It has 64 bits, so even someone with the key needs about 2^64 tries to make other contents give the same code. The OTP record is left out. Lock and unlock to see it again.
 
@@ -165,7 +171,9 @@ Status-line messages:
 |The copy from the server failed authentication and was ignored.|The server copy is damaged or altered. This PC uploads its state over it.|
 |The server copy belongs to another vault and was ignored.|A new vault was created at the same path, or another vault was restored there. Press 'Stop' in the settings window, delete the `vault.goyo.sync` folder and press 'Save and start'. The old vault's history stays on the server.|
 |Merging would exceed 1000 entries or 8 MiB, so nothing was merged.|Remove some entries; the merge is tried again.|
-|The server copy uses a newer format, so sync stopped.|Update Goyo Vault on this PC.|
+|The server copy uses a newer format, so sync stopped.|Update Goyo Vault on this PC. This version stops this way for a server copy in `GOYOVA05` or later, and for a `GOYOVA03`/`GOYOVA04` copy saved under a key this PC's key file lacks or at a newer key state than this PC's (the key was changed on another PC; in a vault opened with a 0.9.0 key file, also for a `GOYOVA01`/`GOYOVA02` copy). Such a copy is neither merged nor overwritten with this PC's state. The stop lasts until you lock and is decided again at the next unlock; opening with the other PC's new key file lets sync go on.|
+|The goyo-sync script on the server does not accept this vault's format. …|The server script is older than 0.9.0 and refused a `GOYOVA04` upload (helper state `oldserver`). Press 'Install or update on server' in the settings window. Changes are kept on this PC.|
+|The server does not take the upload because its key file record does not match this PC's vault copy. …|The server refused the upload with KEY_BEHIND (helper state `keyfile`). Only a server with key-file sync answers so; the current server script does not. Uploads resume once this PC has that key file.|
 |The key file is inside the sync folder, so this vault does not sync.|Move the key file to another folder.|
 |Sync offline / SSH authentication failed / host key changed / helper not running / see goyo-sync.log|See troubleshooting below. Your changes are saved on this PC.|
 
@@ -238,9 +246,13 @@ The helper writes its state as one word to the `status` file in the sync folder;
 |`server`|Offline|The server script is missing or failed, Python is missing, or the reply was malformed. Too much text printed by the login shell also ends here. Also: an upload was answered with a CONFLICT no honest server sends (log: `holding back uploads`), or the remote side printed text that looks like an ssh error. A server already handling 8 connections (`busy` in the log) also lands here; the helper tries again after 30 s, then at growing intervals.|'Check connection' tells a missing script or Python apart. Install again with 'Install or update on server' (selftest included), and check the script path and Python command in the advanced settings. If shell startup files print text, make them print only in interactive shells (for example `[[ $- == *i* ]] \|\| return` at the top of `~/.bashrc`). If the log shows `holding back uploads`, the server may be keeping this PC's uploads out (a freeze); check the server. Your changes stay on this PC, and only the newest file is retried, 30 seconds to 15 minutes apart.|
 |`refused`|Sync warning|The helper's checks or the server refused the upload (a link at the file, another vault's ID, the server's limit of 64 vaults, less than 256 MiB would stay free on the server disk, and so on).|Read the reason with 'View log'. Editing the vault again retries with a new file. If the log says `a file of another vault` (for example a new vault at the same path), press 'Stop', delete the `vault.goyo.sync` folder and press 'Save and start'. If it was the server's disk space, free up room on the server, then edit the vault again.|
 |`config`|Sync warning|`goyo-sync.conf` has an error, so the helper stopped.|Open the settings window: it names the line and shows the settings it could read. Fix them and press 'Save and start'.|
-|`update`|Sync warning, newer-format message|The server copy uses a newer Goyo Vault format.|Update Goyo Vault and goyo-sync on this PC.|
+|`update`|Sync warning, newer-format message|The server copy uses a newer Goyo Vault format (`GOYOVA05` or later).|Update Goyo Vault and goyo-sync on this PC.|
+|`oldserver`|Sync warning, server-script message|The server script is older than 0.9.0 and refused a `GOYOVA04` upload (log: `server refused GOYOVA04`). The settings window's list shows 'Server script update needed'.|Press 'Install or update on server'. The same file is uploaded again every 10 minutes and when the helper restarts.|
+|`keyfile`|Sync warning, key-file message|The server refused the upload with KEY_BEHIND: its key file record does not match this vault copy's key. Only a server with key-file sync answers so. The settings window's list shows 'Key file update needed'.|Uploads resume once this PC has the key file changed on another PC; until then it tries again every 10 minutes.|
 
 For "Helper off", press 'Save and start' in the settings window and check that autostart is on. If it ends right after starting, the status line and 'View log' tell you why.
+
+**A key file in a newer format.** If unlocking says "This key file was made by a newer version. Update Goyo Vault.", a newer version than this PC's Goyo Vault wrote that key file: update this PC. In a vault opened with a 0.9.0 key file (`GOYOKE03`), the current development version refuses a password change with the same sentence and writes nothing. For a key file locked by a security key, see [SECURITY_KEY.en.md](SECURITY_KEY.en.md).
 
 **The log, `goyo-sync.log`.** It sits next to the helper and shows with 'View log'; it moves to `goyo-sync.log.1` past 256 KiB. One line per event: UTC time, vault tag, operation, result, server version, bytes sent and received, duration, ssh exit code, the first line of ssh's own messages (`ssh=`) and the first line of the remote side's stderr (`err=`). For each call, ssh's messages go to a `goyo-sync.ssh-*.log` file next to the helper (or in %TEMP% if that folder takes no file) and are deleted when the call ends. One left behind by a helper killed mid-call is deleted at a later start once it is an hour old. The log never contains vault contents, but ssh's message lines can name your server and the lines name your vault files, so check it before sharing. What the settings window did shows as `window check`, `window trust`, `window install`, `window list` and `fetch` lines. Common lines:
 
@@ -256,6 +268,9 @@ For "Helper off", press 'Save and start' in the settings window and check that a
 |`server version went back A->B`|The server sent an older version. The vault app warns and uploads this PC's state again.|
 |`incoming changed outside the helper`|The received copy in the sync folder was changed or deleted from outside; it is fetched again.|
 |`refused outgoing before upload: …`|The checks refused the file to upload. ssh was not started.|
+|`server refused GOYOVA04: its goyo-sync script is older than 0.9.0; use 'Install or update on server'`|The server script does not know `GOYOVA04` (`oldserver`). Press 'Install or update on server'.|
+|`retrying a GOYOVA04 upload an older helper refused`|A `GOYOVA04` file that a 0.8 helper refused is uploaded once more in this run. Normal.|
+|`server refused the upload: its key file for this vault has another state`|The server refused it with KEY_BEHIND (`keyfile`).|
 |`state=config: …`|A settings or folder problem (vault file not found, the sync folder or `helper.lock` in it is a link, …). That folder is left alone.|
 |`retry in N s`|Waiting after a failure: from 30 seconds, doubling up to 15 minutes; 15 minutes for authentication and host-key errors. An edit in the vault triggers one immediate try, except after the server was found holding back uploads (`holding back uploads`): then only the newest file is tried, when the wait ends.|
 |`banner=N`|N bytes printed by the server's shell were skipped (harmless up to 64 KiB). Making shell startup files (`~/.bashrc`, `~/.zshenv` and so on) print only in interactive shells removes them.|

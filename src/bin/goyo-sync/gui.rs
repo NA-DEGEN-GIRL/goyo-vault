@@ -2105,6 +2105,8 @@ fn state_text(state: SyncState, server: u64) -> (String, Tone) {
         SyncState::Refused => t("업로드 거부됨 · '로그 보기'로 확인하세요", Tone::Danger),
         SyncState::Config => t("설정 오류 · 설정을 고친 뒤 저장하세요", Tone::Danger),
         SyncState::Update => t("새 형식 · 고요 금고를 업데이트하세요", Tone::Danger),
+        SyncState::OldServer => t("서버 스크립트 업데이트 필요", Tone::Danger),
+        SyncState::KeyFile => t("열쇠 파일 갱신 필요", Tone::Danger),
     }
 }
 fn outcome_text(outcome: &Outcome, live: Live) -> (String, Tone) {

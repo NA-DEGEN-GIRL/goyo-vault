@@ -6,8 +6,10 @@
 //! after a successful unlock deletes the copies that hold nothing the
 //! opened files lack. Every other temp file stays, as in 0.8.
 use super::{
-    Contents, DataRef, FileLock, Format, KEY_MAGIC, KEY_MAGIC_NO_OTP, MAX_FILE, Session, TOO_LARGE,
-    decode_data, flush, publish, read_bounded,
+    Contents, DataRef, FileLock, Format, Header, MAX_FILE, Session, TOO_LARGE, decode_data, flush,
+    key_index,
+    keyfile::{self, Bundle, KEY_FILE_LIMIT},
+    publish, read_bounded, read_header,
 };
 use crate::crypto::Result;
 use std::{
@@ -16,8 +18,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Largest key file read before any password.
-pub(super) const KEY_LIMIT: usize = 1024;
+/// Largest key file read before any password, a KF2 file of any size
+/// included.
+pub(super) const KEY_LIMIT: usize = KEY_FILE_LIMIT;
 /// Recovery looks at no more temp files than this per file, newest first,
 /// so a folder full of planted ones costs little.
 pub(super) const MAX_CANDIDATES: usize = 4;
@@ -124,31 +127,16 @@ pub(super) struct KeyHead {
     /// have none and count as 0.
     pub epoch: u64,
 }
-/// The header of a key file of a known format and length; None for
-/// anything else, a newer format included.
+/// The header of a key file of a known format that parses (a 0.8 file of
+/// its exact length, a KF2 file by the strict parse); None for anything
+/// else, a newer format included.
 pub(super) fn key_head(data: &[u8]) -> Option<KeyHead> {
-    let known = matches!(
-        (data.len(), data.get(..8)),
-        (148, Some(m)) if m == KEY_MAGIC
-    ) || matches!(
-        (data.len(), data.get(..8)),
-        (128, Some(m)) if m == KEY_MAGIC_NO_OTP
-    );
-    known.then(|| KeyHead {
-        id: data[8..24].try_into().unwrap(),
-        epoch: 0,
-    })
-}
-/// A key file magic this build does not know (GOYOK…): a newer build wrote
-/// it. It is not damaged, so no temp file ever takes its place.
-fn newer_key(data: &[u8]) -> bool {
-    data.get(..8).is_some_and(|magic| {
-        magic.starts_with(b"GOYOK") && magic != KEY_MAGIC && magic != KEY_MAGIC_NO_OTP
-    })
+    keyfile::head(data).map(|(id, epoch)| KeyHead { id, epoch })
 }
 /// A key file as an unlock finds it.
 pub(super) enum KeyRead {
-    /// A key file of a known or newer format, read in full.
+    /// A key file of a known format, read in full, or a security-key or
+    /// newer build's file, of which at most KEY_LIMIT + 1 bytes are read.
     Found(Vec<u8>),
     /// Missing (`replace` false) or unparseable (`replace` true): a temp
     /// file may stand in (rule i). `before` is what the unlock did with it
@@ -159,21 +147,27 @@ pub(super) enum KeyRead {
     },
 }
 /// Reads the key file at `path`. An error is a key file that is there but
-/// cannot be read (in use, no permission), or one too large to read that
-/// starts like a newer build's: no temp file replaces that.
+/// cannot be read (in use, no permission). A security-key file or a newer
+/// build's is found whatever its size or grammar (spec §4.6): this build
+/// cannot tell a damaged one from a later build's, so no temp file ever
+/// replaces it, and KeyFile::from_bytes refuses it on its magic.
 pub(super) fn read_key(path: &Path) -> Result<KeyRead> {
     match read_bounded(path, KEY_LIMIT) {
-        Ok(b) if key_head(&b).is_some() || newer_key(&b) => Ok(KeyRead::Found(b)),
+        Ok(b) if key_head(&b).is_some() || keyfile::never_replaced(&b) => Ok(KeyRead::Found(b)),
         Ok(b) => Ok(KeyRead::Lost {
             replace: true,
             before: Ok(b),
         }),
+        // Too large: the head decides, which is all the refusal reads.
         Err(e) if e == TOO_LARGE => match magic(path) {
-            Some(m) if !newer_key(&m) => Ok(KeyRead::Lost {
+            Some(m) if keyfile::never_replaced(&m) => {
+                keyfile::read_head(path, KEY_LIMIT).map(KeyRead::Found)
+            }
+            Some(_) => Ok(KeyRead::Lost {
                 replace: true,
                 before: Err(e),
             }),
-            _ => Err(e),
+            None => Err(e),
         },
         Err(e) if !path.exists() => Ok(KeyRead::Lost {
             replace: false,
@@ -243,23 +237,30 @@ pub(super) fn restore_key(temp: &Path, key: &Path) -> bool {
     true
 }
 /// Rule (iii): the copy of a missing vault file to take back. Only copies
-/// that decrypt under this vault's current key count, so a planted copy
-/// under an older key is never taken. The highest `generation` of a v2
-/// copy wins, else the newest v1 copy.
+/// that name this vault's current key (spec §4.5; `kf2_ids` as for
+/// key_index) and decrypt under it count, so a planted copy under an older
+/// key is never taken. The highest `generation` of a v2 copy wins, else the
+/// newest v1 copy.
 pub(super) fn vault_candidate(
     vault: &Path,
     id: &[u8; 16],
-    key: &[u8; 32],
-) -> Option<(PathBuf, Format, Contents)> {
+    keys: &Bundle,
+    kf2_ids: Option<&[[u8; 16]]>,
+) -> Option<(PathBuf, Format, Header, Contents)> {
     candidates(vault, MAX_FILE)
         .into_iter()
         .filter_map(|c| {
-            let (format, contents) = decode_data(id, key, &c.bytes).ok()?;
+            let (_, header) = read_header(&c.bytes).ok()?;
+            if key_index(kf2_ids, &header)? != 0 {
+                return None;
+            }
+            let (format, header, contents) =
+                decode_data(id, keys.current(), keys.id_key(), &c.bytes).ok()?;
             let rank = (format == Format::V2, contents.generation, c.written);
-            Some((rank, c.path, format, contents))
+            Some((rank, c.path, format, header, contents))
         })
         .max_by_key(|(rank, ..)| *rank)
-        .map(|(_, path, format, contents)| (path, format, contents))
+        .map(|(_, path, format, header, contents)| (path, format, header, contents))
 }
 /// Rule (iv), after a successful unlock of `s` with the key file `key`:
 /// deletes the temp files of this vault's key file (the key file in use
@@ -281,10 +282,19 @@ pub(super) fn clean(s: &Session, key: &Path) {
             let _ = fs::remove_file(path);
         }
     }
+    // Under any key of the bundle: an older-key copy of the same contents
+    // says nothing the vault file lacks either.
+    let kf2_ids = s.key_file.header().map(|h| h.key_ids.as_slice());
     for c in candidates(&s.path, MAX_FILE) {
-        if decode_data(&s.id, &s.key, &c.bytes)
-            .is_ok_and(|(format, contents)| format == s.format && same(contents.view(), s.data()))
-        {
+        let key = read_header(&c.bytes)
+            .ok()
+            .and_then(|(_, header)| key_index(kf2_ids, &header))
+            .and_then(|i| s.keys.keys().get(i));
+        if key.is_some_and(|key| {
+            decode_data(&s.id, key, s.keys.id_key(), &c.bytes).is_ok_and(|(format, _, contents)| {
+                format == s.format && same(contents.view(), s.data())
+            })
+        }) {
             let _ = fs::remove_file(&c.path);
         }
     }

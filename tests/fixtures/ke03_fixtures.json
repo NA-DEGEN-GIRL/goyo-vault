@@ -1,0 +1,130 @@
+{
+ "kdf_profiles": {
+  "test": {
+   "m": 64,
+   "t": 1,
+   "p": 1
+  },
+  "real": {
+   "m": 262144,
+   "t": 3,
+   "p": 1
+  }
+ },
+ "draw_order": [
+  "salt (32)",
+  "body nonce (24)"
+ ],
+ "fixtures": [
+  {
+   "file": "goyoke03-test.goyokey",
+   "kdf": "test",
+   "password": "goyo fixture passphrase, KE03",
+   "vault_id": "101112131415161718191a1b1c1d1e1f",
+   "epoch": 7,
+   "kind": "password",
+   "next": 3,
+   "pw_id": "303132333435363738393a3b3c3d3e3f",
+   "loss": 0,
+   "written": 1767225600,
+   "resume": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+   "tombstones": [
+    [
+     "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+     5757570648616468485
+    ],
+    [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     2
+    ]
+   ],
+   "keys": [
+    "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+   ],
+   "otp": "808182838485868788898a8b8c8d8e8f90919293",
+   "draws": [
+    "5a5b58595e5f5c5d52535051565754554a4b48494e4f4c4d4243404146474445",
+    "a5a4a7a6a1a0a3a2adacafaea9a8abaab5b4b7b6b1b0b3b2"
+   ],
+   "size": 460,
+   "tag": "d0ae538c5e5bdeaef009ae29055c806a",
+   "key_code": "6af6e45f0540f1c6"
+  },
+  {
+   "file": "goyoke03-keysoff.goyokey",
+   "kdf": "test",
+   "password": "another fixture passphrase",
+   "vault_id": "909192939495969798999a9b9c9d9e9f",
+   "epoch": 281474976710655,
+   "kind": "keys-off",
+   "next": 5,
+   "pw_id": "0102030405060708090a0b0c0d0e0f10",
+   "loss": 0,
+   "written": 1767225601,
+   "resume": "0000000000000000000000000000000000000000000000000000000000000000",
+   "tombstones": [
+    [
+     "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+     562949953421311
+    ],
+    [
+     "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+     281474976710655
+    ],
+    [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     4
+    ]
+   ],
+   "keys": [
+    "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+    "42434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f6061",
+    "636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182"
+   ],
+   "otp": null,
+   "draws": [
+    "3c3d3e3f38393a3b34353637303132332c2d2e2f28292a2b2425262720212223",
+    "c3c2c1c0c7c6c5c4cbcac9c8cfcecdccd3d2d1d0d7d6d5d4"
+   ],
+   "size": 544,
+   "tag": "12f5816cd94593c5af55336c002af204",
+   "key_code": "26c0e60076514644"
+  },
+  {
+   "file": "goyoke03-real.goyokey",
+   "kdf": "real",
+   "password": "goyo real-profile fixture passphrase",
+   "vault_id": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+   "epoch": 1,
+   "kind": "password",
+   "next": 1,
+   "pw_id": "7172737475767778797a7b7c7d7e7f80",
+   "loss": 0,
+   "written": 1767225600,
+   "resume": "0000000000000000000000000000000000000000000000000000000000000000",
+   "tombstones": [],
+   "keys": [
+    "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+   ],
+   "otp": null,
+   "draws": [
+    "111013121514171619181b1a1d1c1f1e010003020504070609080b0a0d0c0f0e",
+    "22232021262724252a2b28292e2f2c2d3233303136373435"
+   ],
+   "size": 312,
+   "tag": "51af9edf2d7225ba074565cc4c954af6",
+   "key_code": "5ab3e523313a4c70"
+  }
+ ],
+ "reseal": {
+  "file": "goyoke03-test-reseal.goyokey",
+  "source": "goyoke03-test.goyokey",
+  "resume": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+  "draws": [
+   "66676465626360616e6f6c6d6a6b686976777475727370717e7f7c7d7a7b7879",
+   "99989b9a9d9c9f9e919093929594979689888b8a8d8c8f8e"
+  ],
+  "size": 460
+ }
+}

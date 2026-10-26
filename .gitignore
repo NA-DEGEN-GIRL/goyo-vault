@@ -2,6 +2,9 @@
 /dist/
 *.goyo
 *.goyokey
+# The pinned key-file fixtures of scripts/make_key_fixtures.py; the unit
+# tests include them, so a clone without them does not build its tests.
+!/tests/fixtures/*.goyokey
 *.goyolock
 *.goyotmp
 /test-output/

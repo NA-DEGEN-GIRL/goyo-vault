@@ -147,8 +147,9 @@ impl Store {
         out
     }
     /// Gate 3 and the end check of spec §12 S11: every file the server
-    /// keeps is a version of vault `id` (GOYOVA02 and that ID up front) and
-    /// holds no stretch of the key file.
+    /// keeps is a version of vault `id` (GOYOVA02 or GOYOVA04 and that ID up
+    /// front, so never a key file's GOYOK…) and holds no stretch of the key
+    /// file.
     fn holds_only_vault_files(&self, id: &[u8; 16], key: &[u8]) {
         let files = self.files();
         assert!(!files.is_empty());
@@ -165,9 +166,10 @@ impl Store {
                 "{rel:?}"
             );
             assert!(
-                data.starts_with(b"GOYOVA02") && data[8..24] == id[..],
+                syncfile::is_sync_vault(data) && data[8..24] == id[..],
                 "{rel:?}"
             );
+            assert!(!data.starts_with(b"GOYOK"), "{rel:?}");
             assert!(
                 !data.windows(32).any(|w| key.windows(32).any(|k| k == w)),
                 "{rel:?} holds key-file bytes"
@@ -776,4 +778,73 @@ fn the_app_never_follows_a_link_at_incoming() {
     assert_eq!(ev.notice, merged(1, 0));
     assert!(ev.list_changed);
     assert!(titles(&s).iter().any(|t| t == "bank=first"));
+}
+
+/// Two PCs on a KF2 key file (the GOYOKE03 a later build writes for a vault
+/// without security keys) sync through the real server script: the vault
+/// file and every upload are GOYOVA04, the helper gates and uploads them,
+/// the server stores and serves them, and each PC merges the other's. No
+/// key file byte reaches the server (spec §4.4, §7.6, §14.7-6).
+#[test]
+fn kf2_vaults_sync_goyova04_end_to_end() {
+    use goyo_vault::{
+        crypto::{KdfProfile, set_kdf_profile},
+        vault::keyfile::{KeyFile, Kind, Plan, Spec, seal},
+    };
+    if !python() {
+        return;
+    }
+    set_kdf_profile(KdfProfile::Test);
+    let store = Store::new();
+    let (mut a, mut b) = (Pc::new("a", &store), Pc::new("b", &store));
+    let p = Provision::new().unwrap();
+    let mut sa = p.finish(&a.vault, &a.key, PASSWORD, None).unwrap();
+    sa.put(None, entry("mail", "first")).unwrap();
+    drop(sa);
+    // The key file sealed again as GOYOKE03: its one data key is both the
+    // current key and the ID key.
+    let id = vault_id(&a.vault);
+    let opened = KeyFile::read(&a.key).unwrap().open(PASSWORD, None).unwrap();
+    let spec = Spec {
+        vault_id: id,
+        epoch: 1,
+        kind: Kind::Password,
+        next: 1,
+        pw_id: [5; 16],
+        loss: 0,
+        tombstones: Vec::new(),
+        resume: [0; 32],
+    };
+    let (key, _) = seal(&spec, &opened.bundle, PASSWORD, Plan::PasswordOnly).unwrap();
+    fs::write(&a.key, &key).unwrap();
+    assert_eq!(a.pass(), report(SyncState::Idle, 0, None, None));
+    let mut sa = a.unlock("");
+    sa.enable_sync().unwrap();
+    assert_eq!(&fs::read(&a.vault).unwrap()[..8], b"GOYOVA04");
+    let first = a.upload();
+    assert_eq!(&first[..8], b"GOYOVA04");
+    assert_eq!(a.pass(), report(SyncState::Ok, 1, Some(1), None));
+    assert_eq!(store.versions(&id), [(1, first.clone())]);
+    assert_eq!(notice(sa.poll_sync()), synced(&sa));
+
+    // B has both files by USB, and adds an entry: its upload from no
+    // version loses to version 1, which its app merges and offers again.
+    fs::copy(&a.key, &b.key).unwrap();
+    fs::copy(&a.vault, &b.vault).unwrap();
+    assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
+    let mut sb = b.unlock("");
+    sb.put(None, entry("bank", "second")).unwrap();
+    assert_eq!(b.pass(), report(SyncState::Ok, 1, None, Some(1)));
+    sb.poll_sync();
+    assert_eq!(b.pass(), report(SyncState::Ok, 2, Some(2), None));
+    assert_eq!(a.pass(), report(SyncState::Ok, 2, None, Some(2)));
+    assert_eq!(notice(sa.poll_sync()), merged(1, 0));
+    assert_eq!(titles(&sa), ["bank=second", "mail=first"]);
+    assert_eq!(titles(&sa), titles(&sb));
+    assert_eq!(sa.check_code(), sb.check_code());
+    for (_, blob) in store.versions(&id) {
+        assert_eq!(&blob[..8], b"GOYOVA04");
+    }
+    store.holds_only_vault_files(&id, &key);
+    set_kdf_profile(KdfProfile::Real);
 }

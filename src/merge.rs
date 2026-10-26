@@ -49,11 +49,16 @@ pub(crate) enum MergeError {
 
 /// Merges the authenticated `remote` copy into `local`. `remote.seen` is
 /// ignored: it is the other PC's. `now_step` is the current OTP time step.
+/// `id_key` is the vault's ID key, which derives the IDs of moved texts on
+/// every PC alike; `overhead` is what the session's vault file adds to the
+/// plaintext (LEGACY_OVERHEAD or KEYED_OVERHEAD), so a result that would
+/// not fit its file is refused here and not when it is saved.
 pub(crate) fn merge(
-    key: &[u8; 32],
+    id_key: &[u8; 32],
     local: DataRef,
     remote: Contents,
     now_step: u64,
+    overhead: usize,
 ) -> Result<(Contents, MergeReport), MergeError> {
     let Contents {
         last: remote_last,
@@ -119,12 +124,14 @@ pub(crate) fn merge(
             if moves > MAX_MOVES {
                 return Err(MergeError::TooLarge);
             }
-            let id2 = derived_id(key, b"goyo dup\0", &id, e.fields());
+            let id2 = derived_id(id_key, b"goyo dup\0", &id, e.fields());
             e.set_ids(id2, id);
             next = Some(e);
         }
     }
-    if out.len() > MAX_ENTRIES || plain_size(Format::V2, &out, tombstones.len()) + 64 > MAX_FILE {
+    if out.len() > MAX_ENTRIES
+        || plain_size(Format::V2, &out, tombstones.len()) + overhead > MAX_FILE
+    {
         return Err(MergeError::TooLarge);
     }
     let out_ids: BTreeSet<EntryId> = out.iter().map(Entry::id).collect();
@@ -215,11 +222,12 @@ pub(crate) fn merge(
 /// same deletions; a fork shows different ones. It is keyed with the data
 /// key, so it reveals nothing about the entries, and 64 bits, so not even a
 /// key holder can make other contents match a given code. The OTP watermark
-/// is left out because OTP-only changes are not synced.
-pub(crate) fn check_code(key: &[u8; 32], entries: &[Entry], tombstones: &[EntryId]) -> String {
+/// is left out because OTP-only changes are not synced. `id_key` is the
+/// vault's ID key, the same on every PC whatever key changes it saw.
+pub(crate) fn check_code(id_key: &[u8; 32], entries: &[Entry], tombstones: &[EntryId]) -> String {
     let live: BTreeMap<EntryId, &Entry> = entries.iter().map(|e| (e.id(), e)).collect();
     let dead: BTreeSet<&EntryId> = tombstones.iter().collect();
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key size");
+    let mut mac = Hmac::<Sha256>::new_from_slice(id_key).expect("HMAC accepts any key size");
     mac.update(b"goyo sync check\0");
     for (id, e) in &live {
         let mut text = Sha256::new();
@@ -246,7 +254,7 @@ pub(crate) fn check_code(key: &[u8; 32], entries: &[Entry], tombstones: &[EntryI
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::MAX_TEXT;
+    use crate::vault::{LEGACY_OVERHEAD, MAX_TEXT};
 
     const KEY: [u8; 32] = [7; 32];
     const NOW: u64 = 1_000_000;
@@ -285,7 +293,7 @@ mod tests {
         (ids(c), dead(c))
     }
     fn run(local: &Contents, remote: &Contents) -> (Contents, MergeReport) {
-        merge(&KEY, view(local), remote.clone(), NOW).unwrap()
+        merge(&KEY, view(local), remote.clone(), NOW, LEGACY_OVERHEAD).unwrap()
     }
     fn text(c: &Contents, id: EntryId) -> Option<String> {
         let e = c.entries.iter().find(|e| e.id() == id)?;
@@ -585,7 +593,7 @@ mod tests {
         let check = |local: Contents, remote: Contents| {
             let before = (state(&local), local.generation, local.last);
             assert_eq!(
-                merge(&KEY, view(&local), remote, NOW).err(),
+                merge(&KEY, view(&local), remote, NOW, LEGACY_OVERHEAD).err(),
                 Some(MergeError::TooLarge)
             );
             assert_eq!((state(&local), local.generation, local.last), before);
@@ -719,7 +727,7 @@ mod tests {
         older: &Contents,
         deleted: &BTreeSet<EntryId>,
     ) -> Contents {
-        let (m, r) = merge(&KEY, view(local), remote.clone(), NOW).unwrap();
+        let (m, r) = merge(&KEY, view(local), remote.clone(), NOW, LEGACY_OVERHEAD).unwrap();
         let (mine, theirs, merged) = (state(local), state(remote), state(&m));
         // Tombstones are the union; live entries all others of both sides.
         let all_dead: BTreeSet<EntryId> = mine.1.union(&theirs.1).copied().collect();

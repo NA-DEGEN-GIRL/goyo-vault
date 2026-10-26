@@ -4,7 +4,7 @@
 //! stream, a line-ending translation or shell output cannot pass as data.
 //! Only the helper and tests use this; goyo-vault.exe never calls it.
 use crate::{
-    syncfile::{MIN_VAULT, VAULT_MAGIC, decimal, newer_vault_format, parse_hex},
+    syncfile::{decimal, is_sync_vault, newer_vault_format, parse_hex},
     vault::MAX_FILE,
 };
 use sha2::{Digest, Sha256};
@@ -62,10 +62,14 @@ pub enum Status {
     BadBlob = 11,
     TooLarge = 12,
     Limit = 13,
+    /// The upload's header does not match the server's key file for the
+    /// vault (key-file sync, spec §7.13); only a PUT gets it. Never stored
+    /// as a refusal: a new key file makes the upload land.
+    KeyBehind = 14,
     ServerError = 20,
 }
 impl Status {
-    pub const ALL: [Status; 10] = [
+    pub const ALL: [Status; 11] = [
         Status::Ok,
         Status::NotModified,
         Status::Conflict,
@@ -75,6 +79,7 @@ impl Status {
         Status::BadBlob,
         Status::TooLarge,
         Status::Limit,
+        Status::KeyBehind,
         Status::ServerError,
     ];
     pub fn code(self) -> u8 {
@@ -101,9 +106,10 @@ pub enum WireError {
     Sha,
     /// A blob where none is allowed, or a malformed LIST.
     Blob,
-    /// Not a GOYOVA02 file of this vault, 96 B to 8 MiB.
+    /// Not a GOYOVA02 (96 B to 8 MiB) or GOYOVA04 (140 B to 8 MiB) file of
+    /// this vault.
     Vault,
-    /// GOYOVA03 or later: a newer Goyo Vault wrote it.
+    /// GOYOVA05 or later: a newer Goyo Vault wrote it.
     NewerFormat,
     /// The HELLO echo differs: the ssh pipe is not binary-transparent.
     Echo,
@@ -121,7 +127,7 @@ impl WireError {
             Self::Length => "wrong blob length",
             Self::Sha => "blob sha256 mismatch",
             Self::Blob => "unexpected or malformed blob",
-            Self::Vault => "not a GOYOVA02 file of this vault",
+            Self::Vault => "not a GOYOVA02/04 file of this vault",
             Self::NewerFormat => "vault from a newer version",
             Self::Echo => "binary echo differs",
             Self::Version => "unexpected version",
@@ -137,16 +143,14 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
 fn sha_matches(blob: &[u8], sha: &[u8; 32]) -> bool {
     sha256(blob) == *sha || (blob.is_empty() && *sha == [0; 32])
 }
-/// A vault file the server may store or serve: GOYOVA02 with this vault's ID
-/// and 96 B to 8 MiB. A key file (GOYOKE) never passes.
+/// A vault file the server may store or serve: GOYOVA02 (96 B to 8 MiB) or
+/// GOYOVA04 (140 B to 8 MiB) with this vault's ID. GOYOVA01/03 are never
+/// synced, and a key file (GOYOK…) never passes.
 pub fn check_vault_blob(blob: &[u8], id: &[u8; 16]) -> Result<(), WireError> {
     if newer_vault_format(blob) {
         return Err(WireError::NewerFormat);
     }
-    if !(MIN_VAULT..=MAX_FILE).contains(&blob.len())
-        || &blob[..8] != VAULT_MAGIC
-        || &blob[8..24] != id
-    {
+    if !is_sync_vault(blob) || &blob[8..24] != id {
         return Err(WireError::Vault);
     }
     Ok(())
@@ -184,7 +188,8 @@ impl<'a> Request<'a> {
         }
     }
     /// Compare-and-swap onto server version `expected`. Refuses anything but
-    /// a GOYOVA02 file of `id`: the last gate before the ssh pipe.
+    /// a GOYOVA02 or GOYOVA04 file of `id`: the last gate before the ssh
+    /// pipe.
     pub fn put(id: [u8; 16], expected: u64, blob: &'a [u8]) -> Result<Self, WireError> {
         check_vault_blob(blob, &id)?;
         Ok(Self {
@@ -300,7 +305,7 @@ fn body(op: Op, status: Status) -> Option<Body> {
         (Op::Hello, S::Ok) => Body::Echo,
         (Op::Get | Op::Fetch, S::Ok) | (Op::Put, S::Conflict) => Body::Vault,
         (Op::Get, S::NotModified | S::Empty)
-        | (Op::Put, S::Ok | S::Empty | S::BadBlob | S::TooLarge | S::Limit)
+        | (Op::Put, S::Ok | S::Empty | S::BadBlob | S::TooLarge | S::Limit | S::KeyBehind)
         | (Op::Fetch, S::NotFound) => Body::Nothing,
         (Op::List, S::Ok) => Body::List,
         _ => return None,
@@ -470,7 +475,7 @@ mod tests {
     const ECHO: usize = 2;
     const LIST: usize = 3;
     fn vault(id: &[u8; 16], len: usize) -> Vec<u8> {
-        let mut v = Vec::from(*VAULT_MAGIC);
+        let mut v = Vec::from(*b"GOYOVA02");
         v.extend_from_slice(id);
         v.resize(len, 0x5A);
         v
@@ -505,6 +510,7 @@ mod tests {
             (Op::Put, Status::BadBlob, NOTHING),
             (Op::Put, Status::TooLarge, NOTHING),
             (Op::Put, Status::Limit, NOTHING),
+            (Op::Put, Status::KeyBehind, NOTHING),
             (Op::List, Status::Ok, LIST),
             (Op::Fetch, Status::Ok, VAULT),
             (Op::Fetch, Status::NotFound, NOTHING),
@@ -554,7 +560,7 @@ mod tests {
         assert_eq!(&res[21..53], &sha256(&v));
         assert_eq!(&res[53..], &v[..]);
         let codes: Vec<u8> = Status::ALL.iter().map(|s| s.code()).collect();
-        assert_eq!(codes, [0, 1, 2, 3, 4, 10, 11, 12, 13, 20]);
+        assert_eq!(codes, [0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20]);
         let ops: Vec<u8> = Op::ALL.iter().map(|o| o.code()).collect();
         assert_eq!(ops, [1, 2, 3, 4, 5]);
     }
@@ -588,7 +594,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 13 + 2 * Op::ALL.len());
+        assert_eq!(checked, 14 + 2 * Op::ALL.len());
         // An empty LIST says 0 vaults.
         let bytes = reply(Status::Ok, 0, &[]);
         assert!(decode(&bytes, Op::List).is_ok());
@@ -605,7 +611,7 @@ mod tests {
                     assert_eq!(got.is_ok(), valid, "{op:?} {status:?} kind {kind}: {got:?}");
                 }
             }
-            for code in [5, 9, 14, 19, 21, 255] {
+            for code in [5, 9, 15, 19, 21, 255] {
                 let mut bytes = reply(Status::Ok, good_version(op, Status::Ok), &[]);
                 bytes[8] = code;
                 assert_eq!(decode(&bytes, op), Err(WireError::Code));
@@ -676,16 +682,24 @@ mod tests {
         magic[7] = b'2';
         assert_eq!(decode(&magic, Op::Get), Err(WireError::Magic));
         assert_eq!(decode(&[], Op::Get), Err(WireError::Magic));
-        // Vault blobs: GOYOVA02 of this vault, 96 B to 8 MiB.
-        let mut key = vault(&ID, 148);
-        key[..8].copy_from_slice(b"GOYOKE01");
-        let mut v1 = vault(&ID, 300);
-        v1[..8].copy_from_slice(b"GOYOVA01");
+        // Vault blobs: GOYOVA02 of this vault, 96 B to 8 MiB, or GOYOVA04,
+        // 140 B to 8 MiB.
+        let as_magic = |magic: &[u8; 8], len: usize| {
+            let mut v = vault(&ID, len);
+            v[..8].copy_from_slice(magic);
+            v
+        };
         let cases = [
             (vault(&[0x40; 16], 300), WireError::Vault),
-            (vault(&ID, MIN_VAULT - 1), WireError::Vault),
-            (key, WireError::Vault),
-            (v1, WireError::Vault),
+            (vault(&ID, 95), WireError::Vault),
+            (as_magic(b"GOYOVA04", 139), WireError::Vault),
+            (as_magic(b"GOYOKE01", 148), WireError::Vault),
+            (as_magic(b"GOYOKE03", 312), WireError::Vault),
+            (as_magic(b"GOYOKH01", 489), WireError::Vault),
+            (as_magic(b"GOYOKS01", 489), WireError::Vault),
+            (as_magic(b"GOYOVA01", 300), WireError::Vault),
+            (as_magic(b"GOYOVA03", 300), WireError::Vault),
+            (as_magic(b"GOYOVA05", 300), WireError::NewerFormat),
         ];
         for (blob, want) in cases {
             for (op, status) in [
@@ -697,14 +711,15 @@ mod tests {
                 assert_eq!(decode(&bytes, op), Err(want), "{op:?} {:?}", &blob[..8]);
             }
         }
-        let mut newer = vault(&ID, 300);
-        newer[..8].copy_from_slice(b"GOYOVA03");
-        let bytes = reply(Status::Ok, 9, &newer);
-        assert_eq!(decode(&bytes, Op::Get), Err(WireError::NewerFormat));
-        let bytes = reply(Status::Ok, 9, &vault(&ID, MAX_FILE));
-        assert!(decode(&bytes, Op::Get).is_ok());
-        let bytes = reply(Status::Ok, 9, &vault(&ID, MIN_VAULT));
-        assert!(decode(&bytes, Op::Get).is_ok());
+        for v in [
+            vault(&ID, MAX_FILE),
+            vault(&ID, 96),
+            as_magic(b"GOYOVA04", MAX_FILE),
+            as_magic(b"GOYOVA04", 140),
+        ] {
+            let bytes = reply(Status::Ok, 9, &v);
+            assert!(decode(&bytes, Op::Get).is_ok(), "{:?} {}", &v[..8], v.len());
+        }
     }
     #[test]
     fn version_rules() {
@@ -882,26 +897,39 @@ mod tests {
         key_otp[..8].copy_from_slice(b"GOYOKE01");
         let mut key = vault(&ID, 128);
         key[..8].copy_from_slice(b"GOYOKE02");
-        let mut v1 = vault(&ID, 300);
-        v1[..8].copy_from_slice(b"GOYOVA01");
-        let mut newer = vault(&ID, 300);
-        newer[..8].copy_from_slice(b"GOYOVA03");
+        let as_magic = |magic: &[u8; 8], len: usize| {
+            let mut v = vault(&ID, len);
+            v[..8].copy_from_slice(magic);
+            v
+        };
         let cases = [
             (key_otp, WireError::Vault),
             (key, WireError::Vault),
-            (v1, WireError::Vault),
+            (as_magic(b"GOYOKE03", 312), WireError::Vault),
+            (as_magic(b"GOYOKH01", 489), WireError::Vault),
+            (as_magic(b"GOYOKS01", 489), WireError::Vault),
+            (as_magic(b"GOYOVA01", 300), WireError::Vault),
+            (as_magic(b"GOYOVA03", 300), WireError::Vault),
+            (as_magic(b"GOYOVA04", 139), WireError::Vault),
+            (as_magic(b"GOYOVA04", MAX_FILE + 1), WireError::Vault),
             (vault(&[0x40; 16], 300), WireError::Vault),
-            (vault(&ID, MIN_VAULT - 1), WireError::Vault),
+            (vault(&ID, 95), WireError::Vault),
             (vault(&ID, MAX_FILE + 1), WireError::Vault),
-            (newer, WireError::NewerFormat),
+            (as_magic(b"GOYOVA05", 300), WireError::NewerFormat),
             (Vec::new(), WireError::Vault),
         ];
         for (blob, want) in cases {
             assert_eq!(Request::put(ID, 0, &blob).err(), Some(want));
             assert_eq!(check_vault_blob(&blob, &ID), Err(want));
         }
-        assert!(Request::put(ID, 0, &vault(&ID, MIN_VAULT)).is_ok());
-        assert!(Request::put(ID, 0, &vault(&ID, MAX_FILE)).is_ok());
+        for blob in [
+            vault(&ID, 96),
+            vault(&ID, MAX_FILE),
+            as_magic(b"GOYOVA04", 140),
+            as_magic(b"GOYOVA04", MAX_FILE),
+        ] {
+            assert!(Request::put(ID, 0, &blob).is_ok());
+        }
     }
     #[test]
     fn list_lines() {
