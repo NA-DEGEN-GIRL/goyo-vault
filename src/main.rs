@@ -7,9 +7,10 @@ mod win;
 use goyo_vault::{
     crypto, otp, syncfile,
     vault::{
-        self, Entry, Format, GAP_KEPT, KeyInfo, KeyNotice, LEFTOVER_TEMP, OtpSetup, Prepared,
-        Provision, Recovery, Session, SyncBadge, SyncNotice, VaultClass, key_candidate, key_info,
-        leftover_temp, vault_candidates, vault_tag,
+        self, AdoptClass, Entry, Format, GAP_KEPT, GatePass, KeyInfo, KeyNotice, LEFTOVER_TEMP,
+        OtpSetup, Prepared, Provision, Recovery, Session, Source, SyncBadge, SyncNotice,
+        VaultClass, key_candidate, key_info, keyfile::KeyFile, leftover_temp, vault_candidates,
+        vault_tag,
     },
 };
 use i18n::{fill, tr};
@@ -46,11 +47,16 @@ thread_local! {
 /// Answers one question in place of the user; gets the question's text.
 #[cfg(test)]
 type Answer = Box<dyn FnMut(&str) -> bool>;
+/// Answers an input dialog in place of the user; gets its text and kind.
+#[cfg(test)]
+type InputHook = Box<dyn FnMut(&str, &InputKind) -> InputAnswer>;
 #[cfg(test)]
 thread_local! {
     /// The answer to the next ask(), given by a test: no test can click a
     /// real message box. It runs as the box would, inside modal().
     static ANSWER: RefCell<Option<Answer>> = const { RefCell::new(None) };
+    /// The same for every ask_input() until a test takes it away.
+    static INPUT_ANSWER: RefCell<Option<InputHook>> = const { RefCell::new(None) };
 }
 static EDIT_PROC: OnceLock<Proc> = OnceLock::new();
 static LIST_PROC: OnceLock<Proc> = OnceLock::new();
@@ -147,6 +153,21 @@ const OTP_TOGGLE: i32 = 136;
 const LANG_KO: i32 = 137;
 const LANG_EN: i32 = 138;
 const KEY_NOTE: i32 = 220;
+/// The Keys screen (spec §9.1): "비밀번호 변경…" and "새 열쇠 파일 받기…".
+const KEY_PASSWORD: i32 = 150;
+const KEY_ADOPT: i32 = 156;
+/// "이 PC의 비밀번호 쓰기", the check box of the adopt preview.
+const ADOPT_OWN_PASS: i32 = 168;
+/// [서버 사본을 이 PC 상태로 덮어쓰기…] (spec §7.5a).
+const KEY_OVERRIDE_HEAD: i32 = 169;
+/// [이 열쇠 파일이 맞습니다] (spec §5.10).
+const KEY_LOCAL_OK: i32 = 170;
+/// [끝나지 않은 열쇠 변경 버리기…] (spec §5.10).
+const PENDING_FORGET: i32 = 190;
+/// While a flow runs (see App::flow), an open vault locks after this long
+/// unused at the earliest: a flow's questions take longer to answer than
+/// the shortest auto-lock (spec §9.2a).
+const FLOW_IDLE: Duration = Duration::from_secs(600);
 const PEEK_FIELDS: [(i32, i32); 3] = [
     (PEEK_PASS, PASS),
     (PEEK_CONFIRM, CONFIRM),
@@ -187,7 +208,15 @@ enum Screen {
     Password,
     /// The OTP QR again, for a spare phone or app (vault open, password asked).
     OtpBackup,
+    /// "열쇠 관리": the password change, another PC's key file, the key
+    /// backup and code, and what holds key changes (spec §9.1).
+    Keys,
+    /// "새 열쇠 파일 받기": another PC's key file, chosen, and opened with
+    /// [열기] (spec §9.1).
+    Adopt,
 }
+/// The command whose phased flow runs (see App::flow).
+type FlowId = i32;
 struct App {
     hwnd: Hwnd,
     font: isize,
@@ -253,6 +282,11 @@ struct App {
     /// Raised by lock(), scrub() and every screen change (show), so that a
     /// phased command finds out when what it started on is gone.
     serial: u64,
+    /// The phased flow under way, from its first phase to its end (spec
+    /// §9.2a): the idle limits are at least FLOW_IDLE meanwhile.
+    flow: Option<FlowId>,
+    /// Adopt: the other PC's key file the user chose.
+    adopt_source: Option<PathBuf>,
 }
 /// What phase 1 of a phased command took (see phased_command): the typed
 /// secrets, wiped when the flow ends however it ends, and what phase 3 must
@@ -267,9 +301,16 @@ struct Flow {
     otp: Zeroizing<String>,
     /// Password: the current password.
     current: Zeroizing<String>,
-    /// Login: the key file is missing or unparseable, and the unlock reads
-    /// the temp file an interrupted save left in its place.
-    key_temp: bool,
+    /// Login: what a failed authentication says instead of the AUTH text
+    /// (spec §5.12): rule (i)'s text when the key file is a temp file an
+    /// interrupted save left, or a hint about this PC's own key change.
+    auth_failure: Option<&'static str>,
+    /// Password: S-ROTATE, what the change does (spec §9.2), asked first.
+    question: Option<&'static str>,
+    /// Password: the question asked before the key change (spec §7.5), and
+    /// the one the user went on past: only that one is passed.
+    gate: Option<vault::Gate>,
+    answered: Option<vault::Gate>,
     /// Login: the key file and the vault file's precheck (spec §5.1). Phase
     /// 3 opens exactly the key file read here.
     prepared: Option<Prepared>,
@@ -288,11 +329,138 @@ impl Flow {
         }
     }
 }
+/// What the Keys screen shows of a session (spec §9.1).
+#[derive(Clone, Default)]
+struct KeysView {
+    /// A KF2 key file's key code, "E{epoch} · XXXX-XXXX-XXXX-XXXX".
+    code: Option<String>,
+    hold: Hold,
+}
+/// What holds key changes, as the Keys screen tells it; the first that
+/// applies, in the order the library refuses a change for them.
+#[derive(Clone, Default)]
+enum Hold {
+    #[default]
+    None,
+    /// S-PENDING-ELSEWHERE, with [끝나지 않은 열쇠 변경 버리기…].
+    PendingElsewhere(PathBuf),
+    /// S-RESTORE-PENDING, with no button.
+    RestorePending,
+    /// S-RESTORE-OLDKEY (confirmed and key file epochs), with no button.
+    RestoreOldKey(u64, u64),
+    /// Any other Restore (RESTORE_KEYS), with no button.
+    Restored,
+    /// S-LOCAL-ROLLBACK (the same epochs), with [이 열쇠 파일이 맞습니다].
+    LocalRollback(u64, u64),
+    /// A server copy halts sync, with the head override (spec §7.5a).
+    Halted,
+}
+impl KeysView {
+    fn of(s: &Session) -> Self {
+        let (old, new) = (s.confirmed_epoch().unwrap_or(0), s.key_state().epoch);
+        let hold = if let Some(path) = s.pending_elsewhere() {
+            Hold::PendingElsewhere(path.to_owned())
+        } else if s.restore_held() && s.restore_pending() {
+            Hold::RestorePending
+        } else if s.restore_held() {
+            Hold::RestoreOldKey(old, new)
+        } else if s.restored() {
+            Hold::Restored
+        } else if s.local_rollback() {
+            Hold::LocalRollback(old, new)
+        } else if s.halted_head().is_some() {
+            Hold::Halted
+        } else {
+            Hold::None
+        };
+        Self {
+            code: s.key_code(),
+            hold,
+        }
+    }
+}
+/// A button: its control ID and label.
+type Action = (i32, &'static str);
+impl Hold {
+    /// The text in its language and tone, and the button that acts on it.
+    fn shown(&self) -> Option<(String, isize, Option<Action>)> {
+        Some(match self {
+            Hold::None => return None,
+            Hold::PendingElsewhere(path) => (
+                fill(vault::PENDING_ELSEWHERE, &[&shown(path)]),
+                TONE_DANGER,
+                Some((PENDING_FORGET, "끝나지 않은 열쇠 변경 버리기…")),
+            ),
+            Hold::RestorePending => (tr(vault::RESTORE_PENDING).to_owned(), TONE_MUTED, None),
+            Hold::RestoreOldKey(old, new) => {
+                (fill(vault::RESTORE_OLDKEY, &[old, new]), TONE_MUTED, None)
+            }
+            Hold::Restored => (tr(vault::RESTORE_KEYS).to_owned(), TONE_MUTED, None),
+            Hold::LocalRollback(old, new) => (
+                fill(vault::LOCAL_ROLLBACK, &[old, new]),
+                TONE_DANGER,
+                Some((KEY_LOCAL_OK, "이 열쇠 파일이 맞습니다")),
+            ),
+            Hold::Halted => (
+                tr("서버 사본 때문에 동기화가 멈춰 있습니다. 그 사본을 올린 PC의 열쇠 파일을 받을 수 없을 때만 서버 사본을 덮어쓰세요.").to_owned(),
+                TONE_DANGER,
+                Some((KEY_OVERRIDE_HEAD, "서버 사본을 이 PC 상태로 덮어쓰기…")),
+            ),
+        })
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// What the Keys screen shows, set by a test in place of the session's.
+    static KEYS_VIEW: RefCell<Option<KeysView>> = const { RefCell::new(None) };
+}
 /// S-OLDER (spec §5.1): asked before a login opens a vault file saved
 /// under an older key of the key file, default No.
 const OLDER_QUESTION: &str = "이 금고 파일은 이 열쇠 파일의 예전 열쇠로 저장되어 있습니다.\n다른 PC에서 열쇠를 바꾼 뒤 이 PC에서 처음 여는 것이라면 정상입니다(같은 열쇠 파일을 함께 쓰거나 새 열쇠 파일을 옮겨 온 경우).\n그런 일이 없었다면 예전 열쇠를 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 그 경우 '아니요'를 누르고 백업이나 서버 기록을 확인하세요.\n이 파일을 열고 새 열쇠로 다시 저장할까요?";
 /// S-OLDER answered no: not opened, and not a failed attempt.
 const OLDER_DECLINED: &str = "열지 않았습니다. 백업에서 복원이나 서버 기록을 확인하세요.";
+/// S-ROTATE (spec §9.3), asked before a password change; the synced
+/// paragraph for a vault that syncs.
+const ROTATE_QUESTION: &str = "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n계속할까요?";
+const ROTATE_QUESTION_SYNCED: &str = "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n• 동기화 중인 금고입니다. 다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다(USB로 '새 열쇠 파일 받기'). 열쇠는 한 번에 한 PC에서만 바꾸고, 서버 스크립트와 모든 PC(고요 금고·goyo-sync)를 먼저 0.9.0으로 업데이트하세요.\n계속할까요?";
+/// S-BACKUP: asked after a key change wrote a new key file.
+const BACKUP_QUESTION: &str = "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요? 예전 열쇠 백업으로는 앞으로 저장하는 내용을 열 수 없습니다.";
+/// S-KEYDAMAGED-SAVE as a question (spec §5.5 S2): whether the new key
+/// file was saved is unknown, so it is saved from memory before the lock.
+const KEY_DAMAGED_SAVE: &str = "열쇠 파일을 저장했는지 확인하지 못했습니다. 잠그기 전에 새 열쇠 파일을 다른 저장장치에 저장하세요. 그 파일과 새 비밀번호(와 보안 키)로 이 금고를 열 수 있습니다.\n지금 저장할까요?";
+/// The status line of a password change, then S-CODE with the key code.
+const PASSWORD_CHANGED: &str = "비밀번호를 바꾸고 금고를 새 열쇠로 다시 암호화했습니다.";
+const CODE_LINE: &str =
+    "열쇠 확인 코드: {code}. 다른 PC에서 새 열쇠 파일을 받은 뒤 그 PC의 코드와 같은지 비교하세요.";
+/// The key backup's own status line (see modal_command).
+const KEY_BACKED_UP: &str = "암호화된 열쇠를 백업했습니다. 금고와 분리하여 보관하세요.";
+/// S-NEWPASS-OTHER: the other file does not open with this PC's password.
+const NEWPASS_OTHER: &str =
+    "받을 열쇠 파일은 다른 비밀번호로 잠겨 있습니다. 그 PC에서 바꾼 새 비밀번호를 입력하세요.";
+/// The adopt preview (spec §9.1, §5.8): what is done with the other file,
+/// the result's revision, a successor's key code and the password in force.
+const ADOPT_SUCCESSOR: &str =
+    "이 열쇠 파일은 이 PC의 열쇠 파일에서 이어진 새 버전입니다. 그대로 받습니다.";
+const ADOPT_UNION: &str = "이 열쇠 파일은 이 PC의 열쇠 파일과 갈라졌거나, 이 PC에서 추가한 것이 빠져 있습니다. 두 파일을 합치고 새 데이터 키(보안 키가 있으면 새 키세트 비밀도)로 금고를 다시 암호화합니다. 다른 PC는 그 뒤 이 PC의 열쇠 파일을 받아야 합니다.";
+const ADOPT_RESULT: &str = "받은 뒤의 열쇠 파일: 수정 {epoch}";
+/// S-ADOPT-CODE: a successor's code in the preview, every result's after
+/// the write.
+const ADOPT_CODE: &str = "받은 뒤의 열쇠 확인 코드: {code}";
+const ADOPT_PASS_OWN: &str = "앞으로도 이 PC의 비밀번호로 엽니다.";
+const ADOPT_PASS_OTHER: &str = "앞으로는 가져온 열쇠 파일의 비밀번호로 엽니다.";
+const OWN_PASS_LABEL: &str = "이 PC의 비밀번호 쓰기";
+/// S-ADOPT-BOTHPASS, asked at [받기] where the preview needs it.
+const ADOPT_BOTHPASS: &str = "두 PC에서 모두 비밀번호를 바꿨습니다. 앞으로 쓸 비밀번호를 정하세요. '이 PC의 비밀번호 쓰기'를 켜면 이 PC의 비밀번호를, 끄면 가져온 열쇠 파일의 비밀번호를 씁니다. 다른 PC는 받을 때 그 비밀번호를 입력합니다. 이대로 받을까요?";
+/// The Keys screen's flows that end with no key change.
+const HEAD_OVERRIDDEN: &str =
+    "서버 사본 대신 이 PC의 상태를 올립니다. goyo-sync가 올리면 동기화가 다시 이어집니다.";
+const KEY_FILE_CONFIRMED: &str =
+    "지금 열쇠 파일을 이 금고의 열쇠 파일로 정했습니다. 동기화와 열쇠 변경을 다시 할 수 있습니다.";
+/// Its second line for a vault that syncs: a server copy under the newer
+/// key file that was put aside halts sync again (spec §2.18 #57).
+const KEY_FILE_CONFIRMED_SYNCED: &str = "서버 사본이 더 나중의 열쇠로 저장되어 있으면 동기화가 다시 멈춥니다. 그 사본을 이 PC가 올렸다면 [서버 사본을 이 PC 상태로 덮어쓰기…]를 누르세요.";
+/// The wait after a failed authentication.
+const RETRY_WAIT: &str = "인증 실패 후 대기 중입니다. 잠시 후 다시 시도하세요.";
 impl App {
     fn new(hwnd: Hwnd) -> Self {
         let (scale, font) = theme::with(|t| (t.scale, t.body())).unwrap_or((1.0, 0));
@@ -342,6 +510,8 @@ impl App {
             sync_ticks: 0,
             sync_badge: None,
             serial: 0,
+            flow: None,
+            adopt_source: None,
         };
         // The last vault and key that opened, so a key kept on a USB drive does
         // not have to be picked with "찾기" on every start.
@@ -772,10 +942,20 @@ impl App {
     /// only in a temp file, which the next unlock takes back, and the
     /// session writes nothing more meanwhile.
     fn error(&mut self, text: &str) {
-        if text == GAP_KEPT && self.session.is_some() {
+        if [GAP_KEPT, vault::GAP_CHANGED, vault::GAP_NOT_CHANGED].contains(&text)
+            && self.session.is_some()
+        {
             self.lock(text, true);
         }
-        self.set_status(text, TONE_DANGER);
+        // A refusal that names an epoch, a path or a reason is filled in;
+        // a reason is text of its own, translated as well.
+        let filled = vault::refusal_values(text).map(|values| {
+            let values: Vec<&str> = values.iter().map(|v| tr(v)).collect();
+            let values: Vec<&dyn std::fmt::Display> =
+                values.iter().map(|v| v as &dyn std::fmt::Display).collect();
+            fill(text, &values)
+        });
+        self.set_status(filled.as_deref().unwrap_or(text), TONE_DANGER);
         unsafe {
             MessageBeep(0x30);
         }
@@ -913,6 +1093,8 @@ impl App {
             Screen::Edit => self.build_edit(),
             Screen::Password => self.build_password(),
             Screen::OtpBackup => self.build_otp_backup(),
+            Screen::Keys => self.build_keys(),
+            Screen::Adopt => self.build_adopt(),
         }
         let small = self.font_of(|t| t.small());
         let status = tr_lines(&self.status);
@@ -1264,7 +1446,7 @@ impl App {
         self.button(NEXT, "›", 772, 322, 40, 36, theme::GHOST);
         self.button(BACKUP, "금고 백업", 40, 642, 112, 34, theme::SECONDARY);
         self.button(KEYBACKUP, "열쇠 백업", 160, 642, 104, 34, theme::SECONDARY);
-        self.button(CHANGE, "비밀번호 변경", 272, 642, 140, 34, theme::SECONDARY);
+        self.button(CHANGE, "열쇠 관리", 272, 642, 140, 34, theme::SECONDARY);
         if self.session.as_ref().is_some_and(Session::uses_otp) {
             self.button(OTP_SETUP, "OTP 백업", 420, 642, 104, 34, theme::SECONDARY);
         }
@@ -1362,9 +1544,9 @@ impl App {
             .map(|s| s.tag());
         self.note(
             if otp.is_some() {
-                "현재 비밀번호와 새 OTP 번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다."
+                "현재 비밀번호와 새 OTP 번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다."
             } else {
-                "현재 비밀번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다."
+                "현재 비밀번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다."
             },
             AX,
             118,
@@ -1387,7 +1569,7 @@ impl App {
         }
         let y = self.password_card_y();
         self.note(
-            "현재 열쇠 파일만 갱신됩니다. 이전 열쇠와 이전 비밀번호로 이후 금고도 열 수 있습니다. 유출 대응용 키 교체가 아닙니다. 변경 후 새 열쇠 파일을 별도로 백업하세요.",
+            "새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다. 예전 열쇠 파일과 예전 비밀번호로는 앞으로 저장하는 내용을 열 수 없습니다. 바꾼 뒤 새 열쇠 파일을 백업하세요.",
             AX + 18,
             y + 14,
             AW - 36,
@@ -1410,6 +1592,151 @@ impl App {
             160,
             42,
             theme::PRIMARY,
+        );
+        unsafe {
+            SetFocus(self.handle(CURRENT_PASS));
+        }
+    }
+    /// "열쇠 관리" (spec §9.1, default build): the password change, another
+    /// PC's key file and the key backup; for a KF2 key file its key code;
+    /// and what holds key changes, with the button that acts on it and the
+    /// fields its re-authentication reads.
+    fn build_keys(&mut self) {
+        let (title, small, body) = (
+            self.font_of(|t| t.title()),
+            self.font_of(|t| t.small()),
+            self.font_of(|t| t.body()),
+        );
+        self.text(0, "열쇠 관리", (AX, 80, AW - 100, 34), title, TONE_TEXT, 0);
+        self.button(BACK, "‹ 뒤로", AX + AW - 84, 84, 84, 32, theme::GHOST);
+        self.note(
+            "다른 PC에서 비밀번호를 바꿨다면 그 PC의 새 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.",
+            AX,
+            124,
+            AW,
+            40,
+        );
+        let half = (AW - 16) / 2;
+        let right = AX + half + 16;
+        self.label("비밀번호", AX, 178, half);
+        self.button(
+            KEY_PASSWORD,
+            "비밀번호 변경…",
+            AX,
+            200,
+            half,
+            38,
+            theme::SECONDARY,
+        );
+        self.label("다른 PC의 열쇠 파일", right, 178, half);
+        self.button(
+            KEY_ADOPT,
+            "새 열쇠 파일 받기…",
+            right,
+            200,
+            half,
+            38,
+            theme::SECONDARY,
+        );
+        self.label("열쇠 백업", AX, 254, half);
+        self.button(KEYBACKUP, "열쇠 백업", AX, 276, half, 38, theme::SECONDARY);
+        let view = self.keys_view();
+        if let Some(code) = &view.code {
+            self.label("열쇠 확인 코드", right, 254, half);
+            self.text(0, code, (right, 282, half, 26), body, TONE_TEXT, 0);
+            self.note(
+                "두 PC의 열쇠 확인 코드가 같으면 같은 열쇠 파일입니다. 열쇠를 바꾼 뒤 다른 PC에서 새 열쇠 파일을 받았다면 두 코드를 비교하세요.",
+                AX,
+                326,
+                AW,
+                40,
+            );
+        }
+        let mut focus = self.handle(KEY_PASSWORD);
+        if let Some((text, tone, action)) = view.hold.shown() {
+            self.text(0, &text, (AX, 382, AW, 126), small, tone, 0);
+            if let Some((id, label)) = action {
+                // The button's flow checks the password (and OTP) again.
+                let otp = self
+                    .session
+                    .as_ref()
+                    .filter(|s| s.uses_otp())
+                    .map(|s| s.tag());
+                let w = if otp.is_some() { AW - 196 } else { AW };
+                self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 516, w);
+                if let Some(tag) = otp {
+                    let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
+                    self.field(OTP, &caption, "", AX + AW - 180, 516, 180, true);
+                }
+                self.button(id, label, AX + AW - 400, 592, 400, 40, theme::DANGER_GHOST);
+                focus = self.handle(CURRENT_PASS);
+            }
+        }
+        unsafe {
+            SetFocus(focus);
+        }
+    }
+    /// What the Keys screen shows of the session; a test sets it instead.
+    fn keys_view(&self) -> KeysView {
+        #[cfg(test)]
+        if let Some(view) = KEYS_VIEW.with(|v| v.borrow().clone()) {
+            return view;
+        }
+        self.session.as_ref().map(KeysView::of).unwrap_or_default()
+    }
+    /// "새 열쇠 파일 받기" (spec §9.1): the chosen file, read-only, its
+    /// revision, and this PC's password (and OTP) for [열기], which runs the
+    /// whole adopt as one flow (see adopt_flow).
+    fn build_adopt(&mut self) {
+        let (title, body) = (self.font_of(|t| t.title()), self.font_of(|t| t.body()));
+        self.text(
+            0,
+            "새 열쇠 파일 받기",
+            (AX, 80, AW - 100, 34),
+            title,
+            TONE_TEXT,
+            0,
+        );
+        self.button(BACK, "‹ 뒤로", AX + AW - 84, 84, 84, 32, theme::GHOST);
+        self.note(
+            "다른 PC에서 바꾼 열쇠 파일을 이 PC의 열쇠 파일과 비교합니다. 이어진 새 버전이면 그대로 받고, 갈라졌으면 두 파일을 합칩니다. 받기 전에 무엇이 바뀌는지 보여 줍니다.",
+            AX,
+            124,
+            AW,
+            40,
+        );
+        self.label("받을 열쇠 파일", AX, 180, AW);
+        let source = self.adopt_source.clone().unwrap_or_default();
+        // SS_PATHELLIPSIS: a long path keeps its file name.
+        let shown_path = shown(&source);
+        self.text(0, &shown_path, (AX, 204, AW, 24), body, TONE_TEXT, 0x8000);
+        let info = match key_info(&source) {
+            Some(i) if matches!(&i.magic, b"GOYOKE01" | b"GOYOKE02") => {
+                tr("0.8 형식 열쇠 파일").to_owned()
+            }
+            Some(i) => fill("열쇠 파일 수정 {epoch}", &[&i.epoch]),
+            None => String::new(),
+        };
+        let small = self.font_of(|t| t.small());
+        self.text(0, &info, (AX, 230, AW, 20), small, TONE_MUTED, 0);
+        let otp = self
+            .session
+            .as_ref()
+            .filter(|s| s.uses_otp())
+            .map(|s| s.tag());
+        let w = if otp.is_some() { AW - 196 } else { AW };
+        self.password_field(CURRENT_PASS, "이 PC의 현재 비밀번호", AX, 268, w);
+        if let Some(tag) = otp {
+            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
+            self.field(OTP, &caption, "", AX + AW - 180, 268, 180, true);
+        }
+        self.button(SUBMIT, "열기", AX, 356, AW, 46, theme::PRIMARY);
+        self.note(
+            "받을 열쇠 파일의 비밀번호가 이 PC와 다르면 열 때 그 비밀번호를 묻습니다.",
+            AX,
+            414,
+            AW,
+            40,
         );
         unsafe {
             SetFocus(self.handle(CURRENT_PASS));
@@ -1603,9 +1930,25 @@ impl App {
         self.activity = Instant::now();
         let _ = self.paths();
         self.clear_controls();
+        // What a key change left to finish gets one more try. A new key file
+        // whose save is unknown is gone with the session: say how to open.
+        let why = match self.session.as_mut() {
+            Some(s) => {
+                s.before_lock();
+                if s.key_unsaved() {
+                    vault::KEY_DAMAGED_LOCKED
+                } else {
+                    why
+                }
+            }
+            None => why,
+        };
         self.session = None;
         self.provision = None;
         self.otp_setup = None;
+        self.adopt_source = None;
+        // A flow's input dialog goes too, with what was typed into it.
+        cancel_input();
         self.away_since = None;
         self.selected = None;
         self.status_tone = TONE_MUTED;
@@ -1632,6 +1975,8 @@ impl App {
         self.session = None;
         self.provision = None;
         self.otp_setup = None;
+        self.adopt_source = None;
+        cancel_input();
         self.reveal_until = None;
         self.copy_until = None;
         self.expire_clipboard();
@@ -1657,7 +2002,28 @@ impl App {
                 }
                 flow.confirmed_older = Some(sha);
             }
-            return self.finish(flow);
+            if flow.question.is_some_and(|q| !ask(self.hwnd, q)) {
+                return Ok(());
+            }
+            let mut gate = flow.gate;
+            loop {
+                if let Some(g) = gate {
+                    if !ask(self.hwnd, g.question()) {
+                        return Ok(());
+                    }
+                    flow.answered = Some(g);
+                }
+                gate = self.gate_now(&flow)?;
+                if gate.is_none() {
+                    break;
+                }
+            }
+            return self.finish(flow).map(|_| ());
+        }
+        // An adopt asks inside its flow, which runs only through
+        // phased_command (spec §9.2a).
+        if self.screen == Screen::Adopt {
+            return Err("화면 작업 중입니다.");
         }
         if self.input_failed {
             return Err("입력 보호 설정 실패로 저장/인증을 중단합니다.");
@@ -1711,7 +2077,8 @@ impl App {
             _ => Some(vault::prepare_restore(&self.backup_path, &self.key_path)?),
         };
         let otp_time = otp::now()?;
-        let key_temp = self.working();
+        let auth_failure = prepared.as_ref().and_then(Prepared::auth_failure);
+        self.working();
         unsafe {
             UpdateWindow(self.hwnd);
         }
@@ -1732,12 +2099,11 @@ impl App {
                 Session::restore_from(prepared, &self.dest_path, &pass, &otp, otp_time)
             }
         };
-        self.opened(screen, result, key_temp)
+        self.opened(screen, result, auth_failure)
     }
-    /// Phase 1 of SUBMIT on Login and Password (see phased_command): every
-    /// check command() and submit() make before the slow part, under a
-    /// short borrow, and a snapshot of what was typed.
-    fn begin(&mut self, id: i32) -> crypto::Result<Flow> {
+    /// The checks the first phase of every flow makes before it takes
+    /// anything (see phased_command).
+    fn enter(&mut self, id: i32) -> crypto::Result<()> {
         if !self.allows(id) {
             return Err("현재 화면에서 허용되지 않는 작업입니다.");
         }
@@ -1750,30 +2116,48 @@ impl App {
         }
         check_environment(self.hwnd)?;
         if Instant::now() < self.retry {
-            return Err("인증 실패 후 대기 중입니다. 잠시 후 다시 시도하세요.");
+            return Err(RETRY_WAIT);
         }
+        Ok(())
+    }
+    /// Phase 1 of SUBMIT on Login and Password (see phased_command): every
+    /// check command() and submit() make before the slow part, under a
+    /// short borrow, and a snapshot of what was typed.
+    fn begin(&mut self, id: i32) -> crypto::Result<Flow> {
+        self.enter(id)?;
         self.paths()?;
         let pass = self.read(PASS)?;
         let otp = self.read(OTP)?;
         let mut current = Zeroizing::new(String::new());
-        let mut key_temp = false;
+        let mut auth_failure = None;
+        let (mut question, mut gate) = (None, None);
         let mut prepared = None;
         if self.screen == Screen::Password {
-            // Nothing is written for a key file this build cannot change.
-            self.session
-                .as_ref()
-                .ok_or("먼저 금고를 열어주세요.")?
-                .password_change()?;
+            // What holds a key change, or what is asked first (spec §7.5).
+            let s = self.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+            gate = s.password_change()?;
+            question = Some(if s.badge().is_some() {
+                ROTATE_QUESTION_SYNCED
+            } else {
+                ROTATE_QUESTION
+            });
             if pass.as_str() != self.read(CONFIRM)?.as_str() {
                 return Err("비밀번호 확인이 일치하지 않습니다.");
             }
             current = self.read(CURRENT_PASS)?;
+            // Before the code is spent on the re-authentication.
+            goyo_vault::vault::password_policy(&pass)?;
+            if pass.as_str() == current.as_str() {
+                return Err(vault::SAMEPASS);
+            }
         } else {
             self.check_files()?;
             // The precheck's refusals come before any key derivation and
             // are not failed attempts (spec §5.1).
-            prepared = Some(vault::prepare(&self.vault_path, &self.key_path)?);
-            key_temp = self.working();
+            let checked = vault::prepare(&self.vault_path, &self.key_path)?;
+            auth_failure = checked.auth_failure();
+            prepared = Some(checked);
+            self.working();
         }
         Ok(Flow {
             screen: self.screen,
@@ -1782,7 +2166,10 @@ impl App {
             pass,
             otp,
             current,
-            key_temp,
+            auth_failure,
+            question,
+            gate,
+            answered: None,
             prepared,
             otp_time: otp::now()?,
             confirmed_older: None,
@@ -1790,20 +2177,11 @@ impl App {
     }
     /// Phase 3 (see phased_command): only on the screen, serial and session
     /// phase 1 saw, not while closing and with the environment checked
-    /// again. Then the library call, and the screen for its result.
-    fn finish(&mut self, flow: Flow) -> crypto::Result<()> {
-        // Only a lock or a close in between changes these, and it wrote its
-        // own line. No dialog was open, so none is blamed.
-        if self.closing
-            || self.serial != flow.serial
-            || self.screen != flow.screen
-            || self.session.is_some() != flow.session
-        {
-            return Ok(());
-        }
-        if let Err(e) = check_environment(self.hwnd) {
-            self.lock(e, true);
-            return Err(e);
+    /// again. Then the library call, and the screen for its result. True
+    /// when a key change wrote a new key file, whose backup is offered next.
+    fn finish(&mut self, flow: Flow) -> crypto::Result<bool> {
+        if !self.still(flow.screen, flow.serial, flow.session)? {
+            return Ok(false);
         }
         if flow.screen == Screen::Login {
             let Flow {
@@ -1812,30 +2190,112 @@ impl App {
                 otp,
                 otp_time,
                 confirmed_older,
-                key_temp,
+                auth_failure,
                 ..
             } = flow;
             let prepared = prepared.ok_or("화면 작업 중입니다.")?;
             let result = Session::login(prepared, &pass, &otp, otp_time, confirmed_older);
-            return self.opened(Screen::Login, result, key_temp);
+            return self
+                .opened(Screen::Login, result, auth_failure)
+                .map(|_| false);
         }
-        let result = self
-            .session
-            .as_mut()
-            .ok_or("먼저 금고를 열어주세요.")?
-            .change_password(&flow.current, &flow.pass, &flow.otp);
-        if let Err(e) = result {
-            self.failed = self.failed.saturating_add(1);
-            self.retry = Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
-            return Err(e);
+        // The password change (spec §5.5): a re-authentication with the
+        // current password and the OTP code, then the key change itself,
+        // past the gate the user answered and no other. A gate that came up
+        // since was asked in between (gate_now): one that still differs is
+        // refused before the code is spent.
+        let serial = self.serial;
+        let s = self.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
+        let gate = s.password_change()?;
+        if let Some(gate) = gate.filter(|g| flow.answered != Some(*g)) {
+            return Err(gate.question());
         }
+        let override_gate = gate.is_some();
+        let result = s
+            .reauth(&flow.current, Some((&flow.otp, flow.otp_time)), None)
+            .and_then(|mut r| {
+                r.app_serial = serial;
+                let change = vault::Change::Password(flow.pass.clone());
+                s.rekey(
+                    r,
+                    Vec::new(),
+                    change,
+                    vault::Consent::default(),
+                    override_gate,
+                )
+            });
+        let notices: Vec<(Zeroizing<String>, isize)> =
+            s.take_key_notices().iter().map(key_line).collect();
+        let code = s.key_code();
+        let done = match result {
+            Ok(vault::Rekeyed::Done) => PASSWORD_CHANGED,
+            Ok(vault::Rekeyed::VaultPending) => vault::VPENDING,
+            // The new vault file is only in its temp file: the app locks,
+            // and the next unlock takes it back (spec §5.5 S3).
+            Ok(vault::Rekeyed::GapKept) => return Err(vault::GAP_CHANGED),
+            // Whether the key file was saved is unknown: the vault list
+            // stays, so that the new key file can be backed up from memory
+            // before the vault locks (S-KEYDAMAGED-SAVE).
+            Err(e) if e == vault::KEY_DAMAGED => {
+                self.show(Screen::Vault);
+                self.build();
+                return Err(e);
+            }
+            Err(e) => {
+                if e == crypto::AUTH_ERROR {
+                    self.failed_attempt();
+                }
+                return Err(e);
+            }
+        };
         self.failed = 0;
         self.show(Screen::Vault);
-        self.status = line(
-            "비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.",
-        );
+        let code = code.map(|c| fill(CODE_LINE, &[&c]));
+        let mut lines: Vec<&str> = vec![done];
+        lines.extend(code.as_deref());
+        lines.extend(notices.iter().map(|(text, _)| text.as_str()));
+        self.status = joined(&lines);
+        if notices.iter().any(|(_, tone)| *tone == TONE_DANGER) {
+            self.status_tone = TONE_DANGER;
+        }
         self.build();
-        Ok(())
+        Ok(true)
+    }
+    /// The gate a password change meets now, when it is not the one the
+    /// user answered (spec §7.5): a poll that halted sync, or a helper that
+    /// stopped, while a question was open. Asked before the re-
+    /// authentication spends the OTP code. None for a flow that no longer
+    /// stands (finish then does nothing) or with no other gate; a hold
+    /// that came up is its refusal.
+    fn gate_now(&mut self, flow: &Flow) -> crypto::Result<Option<vault::Gate>> {
+        if flow.screen != Screen::Password || !self.still(flow.screen, flow.serial, flow.session)? {
+            return Ok(None);
+        }
+        let s = self.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        Ok(s.password_change()?.filter(|g| flow.answered != Some(*g)))
+    }
+    /// Whether a flow's later phase may go on: the screen, serial and
+    /// session its first phase saw are still there, the app is not closing,
+    /// and the environment checks out (else it locks). Only a lock or a
+    /// close in between changes the first three, and it wrote its own line.
+    fn still(&mut self, screen: Screen, serial: u64, session: bool) -> crypto::Result<bool> {
+        if self.closing
+            || self.serial != serial
+            || self.screen != screen
+            || self.session.is_some() != session
+        {
+            return Ok(false);
+        }
+        if let Err(e) = check_environment(self.hwnd) {
+            self.lock(e, true);
+            return Err(e);
+        }
+        Ok(true)
+    }
+    /// A failed authentication: the retry delay grows.
+    fn failed_attempt(&mut self) {
+        self.failed = self.failed.saturating_add(1);
+        self.retry = Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
     }
     /// Login, Restore and Create: the files must be there before any key
     /// derivation. Missing files are a navigation problem, not a failed
@@ -1910,14 +2370,15 @@ impl App {
         });
         key_temp
     }
-    /// The screen after Create, Restore or an unlock. `key_temp`: the key
-    /// file came from a temp file, so a failed authentication may mean that
-    /// copy needs other factors than the ones typed.
+    /// The screen after Create, Restore or an unlock. `auth_failure`: what a
+    /// failed authentication of these files says instead of the AUTH text
+    /// (spec §5.12), when the key file came from a temp file or this PC's
+    /// own key change left it as it is.
     fn opened(
         &mut self,
         screen: Screen,
         result: crypto::Result<Session>,
-        key_temp: bool,
+        auth_failure: Option<&'static str>,
     ) -> crypto::Result<()> {
         match result {
             Ok(mut s) => {
@@ -1938,7 +2399,8 @@ impl App {
                 // Only opening a vault looks at its sync folder.
                 let login = screen == Screen::Login;
                 let notice = if login { s.take_unlock_notice() } else { None };
-                let key_notice = s.take_key_notice().map(key_line);
+                let key_notices: Vec<(Zeroizing<String>, isize)> =
+                    s.take_key_notices().iter().map(key_line).collect();
                 if login && s.sync_offer() {
                     SYNC_OFFER.with(|f| f.set(true));
                 }
@@ -1971,12 +2433,12 @@ impl App {
                     None => (Zeroizing::new(first.to_owned()), TONE_MUTED),
                 };
                 let (recovered, rename) = recovery_lines(&recovery, &self.key_path);
-                if warning.is_some() || rename || key_notice.is_some_and(|(_, t)| t == TONE_DANGER)
+                if warning.is_some() || rename || key_notices.iter().any(|(_, t)| *t == TONE_DANGER)
                 {
                     tone = TONE_DANGER;
                 }
                 let mut lines: Vec<&str> = recovered.iter().map(|l| l.as_str()).collect();
-                lines.extend(key_notice.map(|(text, _)| text));
+                lines.extend(key_notices.iter().map(|(text, _)| text.as_str()));
                 self.status = if lines.is_empty() && warning.is_none() {
                     first
                 } else {
@@ -2001,10 +2463,9 @@ impl App {
                 self.retry =
                     Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
                 self.status("인증 실패. 잠시 후 다시 시도하세요.");
-                Err(if key_temp && e == crypto::AUTH_ERROR {
-                    LEFTOVER_TEMP
-                } else {
-                    e
+                Err(match auth_failure {
+                    Some(text) if e == crypto::AUTH_ERROR => text,
+                    _ => e,
                 })
             }
         }
@@ -2018,10 +2479,12 @@ impl App {
                 | Screen::Create
                 | Screen::Restore
                 | Screen::Password
-                | Screen::OtpBackup,
+                | Screen::OtpBackup
+                | Screen::Adopt,
             ) => SUBMIT,
             (1, Screen::Edit) => SAVE,
             (2, Screen::Edit | Screen::Password | Screen::OtpBackup) => CANCEL,
+            (2, Screen::Keys | Screen::Adopt) => BACK,
             (2, Screen::Vault) => LOCK,
             (2, Screen::Login | Screen::Create | Screen::Restore) if self.handle(BACK) != 0 => BACK,
             (1 | 2, _) => return Ok(()),
@@ -2067,6 +2530,16 @@ impl App {
             check_environment(self.hwnd)?;
         }
         match id {
+            // Keys leads back to the vault list, Adopt to Keys.
+            BACK if matches!(self.screen, Screen::Keys | Screen::Adopt) => {
+                self.adopt_source = None;
+                self.show(if self.screen == Screen::Adopt {
+                    Screen::Keys
+                } else {
+                    Screen::Vault
+                });
+                self.build();
+            }
             CREATE | OPEN | RESTORE | BACK => {
                 check_environment(self.hwnd)?;
                 self.paths()?;
@@ -2104,9 +2577,14 @@ impl App {
                 self.show(Screen::Edit);
                 self.build();
             }
+            // The password change returns to Keys, where it was started.
             CANCEL => {
                 self.otp_setup = None;
-                self.show(Screen::Vault);
+                self.show(if self.screen == Screen::Password {
+                    Screen::Keys
+                } else {
+                    Screen::Vault
+                });
                 self.build();
             }
             OTP_SETUP => {
@@ -2173,10 +2651,14 @@ impl App {
                 self.status = line("암호화하여 저장했습니다.");
                 self.build();
             }
-            CHANGE => {
+            CHANGE | KEY_PASSWORD => {
                 self.reset_copy();
                 self.reveal_until = None;
-                self.show(Screen::Password);
+                self.show(if id == CHANGE {
+                    Screen::Keys
+                } else {
+                    Screen::Password
+                });
                 self.build();
             }
             TOGGLE => {
@@ -2238,7 +2720,12 @@ impl App {
     fn allows(&self, id: i32) -> bool {
         if matches!(
             self.screen,
-            Screen::Vault | Screen::Edit | Screen::Password | Screen::OtpBackup
+            Screen::Vault
+                | Screen::Edit
+                | Screen::Password
+                | Screen::OtpBackup
+                | Screen::Keys
+                | Screen::Adopt
         ) && self.session.is_none()
         {
             return false;
@@ -2325,6 +2812,19 @@ impl App {
                     | CANCEL
             ),
             Screen::OtpBackup => matches!(id, CURRENT_PASS | PEEK_CURRENT | SUBMIT | CANCEL),
+            Screen::Keys => matches!(
+                id,
+                BACK | KEY_PASSWORD
+                    | KEY_ADOPT
+                    | KEYBACKUP
+                    | KEY_OVERRIDE_HEAD
+                    | KEY_LOCAL_OK
+                    | PENDING_FORGET
+                    | CURRENT_PASS
+                    | PEEK_CURRENT
+                    | OTP
+            ),
+            Screen::Adopt => matches!(id, BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT | OTP),
         }
     }
     fn reset_copy(&mut self) {
@@ -2385,13 +2885,20 @@ impl App {
                 self.deactivated();
             }
             let away = self.away_since.map_or(Duration::ZERO, |t| now - t);
-            if self.session.is_some() && self.auto_lock == 0 && away >= AWAY_LOCK {
+            // During a flow the idle limit below stands in for the away lock.
+            if self.session.is_some()
+                && self.auto_lock == 0
+                && away >= AWAY_LOCK
+                && self.flow.is_none()
+            {
                 self.lock("다른 앱에 30초 넘게 머물러 잠갔습니다.", false);
                 return;
             }
             let idle = now.duration_since(self.activity);
             // Typed forms before a vault is open are cleared on fixed times;
-            // copying the new key onto paper or scanning a QR takes longer.
+            // copying the new key onto paper or scanning a QR takes longer,
+            // and so does answering a flow's questions, which may mean
+            // reading a code on another PC (spec §9.2a). "Off" stays off.
             let limit = if self.provision.is_some() {
                 Some(Duration::from_secs(300))
             } else if self.session.is_none() {
@@ -2400,6 +2907,10 @@ impl App {
                 AUTO_LOCKS[self.auto_lock].1.map(|l| l.max(OTP_QR_IDLE))
             } else {
                 AUTO_LOCKS[self.auto_lock].1
+            };
+            let limit = match self.flow {
+                Some(_) => limit.map(|l| l.max(FLOW_IDLE)),
+                None => limit,
             };
             // Time in another app counts as unused even if an input slipped by.
             if limit.is_some_and(|l| idle.max(away) >= l) {
@@ -2448,6 +2959,19 @@ impl App {
         // in a temp file, which the next unlock takes back (spec §5.7).
         if s.gap_kept() {
             self.error(GAP_KEPT);
+            return;
+        }
+        // What a key change left to finish, found at this poll
+        // (S-KEYTEMP-GONE asks for a key backup now).
+        let notices: Vec<(Zeroizing<String>, isize)> =
+            s.take_key_notices().iter().map(key_line).collect();
+        if !notices.is_empty() {
+            let lines: Vec<&str> = notices.iter().map(|(text, _)| text.as_str()).collect();
+            let danger = notices.iter().any(|(_, tone)| *tone == TONE_DANGER);
+            self.set_status(
+                &joined(&lines),
+                if danger { TONE_DANGER } else { TONE_MUTED },
+            );
             return;
         }
         let Some(event) = event else {
@@ -3029,7 +3553,7 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         if a.closing || !a.allows(id) {
             return Err("종료 중입니다.");
         }
-        if matches!(id, BACKUP | KEYBACKUP | DELETE) && a.session.is_none() {
+        if matches!(id, BACKUP | KEYBACKUP | DELETE | KEY_ADOPT) && a.session.is_none() {
             return Err("금고가 잠겼습니다.");
         }
         // DELETE removes the entry the user confirmed, found again by its ID
@@ -3073,7 +3597,8 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         None
     } else {
         let save = matches!(id, BACKUP | KEYBACKUP | BROWSE_D) || screen == Screen::Create;
-        let Some(p) = dialog(h, save, matches!(id, KEYBACKUP | BROWSE_K)) else {
+        let key = matches!(id, KEYBACKUP | BROWSE_K | KEY_ADOPT);
+        let Some(p) = dialog(h, save, key) else {
             return Ok(());
         };
         Some(p)
@@ -3103,22 +3628,41 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                 a.build();
             }
             BACKUP | KEYBACKUP => {
-                let s = a.session.as_ref().ok_or("금고가 잠겼습니다.")?;
+                let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
                 let p = path.ok_or("경로 오류")?;
                 if id == BACKUP {
                     s.backup(&p)?;
                 } else {
                     s.backup_key(&p)?;
                 }
-                a.status(match (id == BACKUP, s.uses_otp()) {
+                // The new key file of a change whose save is unknown is saved
+                // now: the vault locks (S-KEYDAMAGED-LOCKED).
+                if s.key_unsaved() {
+                    a.lock(vault::KEY_DAMAGED_LOCKED, true);
+                    return Ok(());
+                }
+                let uses_otp = s.uses_otp();
+                a.status(match (id == BACKUP, uses_otp) {
                     (true, true) => {
                         "금고 백업을 저장했습니다. 열 때 열쇠 파일, 비밀번호, OTP도 필요합니다."
                     }
                     (true, false) => {
                         "금고 백업을 저장했습니다. 열 때 열쇠 파일과 비밀번호도 필요합니다."
                     }
-                    _ => "암호화된 열쇠를 백업했습니다. 금고와 분리하여 보관하세요.",
+                    _ => KEY_BACKED_UP,
                 });
+            }
+            // Another PC's key file, for Screen::Adopt. A file this build
+            // cannot open says so at once (spec §4.7).
+            KEY_ADOPT => {
+                let p = path.ok_or("경로 오류")?;
+                if let Some(refusal) = key_info(&p).and_then(|i| i.refusal()) {
+                    return Err(refusal);
+                }
+                a.adopt_source = Some(p);
+                a.show(Screen::Adopt);
+                a.status = line("");
+                a.build();
             }
             _ => {
                 let p = path.ok_or("경로 오류")?;
@@ -3153,35 +3697,29 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
 }
 /// Runs a command in phases (spec §9.2a), so that no borrow of the app spans
 /// anything that pumps messages: phase 1 checks the screen and takes what
-/// was typed under a short borrow; questions in between (S-OLDER for a
-/// login whose vault file is under an older key; SUBMIT on Login and
-/// Password are the commands routed here) run with no borrow, like
-/// modal_command's dialogs, so timers and session notices can still lock;
-/// phase 3 makes the library call under a borrow, and only if nothing
-/// changed meanwhile, else the flow and its secrets are dropped. It returns
-/// before window_proc's tail, so it drains the deferred events and makes
-/// the sync offer itself.
+/// was typed under a short borrow; questions in between run with no
+/// borrow, like modal_command's dialogs, so timers and session notices can
+/// still lock; phase 3 makes the library call under a borrow, and only if
+/// nothing changed meanwhile, else the flow and its secrets are dropped.
+/// The commands routed here (see phased) are SUBMIT on Login, Password and
+/// Adopt and the Keys screen's buttons that change what holds key changes.
+/// App::flow is set from phase 1 to the end. It returns before
+/// window_proc's tail, so it drains the deferred events and makes the sync
+/// offer itself.
 fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
-    let flow = APP.with(|cell| -> crypto::Result<Flow> {
-        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
-        b.as_mut().ok_or("화면이 닫혔습니다.")?.begin(id)
-    });
-    drain_pending(h);
-    let mut flow = flow?;
-    if let Some(sha) = flow.older() {
-        // Not opened, and not a failed attempt: nothing was derived.
-        if !ask(h, OLDER_QUESTION) {
-            drain_pending(h);
-            return Err(OLDER_DECLINED);
+    let screen = APP.with(|cell| cell.try_borrow().ok()?.as_ref().map(|a| a.screen));
+    let result = match screen {
+        Some(Screen::Adopt) => adopt_flow(h),
+        Some(Screen::Keys) => keys_flow(h, id),
+        _ => submit_flow(h, id),
+    };
+    // The flow is over, however it ended.
+    APP.with(|cell| {
+        if let Ok(mut b) = cell.try_borrow_mut()
+            && let Some(a) = b.as_mut()
+        {
+            a.flow = None;
         }
-        flow.confirmed_older = Some(sha);
-    }
-    unsafe {
-        UpdateWindow(h);
-    }
-    let result = APP.with(|cell| -> crypto::Result<()> {
-        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
-        b.as_mut().ok_or("화면이 닫혔습니다.")?.finish(flow)
     });
     drain_pending(h);
     // Raised only by the unlock just made.
@@ -3190,25 +3728,525 @@ fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     }
     result
 }
+/// SUBMIT on Login and Password: S-OLDER for a login whose vault file is
+/// under an older key; S-ROTATE and the gate (spec §7.5) for a password
+/// change, then its key backup (S-BACKUP).
+fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
+    let flow = APP.with(|cell| -> crypto::Result<Flow> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        let flow = a.begin(id)?;
+        a.flow = Some(id);
+        Ok(flow)
+    });
+    drain_pending(h);
+    let mut flow = flow?;
+    if let Some(sha) = flow.older() {
+        // Not opened, and not a failed attempt: nothing was derived.
+        if !ask(h, OLDER_QUESTION) {
+            return Err(OLDER_DECLINED);
+        }
+        flow.confirmed_older = Some(sha);
+    }
+    // What a key change does, then its gate (spec §7.5): asked with no
+    // borrow, default No; No changes nothing. Checked again before the
+    // code is spent: a gate that came up while a question was open is
+    // asked as well.
+    if flow.question.is_some_and(|q| !ask(h, q)) {
+        return Ok(());
+    }
+    let mut gate = flow.gate;
+    loop {
+        if let Some(g) = gate {
+            if !ask(h, g.question()) {
+                return Ok(());
+            }
+            flow.answered = Some(g);
+        }
+        let now = APP.with(|cell| -> crypto::Result<Option<vault::Gate>> {
+            let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+            b.as_mut().ok_or("화면이 닫혔습니다.")?.gate_now(&flow)
+        });
+        drain_pending(h);
+        gate = now?;
+        if gate.is_none() {
+            break;
+        }
+    }
+    unsafe {
+        UpdateWindow(h);
+    }
+    let result = APP.with(|cell| -> crypto::Result<bool> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        b.as_mut().ok_or("화면이 닫혔습니다.")?.finish(flow)
+    });
+    drain_pending(h);
+    match result {
+        Ok(true) => backup_after(h),
+        Err(e) if e == vault::KEY_DAMAGED => save_damaged_key(h),
+        Err(e) => return Err(e),
+        Ok(false) => {}
+    }
+    Ok(())
+}
+/// [열기] on Screen::Adopt (spec §9.2 "Adopt", §5.8): the whole adopt as
+/// one flow, from the public checks to the write, with one
+/// re-authentication and so one OTP code. The Reauth, the other file's
+/// password and its opened keys live only in this frame and are wiped when
+/// it returns. [취소], a No or a lock anywhere writes nothing.
+fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
+    // P1: what was typed, and the public checks of the file as read now;
+    // every later step works on exactly these bytes.
+    let p1 = APP.with(|cell| -> crypto::Result<Option<_>> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        a.enter(SUBMIT)?;
+        let path = a.adopt_source.clone().ok_or("받을 열쇠 파일을 고르세요.")?;
+        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        let other = KeyFile::read(&path)?;
+        let check = s.adopt_check(&other, Source::File(path))?;
+        // Nothing to write for these.
+        let same = match check.class {
+            AdoptClass::Equal => Some(vault::ADOPT_EQUAL),
+            AdoptClass::Contained => Some(vault::ADOPT_CONTAINED),
+            _ => None,
+        };
+        if let Some(same) = same {
+            a.status(same);
+            return Ok(None);
+        }
+        let (current, otp) = (a.read(CURRENT_PASS)?, a.read(OTP)?);
+        a.flow = Some(SUBMIT);
+        Ok(Some((a.serial, other, check, current, otp, otp::now()?)))
+    });
+    drain_pending(h);
+    let Some((serial, other, check, current, otp, otp_time)) = p1? else {
+        return Ok(());
+    };
+    // P3: the re-authentication, and the other file opened with this PC's
+    // password.
+    let first = phase(h, Screen::Adopt, serial, |a| {
+        let serial = a.serial;
+        let result = a
+            .session
+            .as_mut()
+            .ok_or("금고가 잠겼습니다.")
+            .and_then(|s| {
+                let mut r = s.reauth(&current, Some((&otp, otp_time)), None)?;
+                r.app_serial = serial;
+                let opened = s.adopt_open(&r, &other, None);
+                Ok((r, opened))
+            });
+        let (r, opened) = result.inspect_err(|e| {
+            if *e == crypto::AUTH_ERROR {
+                a.failed_attempt();
+            }
+        })?;
+        a.failed = 0;
+        match opened {
+            Ok(opened) => Ok((r, Some(opened))),
+            // The other file has another password.
+            Err(e) if e == crypto::AUTH_ERROR => Ok((r, None)),
+            Err(e) => Err(e),
+        }
+    })?;
+    let Some((r, opened)) = first else {
+        return Ok(());
+    };
+    let same_password = opened.is_some();
+    // A: S-NEWPASS-OTHER until the other file opens; each wrong password
+    // counts as a failed attempt, and the retry delay applies.
+    let opened = match opened {
+        Some(opened) => opened,
+        None => {
+            let mut note = None;
+            loop {
+                let text = match note {
+                    None => tr(NEWPASS_OTHER).to_owned(),
+                    Some(e) => format!("{}\n\n{}", tr(e), tr(NEWPASS_OTHER)),
+                };
+                let buttons = [OK_BUTTON, CANCEL_BUTTON];
+                let InputAnswer::Password(typed) =
+                    ask_input(h, InputKind::Password, &text, &buttons)
+                else {
+                    return Ok(());
+                };
+                let tried = phase(h, Screen::Adopt, serial, |a| {
+                    if Instant::now() < a.retry {
+                        return Ok(Err(RETRY_WAIT));
+                    }
+                    let s = a.session.as_ref().ok_or("금고가 잠겼습니다.")?;
+                    match s.adopt_open(&r, &other, Some(&typed)) {
+                        Ok(opened) => {
+                            a.failed = 0;
+                            Ok(Ok(opened))
+                        }
+                        Err(e) if e == crypto::AUTH_ERROR => {
+                            a.failed_attempt();
+                            Ok(Err(e))
+                        }
+                        Err(e) => Err(e),
+                    }
+                })?;
+                match tried {
+                    None => return Ok(()),
+                    Some(Ok(opened)) => break opened,
+                    Some(Err(e)) => note = Some(e),
+                }
+            }
+        }
+    };
+    // P3: the preview, from the checks again for exactly this file.
+    let plan = phase(h, Screen::Adopt, serial, |a| {
+        let s = a.session.as_ref().ok_or("금고가 잠겼습니다.")?;
+        s.adopt_preview(&r, &other, opened, &check, GatePass::none(&check), None)
+    })?;
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    // A: the preview, then S-ADOPT-BOTHPASS where it applies.
+    let preview = plan.preview().clone();
+    let text = preview_text(&preview, same_password);
+    let check_box = preview
+        .own_pass
+        .map(|on| (ADOPT_OWN_PASS, OWN_PASS_LABEL, on));
+    let kind = InputKind::Preview { check: check_box };
+    let own = match ask_input(h, kind, &text, &[ACCEPT_BUTTON, CANCEL_BUTTON]) {
+        InputAnswer::Accept { checked } => checked,
+        _ => return Ok(()),
+    };
+    if preview.both_passwords && !ask(h, ADOPT_BOTHPASS) {
+        return Ok(());
+    }
+    // P3: the write.
+    let acks = vault::Acks {
+        password_only: false,
+        union_password: if own {
+            vault::UnionPassword::Own
+        } else {
+            vault::UnionPassword::Other
+        },
+        both_passwords: preview.both_passwords,
+    };
+    let written = phase(h, Screen::Adopt, serial, |a| {
+        let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+        let result = s.adopt(r, plan, Vec::new(), acks, vault::Consent::default(), false);
+        let notices: Vec<(Zeroizing<String>, isize)> =
+            s.take_key_notices().iter().map(key_line).collect();
+        let badge = s.badge();
+        let adopted = match result {
+            Ok(adopted) => adopted,
+            // As after a password change (S-KEYDAMAGED-SAVE).
+            Err(e) if e == vault::KEY_DAMAGED => {
+                a.show(Screen::Vault);
+                a.build();
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
+        let pass = match adopted.password {
+            vault::PassInForce::Own => ADOPT_PASS_OWN,
+            vault::PassInForce::Other => ADOPT_PASS_OTHER,
+        };
+        // The new vault file is only in its temp file: the app locks
+        // (spec §5.5 S3), and the line says which password opens it.
+        if adopted.gap_kept {
+            a.error(vault::GAP_CHANGED);
+            a.set_status(&joined(&[vault::GAP_CHANGED, pass]), TONE_DANGER);
+            return Ok(false);
+        }
+        let code = fill(ADOPT_CODE, &[&adopted.code.show(adopted.state.epoch)]);
+        let mut lines: Vec<&str> = vec![code.as_str(), pass];
+        if adopted.vault_pending {
+            lines.push(vault::VPENDING);
+        }
+        lines.extend(notices.iter().map(|(text, _)| text.as_str()));
+        a.sync_badge = badge;
+        a.adopt_source = None;
+        a.show(Screen::Vault);
+        a.status = joined(&lines);
+        if notices.iter().any(|(_, tone)| *tone == TONE_DANGER) {
+            a.status_tone = TONE_DANGER;
+        }
+        a.build();
+        Ok(true)
+    });
+    match written {
+        Ok(Some(true)) => backup_after(h),
+        Err(e) if e == vault::KEY_DAMAGED => save_damaged_key(h),
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
+    Ok(())
+}
+/// The adopt preview's text (spec §9.1): what is done with the other file,
+/// the result's revision, a successor's key code (a union's exists only
+/// once written), and the password in force where no check box decides it.
+fn preview_text(p: &vault::Preview, same_password: bool) -> String {
+    let what = match p.class {
+        AdoptClass::Successor => ADOPT_SUCCESSOR,
+        _ => ADOPT_UNION,
+    };
+    let mut lines = vec![tr(what).to_owned(), fill(ADOPT_RESULT, &[&p.epoch])];
+    if let Some(code) = p.code {
+        lines.push(fill(ADOPT_CODE, &[&code.show(p.epoch)]));
+    }
+    if p.own_pass.is_none() {
+        let pass = if same_password {
+            ADOPT_PASS_OWN
+        } else {
+            ADOPT_PASS_OTHER
+        };
+        lines.push(tr(pass).to_owned());
+    }
+    lines.join("\r\n\r\n")
+}
+/// A Keys-screen button that acts on what holds key changes (spec §9.2):
+/// [서버 사본을 이 PC 상태로 덮어쓰기…] (§7.5a), [이 열쇠 파일이 맞습니다]
+/// or [끝나지 않은 열쇠 변경 버리기…] (§5.10). Its question (danger,
+/// default No), then a re-authentication with the password (and OTP)
+/// typed on the screen, and the library call, which checks the hold again.
+fn keys_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
+    let p1 = APP.with(|cell| -> crypto::Result<_> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        a.enter(id)?;
+        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        let (old, new) = (s.confirmed_epoch().unwrap_or(0), s.key_state().epoch);
+        let (question, head) = match id {
+            KEY_OVERRIDE_HEAD => {
+                let head = s.head_to_override()?;
+                let values: [&dyn std::fmt::Display; 3] =
+                    [&head.epoch, &head.key_prefix(), &head.version];
+                (fill(vault::OVERRIDE_HEAD, &values), Some(head))
+            }
+            KEY_LOCAL_OK if s.local_rollback() && !s.restore_held() => {
+                let question = if s.badge().is_some() {
+                    vault::LOCAL_OK_CONFIRM_SYNCED
+                } else {
+                    vault::LOCAL_OK_CONFIRM
+                };
+                (fill(question, &[&old, &new, &new]), None)
+            }
+            PENDING_FORGET => {
+                let path = s.pending_elsewhere().ok_or(vault::NOTHING_HELD)?;
+                (fill(vault::PENDING_DISCARD, &[&shown(path)]), None)
+            }
+            KEY_LOCAL_OK => return Err(vault::NOTHING_HELD),
+            _ => return Err("현재 화면에서 허용되지 않는 작업입니다."),
+        };
+        let (current, otp) = (a.read(CURRENT_PASS)?, a.read(OTP)?);
+        a.flow = Some(id);
+        Ok((a.serial, question, head, current, otp, otp::now()?))
+    });
+    drain_pending(h);
+    let (serial, question, head, current, otp, otp_time) = p1?;
+    if !ask(h, &question) {
+        return Ok(());
+    }
+    phase(h, Screen::Keys, serial, |a| {
+        let serial = a.serial;
+        let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+        let result = s
+            .reauth(&current, Some((&otp, otp_time)), None)
+            .and_then(|mut r| {
+                r.app_serial = serial;
+                match (id, &head) {
+                    (KEY_OVERRIDE_HEAD, Some(head)) => s.override_head(r, head),
+                    (KEY_LOCAL_OK, _) => s.confirm_key_file(r),
+                    _ => s.forget_pending(r),
+                }
+            });
+        let notices: Vec<(Zeroizing<String>, isize)> =
+            s.take_key_notices().iter().map(key_line).collect();
+        let badge = s.badge();
+        if let Err(e) = result {
+            if e == crypto::AUTH_ERROR {
+                a.failed_attempt();
+            }
+            return Err(e);
+        }
+        a.failed = 0;
+        a.sync_badge = badge;
+        let done = match id {
+            KEY_OVERRIDE_HEAD => HEAD_OVERRIDDEN,
+            KEY_LOCAL_OK => KEY_FILE_CONFIRMED,
+            _ => vault::PENDING_DISCARDED,
+        };
+        let mut lines = vec![done];
+        if id == KEY_LOCAL_OK && badge.is_some() {
+            lines.push(KEY_FILE_CONFIRMED_SYNCED);
+        }
+        lines.extend(notices.iter().map(|(text, _)| text.as_str()));
+        // Sync goes on from the vault list; the other two stay on Keys,
+        // where key changes are now possible.
+        a.show(if id == KEY_OVERRIDE_HEAD {
+            Screen::Vault
+        } else {
+            Screen::Keys
+        });
+        a.status = joined(&lines);
+        if notices.iter().any(|(_, tone)| *tone == TONE_DANGER) {
+            a.status_tone = TONE_DANGER;
+        }
+        a.build();
+        Ok(())
+    })
+    .map(|_| ())
+}
+/// A later phase of a flow (spec §9.2a): `f` runs under the app's borrow,
+/// and only while the vault, `screen` and `serial` of phase 1 still stand
+/// (see App::still); None when they do not, and the flow is void.
+fn phase<T>(
+    h: Hwnd,
+    screen: Screen,
+    serial: u64,
+    f: impl FnOnce(&mut App) -> crypto::Result<T>,
+) -> crypto::Result<Option<T>> {
+    unsafe {
+        UpdateWindow(h);
+    }
+    let result = APP.with(|cell| -> crypto::Result<Option<T>> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        if !a.still(screen, serial, true)? {
+            return Ok(None);
+        }
+        f(a).map(Some)
+    });
+    drain_pending(h);
+    result
+}
+/// S-BACKUP after a key change (spec §9.2): the new key file's backup now.
+/// The change's status line stays above the backup's.
+fn backup_after(h: Hwnd) {
+    let done = APP.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let a = b.as_ref()?;
+        a.session.as_ref()?;
+        let tone = unsafe { GetWindowLongPtrW(a.handle(STATUS), -21) };
+        Some((a.status.clone(), tone))
+    });
+    let Some((done, tone)) = done else {
+        return;
+    };
+    if !ask(h, BACKUP_QUESTION) {
+        return;
+    }
+    match modal_command(h, KEYBACKUP) {
+        Ok(()) => APP.with(|cell| {
+            if let Ok(mut b) = cell.try_borrow_mut()
+                && let Some(a) = b.as_mut()
+                && a.session.is_some()
+                && a.status.as_str() == KEY_BACKED_UP
+            {
+                a.set_status(&joined(&[done.as_str(), KEY_BACKED_UP]), tone);
+            }
+        }),
+        // A failed backup must not pass as one more status line.
+        Err(e) => message(h, e),
+    }
+}
+/// S-KEYDAMAGED-SAVE (spec §5.5 S2): whether the new key file was saved is
+/// unknown, so it is saved from memory now, which locks the vault
+/// (S-KEYDAMAGED-LOCKED); "No" leaves the vault list open with the danger
+/// line, and "열쇠 백업" still saves it.
+fn save_damaged_key(h: Hwnd) {
+    report(h, vault::KEY_DAMAGED);
+    if ask(h, KEY_DAMAGED_SAVE)
+        && let Err(e) = modal_command(h, KEYBACKUP)
+    {
+        message(h, e);
+    }
+}
 /// Whether window_proc hands command `id` to phased_command: SUBMIT (or
-/// Enter) on Login and Password. Anything else, or a busy app, goes the
+/// Enter) on Login, Password and Adopt, and the Keys screen's buttons that
+/// act on what holds key changes. Anything else, or a busy app, goes the
 /// usual way.
 fn phased(id: i32) -> bool {
-    matches!(id, 1 | SUBMIT)
-        && APP.with(|cell| {
-            cell.try_borrow().is_ok_and(|b| {
-                b.as_ref()
-                    .is_some_and(|a| matches!(a.screen, Screen::Login | Screen::Password))
+    APP.with(|cell| {
+        cell.try_borrow().is_ok_and(|b| {
+            b.as_ref().is_some_and(|a| match a.screen {
+                Screen::Login | Screen::Password | Screen::Adopt => matches!(id, 1 | SUBMIT),
+                Screen::Keys => matches!(id, KEY_OVERRIDE_HEAD | KEY_LOCAL_OK | PENDING_FORGET),
+                _ => false,
             })
         })
+    })
 }
-/// confirm(); a test answers in its place (see ANSWER).
+/// The buttons of the input dialogs (spec §9.2a): Enter and Esc arrive as
+/// IDOK (1) and IDCANCEL (2).
+const OK_BUTTON: DialogButton = DialogButton {
+    id: 1,
+    label: "확인",
+    role: Role::Accept,
+};
+const ACCEPT_BUTTON: DialogButton = DialogButton {
+    id: 1,
+    label: "받기",
+    role: Role::Accept,
+};
+const CANCEL_BUTTON: DialogButton = DialogButton {
+    id: 2,
+    label: "취소",
+    role: Role::Cancel,
+};
+/// confirm(); a test answers in its place (see ANSWER), and a question no
+/// test answered is a No. Answering counts as use of the app (spec §9.2a).
 fn ask(h: Hwnd, text: &str) -> bool {
     #[cfg(test)]
-    if let Some(mut answer) = ANSWER.with(|a| a.borrow_mut().take()) {
-        return modal(|| answer(text));
-    }
-    confirm(h, text)
+    let yes = {
+        let _ = h;
+        match ANSWER.with(|a| a.borrow_mut().take()) {
+            Some(mut answer) => modal(|| answer(text)),
+            None => false,
+        }
+    };
+    #[cfg(not(test))]
+    let yes = confirm(h, text);
+    used();
+    yes
+}
+/// input_dialog() with this app's edit subclass; a test answers in its
+/// place (see INPUT_ANSWER), and an input no test answered is cancelled.
+/// Answering counts as use of the app.
+fn ask_input(h: Hwnd, kind: InputKind, text: &str, buttons: &[DialogButton]) -> InputAnswer {
+    #[cfg(test)]
+    let answer = {
+        let _ = (h, edit_proc as Proc);
+        let cancel = buttons
+            .iter()
+            .find(|b| b.role == Role::Cancel)
+            .map_or(2, |b| b.id);
+        match INPUT_ANSWER.with(|i| i.borrow_mut().take()) {
+            Some(mut answer) => {
+                let given = modal(|| answer(text, &kind));
+                // Kept for the next input of the flow, unless it set another.
+                INPUT_ANSWER.with(|i| {
+                    let mut i = i.borrow_mut();
+                    if i.is_none() {
+                        *i = Some(answer);
+                    }
+                });
+                given
+            }
+            None => InputAnswer::Cancel(cancel),
+        }
+    };
+    #[cfg(not(test))]
+    let answer = input_dialog(h, kind, text, buttons, edit_proc);
+    used();
+    answer
+}
+/// The user answered a dialog: that is use of the app, for the idle lock.
+fn used() {
+    APP.with(|cell| {
+        if let Ok(mut b) = cell.try_borrow_mut()
+            && let Some(a) = b.as_mut()
+        {
+            a.activity = Instant::now();
+        }
+    });
 }
 
 /// Asks once per unlock whether to turn sync on for a v1 vault next to a
@@ -3361,7 +4399,9 @@ fn paste_into_edit(h: Hwnd) -> crypto::Result<()> {
         // A pasted password or secret should not outlive the paste on the
         // clipboard. Anything copied since then belongs to the user.
         let id = GetWindowLongPtrW(h, -12) as i32;
-        if matches!(id, SECRET | PASS | CONFIRM | CURRENT_PASS) && clear_pasted(h, sequence) {
+        if matches!(id, SECRET | PASS | CONFIRM | CURRENT_PASS | INPUT_EDIT)
+            && clear_pasted(h, sequence)
+        {
             PASTE_NOTICE.with(|n| n.set(n.get() | 1));
             PostMessageW(GetParent(h), PASTE_CLEARED, 0, 0);
         }
@@ -3472,7 +4512,7 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         && (w >> 16) == 0
         && matches!(
             (w & 0xffff) as i32,
-            BROWSE_V | BROWSE_K | BROWSE_D | DELETE | BACKUP | KEYBACKUP
+            BROWSE_V | BROWSE_K | BROWSE_D | DELETE | BACKUP | KEYBACKUP | KEY_ADOPT
         )
     {
         if !APP.with(|cell| cell.try_borrow_mut().is_ok()) {
@@ -3490,7 +4530,11 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         return 0;
     }
     if m == 0x111 && (w >> 16) == 0 && phased((w & 0xffff) as i32) {
-        if let Err(e) = phased_command(h, SUBMIT) {
+        let id = match (w & 0xffff) as i32 {
+            1 => SUBMIT,
+            id => id,
+        };
+        if let Err(e) = phased_command(h, id) {
             report(h, e);
         }
         return 0;
@@ -3808,32 +4852,71 @@ fn tr_lines(text: &str) -> Zeroizing<String> {
     let parts: Vec<&str> = text.split("\r\n").map(tr).collect();
     joined(&parts)
 }
-/// The status line for what an unlock did with the vault file's key (spec
-/// §5.2 step 10) and its tone.
-fn key_line(notice: KeyNotice) -> (&'static str, isize) {
+/// The status line for what an unlock, a key change or a later save found
+/// about the key and vault files (spec §5.2 step 10, §5.11) and its tone. A
+/// line without values keeps its Korean source, so a language switch
+/// translates it.
+fn key_line(notice: &KeyNotice) -> (Zeroizing<String>, isize) {
+    let filled = |text: &str, values: &[&dyn std::fmt::Display]| Zeroizing::new(fill(text, values));
     match notice {
         KeyNotice::Resumed => (
-            "지난 열쇠 변경을 마저 끝내 금고 파일을 새 열쇠로 다시 저장했습니다.",
+            line("지난 열쇠 변경을 마저 끝내 금고 파일을 새 열쇠로 다시 저장했습니다."),
             TONE_MUTED,
         ),
         KeyNotice::OlderAccepted => (
-            "예전 열쇠로 저장된 금고 파일을 새 열쇠로 다시 저장했습니다. 항목이 예상과 다르면 백업이나 서버 기록을 확인하세요.",
+            line(
+                "예전 열쇠로 저장된 금고 파일을 새 열쇠로 다시 저장했습니다. 항목이 예상과 다르면 백업이나 서버 기록을 확인하세요.",
+            ),
             TONE_DANGER,
         ),
-        // Its own text (spec §5.2 step 10): an unlock stops no sync, and
-        // "새 열쇠 파일 받기" arrives with stage 3.
+        // Its own text (spec §5.2 step 10): an unlock stops no sync.
         KeyNotice::StaleKeyFile => (
-            "이 금고 파일은 이 PC의 열쇠 파일보다 새로운 열쇠 파일로 저장되었습니다. 다른 PC에서 이 금고의 열쇠 파일을 바꾼 것으로 보입니다. 그 PC의 새 열쇠 파일을 USB로 가져와 그것으로 여세요.",
+            line(
+                "이 금고 파일은 이 PC의 열쇠 파일보다 새로운 열쇠 파일로 저장되었습니다. 다른 PC에서 이 금고의 열쇠 파일을 바꾼 것으로 보입니다. 그 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 그 전에는 이 PC에서 열쇠를 바꾸지 마세요.",
+            ),
             TONE_DANGER,
         ),
         KeyNotice::ResavePending => (
-            "금고 파일을 아직 새 열쇠로 다시 저장하지 못했습니다. 저장장치를 확인하세요. 다음 저장이나 잠금 해제 때 자동으로 마칩니다.",
+            line(
+                "금고 파일을 아직 새 열쇠로 다시 저장하지 못했습니다. 저장장치를 확인하세요. 다음 저장이나 잠금 해제 때 자동으로 마칩니다.",
+            ),
             TONE_DANGER,
         ),
         KeyNotice::ResaveTooLarge => (
-            "금고 파일을 새 열쇠로 다시 저장하지 못했습니다. 새 형식은 머리글이 44바이트 더 길어 용량 제한(8 MiB)을 넘습니다. 항목을 지우거나 줄이면 그 저장 때 마칩니다.",
+            line(
+                "금고 파일을 새 열쇠로 다시 저장하지 못했습니다. 새 형식은 머리글이 44바이트 더 길어 용량 제한(8 MiB)을 넘습니다. 항목을 지우거나 줄이면 그 저장 때 마칩니다.",
+            ),
             TONE_DANGER,
         ),
+        KeyNotice::NotFinished => (line(vault::NOT_FINISHED), TONE_MUTED),
+        KeyNotice::LocalRollback { old, new } => {
+            (filled(vault::LOCAL_ROLLBACK, &[old, new]), TONE_DANGER)
+        }
+        KeyNotice::PendingElsewhere(path) => (
+            filled(vault::PENDING_ELSEWHERE, &[&shown(path)]),
+            TONE_DANGER,
+        ),
+        KeyNotice::RestoreOldKey { old, new } => {
+            (filled(vault::RESTORE_OLDKEY, &[old, new]), TONE_MUTED)
+        }
+        KeyNotice::RestorePending => (line(vault::RESTORE_PENDING), TONE_MUTED),
+        KeyNotice::KeyBackupDue => (line(vault::KEYBACKUP_DUE), TONE_MUTED),
+        KeyNotice::SidecarFailed => (line(vault::SIDECAR_FAILED), TONE_DANGER),
+        KeyNotice::AnchorNewer => (line(vault::ANCHOR_NEWER), TONE_DANGER),
+        KeyNotice::KeyTemp => (line(vault::KEYTEMP), TONE_MUTED),
+        KeyNotice::KeyTempGone => (line(vault::KEYTEMP_GONE), TONE_DANGER),
+    }
+}
+/// A path as the user knows it: without the `\\?\` prefix of a
+/// normalized one.
+fn shown(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    match text.strip_prefix("\\\\?\\") {
+        Some(rest) => match rest.strip_prefix("UNC\\") {
+            Some(share) => format!("\\\\{share}"),
+            None => rest.to_owned(),
+        },
+        None => text.into_owned(),
     }
 }
 /// The status line for a sync notice and its tone. Sync news never beeps:
@@ -3943,6 +5026,60 @@ fn sync_line(notice: &SyncNotice) -> (Zeroizing<String>, isize) {
             ),
             true,
         ),
+        // The key notices of spec v3 §7.4, the longer ones in two status
+        // lines (as S-ANCHOR-FORK, §2.18 #2).
+        SyncNotice::KeyChanged { hardware: false } => (
+            line(concat!(
+                "다른 PC에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. 그 PC의 새 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일에 덮어쓰지는 마세요. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+                "\r\n",
+                "어느 PC에서도 열쇠를 바꾸지 않았다면 서버 사본이 위조되었을 수 있습니다. 열쇠를 바꾼 PC를 더 쓸 수 없다면 '열쇠 관리'에서 서버 사본을 이 PC 상태로 덮어쓸 수 있습니다.",
+            )),
+            true,
+        ),
+        SyncNotice::KeyChanged { hardware: true } => (
+            line(concat!(
+                "다른 PC에서 이 금고에 보안 키를 켜서 동기화를 멈췄습니다. 이 고요 금고 빌드는 보안 키를 지원하지 않아 그 열쇠 파일을 받을 수 없습니다(docs/SECURITY_KEY.md).",
+                "\r\n",
+                "이 PC의 변경은 이 PC에만 저장됩니다. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.",
+            )),
+            true,
+        ),
+        SyncNotice::KeyFork => (
+            line(
+                "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 한 PC에서 '열쇠 관리 › 새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받으면 두 열쇠 파일을 합칩니다. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.",
+            ),
+            true,
+        ),
+        SyncNotice::OldKeyDamaged => (
+            line(concat!(
+                "서버 사본이 이 PC의 예전 열쇠 이름을 달고 있지만 열리지 않아 동기화를 멈췄습니다. 손상되었거나 위조된 사본일 수 있습니다. 다른 PC가 새 사본을 올리면 다시 이어집니다.",
+                "\r\n",
+                "그럴 PC가 없다면 '열쇠 관리'에서 서버 사본을 이 PC 상태로 덮어쓸 수 있습니다. 이 PC의 변경은 이 PC에 저장되어 있습니다.",
+            )),
+            true,
+        ),
+        SyncNotice::RollbackHeld => (
+            line(concat!(
+                "이 PC는 이 PC가 전에 쓴 것보다 오래된 열쇠 파일로 열려 있어 동기화를 멈췄습니다. 서버 사본은 합치지도 덮어쓰지도 않습니다. 이 PC가 전에 쓴 최신 열쇠 파일(열쇠 백업)로 다시 열거나 '열쇠 관리 › 새 열쇠 파일 받기'로 그 파일을 받으세요.",
+                "\r\n",
+                "지금 열쇠 파일이 맞다면 '열쇠 관리'에서 [이 열쇠 파일이 맞습니다]를 누르세요. 이 PC의 변경은 이 PC에 저장되어 있습니다.",
+            )),
+            true,
+        ),
+        SyncNotice::NewerKeyFile => (
+            line(
+                "다른 PC의 열쇠 파일이 이 PC의 것보다 새롭습니다. 동기화를 멈췄습니다. 그 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 그 전에는 이 PC에서 열쇠를 바꾸지 마세요.",
+            ),
+            true,
+        ),
+        SyncNotice::OldKeyReplaced => (
+            line(concat!(
+                "예전 열쇠로 만든 서버 사본은 합치지 않고 이 PC의 상태로 덮었습니다. 새 열쇠 파일을 아직 받지 않은 PC가 있으면 그 PC에서 '새 열쇠 파일 받기'를 하세요. 그 PC의 변경은 그 뒤에 합쳐집니다.",
+                "\r\n",
+                "그런 PC가 없다면 예전 열쇠 사본을 가진 누군가가 올린 것일 수 있습니다.",
+            )),
+            true,
+        ),
     };
     (text, if danger { TONE_DANGER } else { TONE_MUTED })
 }
@@ -4034,12 +5171,14 @@ fn create_window(instance: isize, class: &[u16]) -> Hwnd {
 /// mouse-button input is real only while one of the app's windows is in
 /// front; otherwise it was posted by someone else.
 fn accept_queued(h: Hwnd, msg: &Msg) -> bool {
-    // A confirm box is an owned popup, not a child: its buttons count too.
-    let b = confirm_box();
+    // A confirm box and an input dialog are owned popups, not children:
+    // their controls count too.
+    let popup = |b: Hwnd| b != 0 && (msg.hwnd == b || unsafe { IsChild(b, msg.hwnd) } != 0);
     let ours = msg.hwnd != 0
         && (msg.hwnd == h
             || unsafe { IsChild(h, msg.hwnd) } != 0
-            || (b != 0 && (msg.hwnd == b || unsafe { IsChild(b, msg.hwnd) } != 0)));
+            || popup(confirm_box())
+            || popup(input_box()));
     if !ours {
         return true;
     }
@@ -4397,7 +5536,8 @@ mod tests {
     /// Builds every screen with synthetic data and calls `visit` on each:
     /// first run, open, restore, create with and without the OTP, the vault
     /// empty, with a shown entry and syncing (each pill word), edit,
-    /// password change, OTP backup with and without the QR.
+    /// password change, OTP backup with and without the QR, key management
+    /// with each thing that holds key changes, and adopt.
     unsafe fn each_screen(dir: &std::path::Path, visit: &mut dyn FnMut(&mut App, &str)) {
         let mut session = synthetic_session(dir, "synthetic layout password");
         unsafe {
@@ -4499,16 +5639,47 @@ mod tests {
             app.build();
             visit(&mut app, "otp-backup-qr");
             app.otp_setup = None;
+            // Keys as this 0.8 key file shows it, then a KF2 key file's code
+            // with each hold, filled with long values.
+            app.screen = Screen::Keys;
+            app.build();
+            visit(&mut app, "keys");
+            let path = PathBuf::from(
+                r"D:\Users\synthetic-user\Documents\Goyo Vault backups\2026\vault-backup.goyokey",
+            );
+            for (name, hold) in [
+                ("keys-code", Hold::None),
+                ("keys-pending", Hold::PendingElsewhere(path)),
+                ("keys-restore-pending", Hold::RestorePending),
+                ("keys-restore-oldkey", Hold::RestoreOldKey(65_535, 65_536)),
+                ("keys-restored", Hold::Restored),
+                ("keys-rollback", Hold::LocalRollback(65_536, 65_535)),
+                ("keys-halted", Hold::Halted),
+            ] {
+                let code = Some("E65536 · DDDD-DDDD-DDDD-DDDD".to_owned());
+                KEYS_VIEW.with(|v| *v.borrow_mut() = Some(KeysView { code, hold }));
+                app.build();
+                visit(&mut app, name);
+            }
+            KEYS_VIEW.with(|v| v.borrow_mut().take());
+            app.screen = Screen::Adopt;
+            app.adopt_source = Some(app.key_path.clone());
+            app.build();
+            visit(&mut app, "adopt");
+            app.adopt_source = None;
             drop(app);
             DestroyWindow(h);
         }
     }
+    /// A test's folder, which is also the anchor folder of the PC the test
+    /// plays (`anchor` in it): no test touches the developer's own.
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "goyo-{name}-{:x}",
             u64::from_le_bytes(*crypto::random::<8>().unwrap())
         ));
         std::fs::create_dir(&dir).unwrap();
+        vault::set_anchor_dir(Some(dir.join("anchor")));
         dir
     }
     /// Every label's text fits its box at this machine's DPI, in both
@@ -4630,18 +5801,22 @@ mod tests {
                         }
                     }
                     // Sync notices filled with their longest values, and the
-                    // recovery lines with the longest temp file name.
+                    // recovery lines with the longest temp file name. A notice
+                    // in two status lines fits line by line, as the other
+                    // multi-line texts do.
                     let notices = sync_notices().into_iter().map(|n| sync_line(&n).0);
                     let recovered =
                         recovery_lines(&kept_key_recovery(), Path::new("vault.goyokey"));
                     for line in notices.chain(recovered.0) {
-                        let text = tr(&line);
-                        let need = measure(status, font, text, r.right, 0x10 | 0x40).bottom;
-                        if need > r.bottom {
-                            failures.push(format!(
-                                "{language} status: needs {need}px, has {}px: {text:?}",
-                                r.bottom
-                            ));
+                        for part in line.split("\r\n") {
+                            let text = tr(part);
+                            let need = measure(status, font, text, r.right, 0x10 | 0x40).bottom;
+                            if need > r.bottom {
+                                failures.push(format!(
+                                    "{language} status: needs {need}px, has {}px: {text:?}",
+                                    r.bottom
+                                ));
+                            }
                         }
                     }
                 }
@@ -4650,6 +5825,86 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+    /// The source files whose Korean literals english_is_complete checks,
+    /// by their path under src/ (spec §9.3).
+    const SCANNED: [(&str, &str); 15] = [
+        ("main.rs", include_str!("main.rs")),
+        ("win.rs", include_str!("win.rs")),
+        ("theme.rs", include_str!("theme.rs")),
+        ("vault.rs", include_str!("vault.rs")),
+        ("vault/keyfile.rs", include_str!("vault/keyfile.rs")),
+        ("vault/recover.rs", include_str!("vault/recover.rs")),
+        ("vault/anchor.rs", include_str!("vault/anchor.rs")),
+        ("vault/rotate.rs", include_str!("vault/rotate.rs")),
+        (
+            "vault/rotate/adopt.rs",
+            include_str!("vault/rotate/adopt.rs"),
+        ),
+        ("vault/sync.rs", include_str!("vault/sync.rs")),
+        ("merge.rs", include_str!("merge.rs")),
+        ("qr.rs", include_str!("qr.rs")),
+        ("crypto.rs", include_str!("crypto.rs")),
+        ("otp.rs", include_str!("otp.rs")),
+        // goyo-sync's settings window draws with this app's i18n.rs.
+        ("bin/goyo-sync/gui.rs", include_str!("bin/goyo-sync/gui.rs")),
+    ];
+    /// Files with Korean literals that english_is_complete does not check.
+    const NOT_SCANNED: [&str; 3] = [
+        // The table itself.
+        "i18n.rs",
+        // goyo-sync's command-line messages carry their English beside them.
+        "bin/goyo-sync/msg.rs",
+        // goyo-sync's tests: a test module as a whole.
+        "bin/goyo-sync/tests.rs",
+    ];
+    /// Every source file with a Korean literal outside its tests is checked
+    /// for its English or exempt for a reason, so a new module cannot slip
+    /// past (spec §9.3).
+    #[test]
+    fn every_source_file_with_korean_text_is_scanned() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.clone()];
+        let mut found = vec![];
+        while let Some(path) = files.pop() {
+            if path.is_dir() {
+                files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let name = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).unwrap();
+            if !korean_literals(outside_tests(&source)).is_empty() {
+                found.push(name);
+            }
+        }
+        for name in &found {
+            assert!(
+                SCANNED.iter().any(|(n, _)| n == name) || NOT_SCANNED.contains(&name.as_str()),
+                "{name} has Korean text that english_is_complete does not check"
+            );
+        }
+        assert!(found.iter().any(|n| n == "vault/anchor.rs"));
+    }
+    /// A source file up to its test module (`mod tests` or
+    /// `pub(crate) mod tests` under `#[cfg(test)]`): a test-only item among
+    /// the program's own (ANSWER here, PAINTED in theme.rs) must not end it.
+    fn outside_tests(source: &str) -> &str {
+        source
+            .match_indices("#[cfg(test)]\n")
+            .find(|(i, m)| {
+                source[i + m.len()..]
+                    .lines()
+                    .next()
+                    .is_some_and(|l| l.trim_start_matches("pub(crate) ").starts_with("mod "))
+            })
+            .map_or(source, |(i, _)| &source[..i])
     }
     /// Korean string literals in a source file, outside tests and comments.
     fn korean_literals(source: &str) -> Vec<String> {
@@ -4727,25 +5982,9 @@ mod tests {
     #[test]
     fn english_is_complete() {
         let _korean = KoreanAfter::hold();
-        let main = include_str!("main.rs");
-        let main = &main[..main.find("#[cfg(test)]\nmod tests").unwrap()];
         let (mut missing, mut scanned) = (vec![], vec![]);
-        for source in [
-            main,
-            include_str!("win.rs"),
-            include_str!("theme.rs"),
-            include_str!("vault.rs"),
-            include_str!("vault/keyfile.rs"),
-            include_str!("vault/recover.rs"),
-            include_str!("crypto.rs"),
-            include_str!("otp.rs"),
-            // goyo-sync's settings window draws with this app's i18n.rs.
-            include_str!("bin/goyo-sync/gui.rs"),
-        ] {
-            // Up to the test modules: a test-only item among the program's
-            // own (ANSWER here, PAINTED in theme.rs) must not end the scan.
-            let code = source.split("#[cfg(test)]\nmod ").next().unwrap();
-            for text in korean_literals(code) {
+        for (_, source) in SCANNED {
+            for text in korean_literals(outside_tests(source)) {
                 if !i18n::EN.iter().any(|(ko, _)| *ko == text)
                     && !i18n::KEEP.contains(&text.as_str())
                 {
@@ -4811,11 +6050,12 @@ mod tests {
                 .iter()
                 .any(|(s, t)| s == "vault-sync" && t == "Open · Synced · vault.goyo")
         );
-        // Sync notices are filled from their English templates.
+        // Sync notices are filled from their English templates, line by
+        // line.
         for notice in sync_notices() {
             let (line, _) = sync_line(&notice);
-            let text = tr(&line);
-            assert!(!has_korean(text), "Korean in English mode: {text:?}");
+            let text = tr_lines(&line);
+            assert!(!has_korean(&text), "Korean in English mode: {text:?}");
         }
         // So are the lines on what an unlock took back from temp files.
         let (lines, _) = recovery_lines(&kept_key_recovery(), Path::new("vault.goyokey"));
@@ -4985,8 +6225,20 @@ mod tests {
             removed: 1,
         };
         assert_eq!(sync_line(&merged).1, TONE_MUTED);
+        // The key notices of spec v3 §7.4 are all in the danger tone, and a
+        // copy under a key this PC does not hold may be forged (§14.6-9).
+        for notice in &sync_notices()[sync_notices().len() - 7..] {
+            assert_eq!(sync_line(notice).1, TONE_DANGER, "{notice:?}");
+        }
+        let changed = sync_line(&SyncNotice::KeyChanged { hardware: false }).0;
+        assert!(changed.contains("서버 사본이 위조되었을 수 있습니다"));
         for english in [false, true] {
             i18n::set_english(english);
+            // S-OVERRIDE-HEAD, a two-line template, fills in both languages.
+            let head = fill(vault::OVERRIDE_HEAD, &[&2, &"0A1B2C3D", &7]);
+            assert_eq!(head.split("\r\n").count(), 2);
+            assert_eq!(has_korean(&head), !english);
+            assert!(head.contains("0A1B2C3D") && !head.contains('{'));
             for notice in sync_notices() {
                 let (line, _) = sync_line(&notice);
                 for warning in [Placement::SameFolder, Placement::Cloud] {
@@ -4994,7 +6246,7 @@ mod tests {
                     assert_eq!(both.capacity(), both.len());
                     let shown = tr_lines(&both);
                     assert_eq!(shown.capacity(), shown.len());
-                    assert_eq!(shown.split("\r\n").nth(1), Some(tr(warning.message())));
+                    assert_eq!(shown.split("\r\n").last(), Some(tr(warning.message())));
                 }
             }
         }
@@ -5029,6 +6281,13 @@ mod tests {
             SyncNotice::HelperError,
             SyncNotice::OldServer,
             SyncNotice::KeyBehind,
+            SyncNotice::KeyChanged { hardware: false },
+            SyncNotice::KeyChanged { hardware: true },
+            SyncNotice::KeyFork,
+            SyncNotice::OldKeyDamaged,
+            SyncNotice::RollbackHeld,
+            SyncNotice::NewerKeyFile,
+            SyncNotice::OldKeyReplaced,
         ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
@@ -5112,9 +6371,16 @@ mod tests {
             assert!(!app.session.as_ref().unwrap().uses_otp());
             assert_eq!(app.handle(OTP_SETUP), 0);
             assert!(!app.allows(OTP_SETUP));
+            // "열쇠 관리" leads to the password change, and back; neither
+            // asks for an OTP code.
             app.command(CHANGE, 0).unwrap();
+            assert!(app.screen == Screen::Keys && app.handle(OTP) == 0);
+            app.command(KEY_PASSWORD, 0).unwrap();
             assert!(app.screen == Screen::Password && app.handle(OTP) == 0);
             app.command(CANCEL, 0).unwrap();
+            assert!(app.screen == Screen::Keys);
+            app.command(2, 0).unwrap();
+            assert!(app.screen == Screen::Vault);
             // Opens again with the password alone.
             app.lock("synthetic lock", true);
             assert!(app.screen == Screen::Login && app.handle(OTP) == 0);
@@ -5167,6 +6433,14 @@ mod tests {
             );
             assert_ne!(h, 0);
             assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            // Stands in for another app. build() focuses a control, which can
+            // bring the test window to the front, so leave it before a check
+            // (as in auto_lock_choices).
+            #[link(name = "user32")]
+            unsafe extern "system" {
+                fn SetForegroundWindow(h: Hwnd) -> i32;
+            }
+            let other = create_window(GetModuleHandleW(null()), &wide("STATIC"));
             let mut app = App::new(h);
             app.vault_path = session.path.clone();
             app.session = Some(session);
@@ -5206,6 +6480,8 @@ mod tests {
             assert!(app.otp_setup.is_none() && app.reveal_until.is_none());
             assert!(app.copy_until.is_none());
             // Back within AWAY_LOCK: still open.
+            SetForegroundWindow(other);
+            assert!(!is_foreground(h));
             app.away_since = Some(Instant::now() - Duration::from_secs(20));
             app.activated();
             // Not actually in front: an activation message alone (which another
@@ -5216,11 +6492,13 @@ mod tests {
             // Away longer than AWAY_LOCK: locked.
             app.deactivated();
             app.away_since = Some(Instant::now() - AWAY_LOCK - Duration::from_secs(1));
+            SetForegroundWindow(other);
             app.timer();
             assert!(app.session.is_none() && app.away_since.is_none());
             assert!(app.screen == Screen::Login);
             drop(app);
             DestroyWindow(h);
+            DestroyWindow(other);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5780,6 +7058,9 @@ mod tests {
                 ("8-new", Screen::Edit),
                 ("9-password", Screen::Password),
                 ("10-otp-backup", Screen::OtpBackup),
+                ("11-keys", Screen::Keys),
+                ("12-adopt", Screen::Adopt),
+                ("13-keys-rollback", Screen::Keys),
             ];
             for (dark, (file, screen)) in [true, false]
                 .into_iter()
@@ -5832,6 +7113,15 @@ mod tests {
                         None
                     };
                     a.editing = file.ends_with("7-edit").then_some(2);
+                    a.adopt_source = file
+                        .ends_with("12-adopt")
+                        .then(|| a.home_dir.join("from-other-pc.goyokey"));
+                    // A KF2 key file put back over this PC's newer one.
+                    let rollback = file.ends_with("13-keys-rollback").then(|| KeysView {
+                        code: Some("E3 · 7F2A-90C4-1B5E-D836".into()),
+                        hold: Hold::LocalRollback(4, 3),
+                    });
+                    KEYS_VIEW.with(|v| *v.borrow_mut() = rollback);
                     a.otp_setup = file.ends_with("10-otp-backup").then(|| {
                         let s = a.session.as_ref().unwrap();
                         s.otp_setup("synthetic preview password").unwrap()
@@ -6682,15 +7972,19 @@ mod tests {
             assert!(vault.is_file() && key.is_file());
             assert!(!vault_temp.exists() && !key_temp.exists());
 
-            // A password change runs through the phases as well.
+            // A password change runs through the phases as well: S-ROTATE
+            // is answered yes, and S-BACKUP, unanswered, no.
             with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| a.command(KEY_PASSWORD, 0)).unwrap();
             type_in(CURRENT_PASS, pass);
             type_in(PASS, next);
             type_in(CONFIRM, next);
+            ANSWER.with(|a| *a.borrow_mut() = Some(Box::new(|_: &str| true)));
             submit(SUBMIT);
             with_app(|a| {
                 assert!(a.screen == Screen::Vault && a.failed == 0);
-                assert!(a.status.starts_with("비밀번호 변경 완료."));
+                assert!(a.status.starts_with(PASSWORD_CHANGED));
+                assert!(a.flow.is_none());
             });
             with_app(|a| a.lock("synthetic lock", true));
             type_in(PASS, next);
@@ -6854,31 +8148,40 @@ mod tests {
             with_app(|a| {
                 assert!(a.session.is_some() && a.screen == Screen::Vault);
                 let first = a.status.split("\r\n").next().unwrap().to_owned();
-                assert_eq!(first, key_line(KeyNotice::OlderAccepted).0);
+                assert_eq!(first, *key_line(&KeyNotice::OlderAccepted).0);
                 assert_eq!(GetWindowLongPtrW(a.handle(STATUS), -21), TONE_DANGER);
             });
             assert_eq!(&std::fs::read(&vault).unwrap()[..8], b"GOYOVA03");
             assert_eq!(asked.borrow().len(), 3);
 
-            // This build cannot change a KF2 key file: refused before
-            // anything, with no retry delay.
+            // A KF2 key file's password changes as well (spec §5.5): a new
+            // key file, and the vault file under its new key.
+            // S-ROTATE first; the status gives the new key code.
+            let changed = "another synthetic older password";
             with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| a.command(KEY_PASSWORD, 0)).unwrap();
             type_in(CURRENT_PASS, pass);
-            type_in(PASS, "another synthetic older password");
-            type_in(CONFIRM, "another synthetic older password");
+            type_in(PASS, changed);
+            type_in(CONFIRM, changed);
+            ask_then(|| true);
             submit(SUBMIT);
             with_app(|a| {
-                assert!(a.session.is_some() && a.failed == 0);
-                assert_eq!(*a.status, *vault::keyfile::NEWER_KEY_FORMAT);
+                assert!(a.session.is_some() && a.failed == 0 && a.screen == Screen::Vault);
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(lines[0], PASSWORD_CHANGED);
+                let code = a.session.as_ref().unwrap().key_code().unwrap();
+                assert!(code.starts_with("E3 · "), "{code}");
+                assert_eq!(lines[1], fill(CODE_LINE, &[&code]));
             });
-            assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+            assert_ne!(std::fs::read(&key).unwrap(), key_bytes);
+            assert_eq!(asked.borrow()[3], ROTATE_QUESTION);
 
             // The next login asks nothing: the vault file is current.
             with_app(|a| a.lock("synthetic lock", true));
-            type_in(PASS, pass);
+            type_in(PASS, changed);
             submit(SUBMIT);
             assert!(with_app(|a| a.session.is_some()));
-            assert_eq!(asked.borrow().len(), 3);
+            assert_eq!(asked.borrow().len(), 4);
 
             // A security-key file: refused on its magic, before any key
             // derivation and with no retry delay. The files pinned by
@@ -6982,6 +8285,8 @@ mod tests {
             Screen::Edit,
             Screen::Password,
             Screen::OtpBackup,
+            Screen::Keys,
+            Screen::Adopt,
         ] {
             app.screen = screen;
             assert!((0..=400).all(|id| !app.allows(id)), "no vault open");
@@ -7014,6 +8319,25 @@ mod tests {
             (
                 Screen::OtpBackup,
                 vec![CURRENT_PASS, PEEK_CURRENT, SUBMIT, CANCEL],
+            ),
+            (
+                Screen::Keys,
+                vec![
+                    BACK,
+                    KEY_PASSWORD,
+                    KEY_ADOPT,
+                    KEYBACKUP,
+                    KEY_OVERRIDE_HEAD,
+                    KEY_LOCAL_OK,
+                    PENDING_FORGET,
+                    CURRENT_PASS,
+                    PEEK_CURRENT,
+                    OTP,
+                ],
+            ),
+            (
+                Screen::Adopt,
+                vec![BACK, SUBMIT, CURRENT_PASS, PEEK_CURRENT, OTP],
             ),
         ] {
             app.screen = screen;
@@ -7203,6 +8527,914 @@ mod tests {
             }
             WINDOW_GONE.with(|p| p.set(false));
             PENDING_EVENTS.with(|p| p.set(0));
+        }
+    }
+    /// A window that runs window_proc, as the real one does, for the flow
+    /// tests; the app goes behind it with APP.
+    unsafe fn flow_window(name: &str) -> Hwnd {
+        unsafe {
+            let class = wide(name);
+            let instance = GetModuleHandleW(null());
+            let wc = WndClass {
+                style: 0,
+                proc: Some(window_proc),
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: 0,
+                cursor: 0,
+                background: 6,
+                menu: null(),
+                class: class.as_ptr(),
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let h = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                wide("Synthetic flow test").as_ptr(),
+                0x00ca0000,
+                0,
+                0,
+                900,
+                800,
+                0,
+                0,
+                instance,
+                null_mut(),
+            );
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            WINDOW_GONE.with(|p| p.set(false));
+            h
+        }
+    }
+    /// Takes the app away and closes a flow window.
+    unsafe fn close_flow_window(h: Hwnd) {
+        APP.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        INPUT_ANSWER.with(|i| i.borrow_mut().take());
+        ANSWER.with(|a| a.borrow_mut().take());
+        unsafe {
+            DestroyWindow(h);
+        }
+        WINDOW_GONE.with(|p| p.set(false));
+        PENDING_EVENTS.with(|p| p.set(0));
+    }
+    /// Answers every input dialog until taken away; records each text.
+    fn inputs(
+        asked: &std::rc::Rc<RefCell<Vec<String>>>,
+        mut answer: impl FnMut(usize, &str, &InputKind) -> InputAnswer + 'static,
+    ) {
+        let asked = asked.clone();
+        INPUT_ANSWER.with(|i| {
+            *i.borrow_mut() = Some(Box::new(move |text: &str, kind: &InputKind| {
+                // Asked inside the flow, as a dialog, with the app free.
+                assert!(in_modal());
+                assert!(APP.with(|cell| cell.try_borrow_mut().is_ok()));
+                asked.borrow_mut().push(text.to_owned());
+                let n = asked.borrow().len();
+                answer(n, text, kind)
+            }))
+        });
+    }
+    /// A typed password, as the dialog returns it.
+    fn typed(text: &str) -> InputAnswer {
+        InputAnswer::Password(Zeroizing::new(text.to_owned()))
+    }
+    /// Two PCs' key files of one vault, each changed from the same first key
+    /// to its own password (a fork, spec §5.8), sealed with the Test KDF
+    /// profile; and PC B's vault file still under that first key, with no
+    /// OTP step spent (`otp`: the vault's TOTP secret). B's session opens
+    /// with a code typed `ago` seconds back, and writes its anchor line.
+    /// Returns the session and A's key file.
+    fn fork(dir: &Path, otp: Option<[u8; 20]>, ago: u64) -> (Session, PathBuf) {
+        use goyo_vault::vault::keyfile::{Bundle, Kind, Plan, Spec, seal};
+        let (id, dk0) = ([0x6b; 16], [0x70; 32]);
+        let key_file = |name: &str, dk: [u8; 32], password: &str| {
+            let spec = Spec {
+                vault_id: id,
+                epoch: 1,
+                kind: Kind::Password,
+                next: 1,
+                pw_id: *crypto::random::<16>().unwrap(),
+                loss: 0,
+                tombstones: Vec::new(),
+                resume: [0; 32],
+            };
+            let bundle = Bundle::new(&[dk, dk0], otp.as_ref()).unwrap();
+            let (bytes, _) = seal(&spec, &bundle, password, Plan::PasswordOnly).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let a_key = key_file("a.goyokey", [0x71; 32], FORK_A);
+        let b_key = key_file("vault.goyokey", [0x72; 32], FORK_B);
+        // GOYOVA01 under the first key: the OTP watermark 0 and no entries.
+        let b_vault = dir.join("vault.goyo");
+        let nonce = [0x24; 24];
+        let mut v = [&b"GOYOVA01"[..], &id, &nonce].concat();
+        v.extend(crypto::seal(&dk0, &nonce, &v.clone(), &[0u8; 12]).unwrap());
+        std::fs::write(&b_vault, &v).unwrap();
+        // The vault file is under an older key of B's: S-OLDER, answered yes.
+        let prepared = vault::prepare(&b_vault, &b_key).unwrap();
+        let VaultClass::Older { sha } = prepared.check().vault else {
+            panic!("not an older-key vault file");
+        };
+        let typed = goyo_vault::otp::now().unwrap() - ago;
+        let code = otp.map_or(String::new(), |secret| {
+            format!("{:06}", goyo_vault::otp::code(&secret, typed / 30, 6))
+        });
+        let s = Session::login(prepared, FORK_B, &code, typed, Some(sha)).unwrap();
+        (s, a_key)
+    }
+    const FORK_A: &str = "synthetic fork password on A";
+    const FORK_B: &str = "synthetic fork password on B";
+    /// The app with B's session on Screen::Adopt for `other`.
+    unsafe fn adopt_screen(h: Hwnd, s: Session, other: &Path) {
+        let mut app = App::new(h);
+        app.vault_path = s.path.clone();
+        app.key_path = s.key_path.clone();
+        app.session = Some(s);
+        app.adopt_source = Some(other.to_owned());
+        app.screen = Screen::Adopt;
+        app.build();
+        APP.with(|cell| *cell.borrow_mut() = Some(app));
+    }
+    /// The whole adopt is one flow (spec §14.4-10 "one flow"): on an OTP
+    /// vault, [열기] takes one OTP code and one re-authentication to the
+    /// write. The other file's password is asked inside the flow, again
+    /// after a wrong one; the preview and S-ADOPT-BOTHPASS follow, and
+    /// App.serial stays as it was across every dialog. Both PCs changed the
+    /// password since the key they share, so the files are a fork: a union,
+    /// with the check box, here ticked for this PC's password.
+    #[test]
+    fn adopt_runs_as_one_flow() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("adopt-flow");
+        let secret = [0x3c; 20];
+        // B's own steps were spent minutes ago: only the code typed for
+        // this flow is fresh.
+        let (s, a_key) = fork(&dir, Some(secret), 150);
+        let b_key = s.key_path.clone();
+        let before = std::fs::read(&b_key).unwrap();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        let questions = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoAdoptFlowTest");
+            adopt_screen(h, s, &a_key);
+            let serial = with_app(|a| a.serial);
+            inputs(&asked, move |n, text, kind| {
+                assert_eq!(with_app(|a| (a.serial, a.flow)), (serial, Some(SUBMIT)));
+                match (n, kind) {
+                    // A wrong password first: asked again, saying so.
+                    (1, InputKind::Password) => {
+                        assert_eq!(text, NEWPASS_OTHER);
+                        typed("wrong synthetic password for A")
+                    }
+                    (2, InputKind::Password) => {
+                        assert!(text.starts_with(crypto::AUTH_ERROR), "{text}");
+                        assert!(text.ends_with(NEWPASS_OTHER));
+                        // The retry delay has passed.
+                        with_app(|a| a.retry = Instant::now());
+                        typed(FORK_A)
+                    }
+                    (3, InputKind::Preview { check }) => {
+                        // A union shows no code before it is written.
+                        assert!(text.starts_with(ADOPT_UNION), "{text}");
+                        assert!(text.contains(&fill(ADOPT_RESULT, &[&2])));
+                        assert!(!text.contains("E2 · "));
+                        assert_eq!(*check, Some((ADOPT_OWN_PASS, OWN_PASS_LABEL, false)));
+                        InputAnswer::Accept { checked: true }
+                    }
+                    _ => panic!("unexpected input {n}: {text}"),
+                }
+            });
+            let q = questions.clone();
+            ANSWER.with(|a| {
+                *a.borrow_mut() = Some(Box::new(move |text: &str| {
+                    assert_eq!(with_app(|a| a.serial), serial);
+                    q.borrow_mut().push(text.to_owned());
+                    true
+                }))
+            });
+            let code = format!(
+                "{:06}",
+                goyo_vault::otp::code(&secret, goyo_vault::otp::now().unwrap() / 30, 6)
+            );
+            with_app(|a| {
+                SetWindowTextW(a.handle(CURRENT_PASS), wide(FORK_B).as_ptr());
+                SetWindowTextW(a.handle(OTP), wide(&code).as_ptr());
+            });
+            SendMessageW(h, 0x111, SUBMIT as usize, 0);
+            assert_eq!(asked.borrow().len(), 3);
+            // S-ADOPT-BOTHPASS, then S-BACKUP, which no test answers.
+            assert_eq!(questions.borrow().as_slice(), [ADOPT_BOTHPASS]);
+            with_app(|a| {
+                assert!(a.screen == Screen::Vault && a.flow.is_none());
+                assert!(a.adopt_source.is_none());
+                let s = a.session.as_ref().unwrap();
+                let code = s.key_code().unwrap();
+                assert!(code.starts_with("E2 · "), "{code}");
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(lines[0], fill(ADOPT_CODE, &[&code]));
+                assert_eq!(lines[1], ADOPT_PASS_OWN);
+                // The wrong password counted, and is forgotten once the
+                // right one opened the file.
+                assert_eq!(a.failed, 0);
+            });
+            // The union opens with this PC's password only.
+            let after = KeyFile::read(&b_key).unwrap();
+            assert_ne!(after.bytes(), before);
+            assert_eq!(after.header().unwrap().epoch, 2);
+            assert!(after.open(FORK_B, None).is_ok());
+            assert!(after.open(FORK_A, None).is_err());
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// An adopt writes nothing when the user stops it anywhere: [취소] at
+    /// S-NEWPASS-OTHER or at the preview, No at S-ADOPT-BOTHPASS, or a lock
+    /// while the preview is up. No Reauth is left behind: the next one
+    /// takes the key file's lock at once. Then [받기] with the box unticked
+    /// takes the other file's password (S-ADOPT-PASS-OTHER).
+    #[test]
+    fn adopts_stopped_anywhere_write_nothing() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("adopt-stop");
+        let (s, a_key) = fork(&dir, None, 0);
+        let (b_vault, b_key) = (s.path.clone(), s.key_path.clone());
+        let files = || {
+            (
+                std::fs::read(&b_key).unwrap(),
+                std::fs::read(&b_vault).unwrap(),
+            )
+        };
+        let before = files();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoAdoptStopTest");
+            adopt_screen(h, s, &a_key);
+            let submit = || {
+                with_app(|a| {
+                    SetWindowTextW(a.handle(CURRENT_PASS), wide(FORK_B).as_ptr());
+                    a.retry = Instant::now();
+                });
+                SendMessageW(h, 0x111, SUBMIT as usize, 0);
+            };
+            let untouched = |files: (Vec<u8>, Vec<u8>)| {
+                assert!(files == before, "an adopt that was stopped wrote");
+                with_app(|a| assert!(a.flow.is_none()));
+            };
+            // [취소] at S-NEWPASS-OTHER.
+            inputs(&asked, |_, _, _| InputAnswer::Cancel(2));
+            submit();
+            untouched(files());
+            with_app(|a| assert!(a.screen == Screen::Adopt && a.session.is_some()));
+            // [취소] at the preview.
+            inputs(&asked, |_, _, kind| match kind {
+                InputKind::Password => typed(FORK_A),
+                InputKind::Preview { .. } => InputAnswer::Cancel(2),
+            });
+            submit();
+            untouched(files());
+            // No Reauth left: this one gets the key file's lock.
+            with_app(|a| {
+                let s = a.session.as_mut().unwrap();
+                drop(s.reauth(FORK_B, None, None).unwrap());
+            });
+            // No at S-ADOPT-BOTHPASS.
+            inputs(&asked, |_, _, kind| match kind {
+                InputKind::Password => typed(FORK_A),
+                InputKind::Preview { .. } => InputAnswer::Accept { checked: false },
+            });
+            answer(&std::rc::Rc::new(RefCell::new(Vec::new())), false);
+            submit();
+            untouched(files());
+            assert!(ANSWER.with(|a| a.borrow().is_none()));
+            // A lock while the preview is up.
+            inputs(&asked, |_, _, kind| match kind {
+                InputKind::Password => typed(FORK_A),
+                InputKind::Preview { .. } => {
+                    with_app(|a| a.lock("synthetic lock", true));
+                    InputAnswer::Accept { checked: false }
+                }
+            });
+            submit();
+            untouched(files());
+            with_app(|a| assert!(a.session.is_none() && a.screen == Screen::Login));
+
+            // Open again (B's vault is under its own key now), and receive
+            // with the box unticked: A's password from now on.
+            let prepared = vault::prepare(&b_vault, &b_key).unwrap();
+            let now = goyo_vault::otp::now().unwrap();
+            let s = Session::login(prepared, FORK_B, "", now, None).unwrap();
+            with_app(|a| {
+                a.session = Some(s);
+                a.adopt_source = Some(a_key.clone());
+                a.show(Screen::Adopt);
+                a.build();
+            });
+            inputs(&asked, |_, _, kind| match kind {
+                InputKind::Password => typed(FORK_A),
+                InputKind::Preview { .. } => InputAnswer::Accept { checked: false },
+            });
+            ANSWER.with(|a| *a.borrow_mut() = Some(Box::new(|_: &str| true)));
+            submit();
+            with_app(|a| {
+                assert!(a.screen == Screen::Vault);
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(lines[1], ADOPT_PASS_OTHER);
+            });
+            let after = KeyFile::read(&b_key).unwrap();
+            assert!(after.open(FORK_A, None).is_ok());
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A successor's preview shows the key code the result then has, and
+    /// the password in force: the other file's, asked for because this PC's
+    /// does not open it. No check box and no S-ADOPT-BOTHPASS.
+    #[test]
+    fn a_successor_preview_shows_its_code() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("adopt-successor");
+        let (pa, pb) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir(&pa).unwrap();
+        std::fs::create_dir(&pb).unwrap();
+        let pass = "synthetic successor password";
+        // One vault, its 0.8 key file copied to B before A changes it with
+        // the same password typed again: a successor, with no new password.
+        vault::set_anchor_dir(Some(dir.join("anchor-a")));
+        let mut sa = Provision::new()
+            .unwrap()
+            .finish(
+                &pa.join("vault.goyo"),
+                &pa.join("vault.goyokey"),
+                pass,
+                None,
+            )
+            .unwrap();
+        for name in ["vault.goyo", "vault.goyokey"] {
+            std::fs::copy(pa.join(name), pb.join(name)).unwrap();
+        }
+        let r = sa.reauth(pass, None, None).unwrap();
+        let next = "synthetic successor password 2";
+        let change = vault::Change::Password(Zeroizing::new(next.to_owned()));
+        sa.rekey(r, Vec::new(), change, vault::Consent::default(), true)
+            .unwrap();
+        let a_code = sa.key_code().unwrap();
+        drop(sa);
+        vault::set_anchor_dir(Some(dir.join("anchor")));
+        let s =
+            Session::unlock(&pb.join("vault.goyo"), &pb.join("vault.goyokey"), pass, "").unwrap();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoAdoptSuccessorTest");
+            adopt_screen(h, s, &pa.join("vault.goyokey"));
+            let want = a_code.clone();
+            inputs(&asked, move |n, text, kind| match kind {
+                InputKind::Password => typed(next),
+                InputKind::Preview { check } => {
+                    assert_eq!(n, 2);
+                    assert!(check.is_none());
+                    let parts: Vec<&str> = text.split("\r\n\r\n").collect();
+                    assert_eq!(
+                        parts,
+                        [
+                            ADOPT_SUCCESSOR,
+                            fill(ADOPT_RESULT, &[&1]).as_str(),
+                            fill(ADOPT_CODE, &[&want]).as_str(),
+                            ADOPT_PASS_OTHER,
+                        ]
+                    );
+                    InputAnswer::Accept { checked: false }
+                }
+            });
+            with_app(|a| SetWindowTextW(a.handle(CURRENT_PASS), wide(pass).as_ptr()));
+            SendMessageW(h, 0x111, SUBMIT as usize, 0);
+            with_app(|a| {
+                assert!(a.screen == Screen::Vault);
+                // The code the preview showed is the one now in force.
+                assert_eq!(a.session.as_ref().unwrap().key_code().unwrap(), a_code);
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(lines[0], fill(ADOPT_CODE, &[&a_code]));
+                assert_eq!(lines[1], ADOPT_PASS_OTHER);
+            });
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The Keys screen offers [이 열쇠 파일이 맞습니다] for a key file put
+    /// back over this PC's newer one, and only then; its question (danger,
+    /// default No) comes first, and the password is checked again. The
+    /// buttons of what does not hold refuse before any question.
+    #[test]
+    fn the_keys_screen_confirms_a_put_back_key_file() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("keys-rollback");
+        let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
+        let (old, new) = ("synthetic put back password", "synthetic newer password");
+        let mut s = Provision::new()
+            .unwrap()
+            .finish(&vault, &key, old, None)
+            .unwrap();
+        let (k0, v0) = (std::fs::read(&key).unwrap(), std::fs::read(&vault).unwrap());
+        let r = s.reauth(old, None, None).unwrap();
+        let change = vault::Change::Password(Zeroizing::new(new.to_owned()));
+        s.rekey(r, Vec::new(), change, vault::Consent::default(), true)
+            .unwrap();
+        drop(s);
+        // The old pair put back.
+        std::fs::write(&key, &k0).unwrap();
+        std::fs::write(&vault, &v0).unwrap();
+        let s = Session::unlock(&vault, &key, old, "").unwrap();
+        assert!(s.local_rollback());
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoKeysRollbackTest");
+            let mut app = App::new(h);
+            app.session = Some(s);
+            app.screen = Screen::Vault;
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| {
+                assert!(a.screen == Screen::Keys);
+                assert_ne!(a.handle(KEY_LOCAL_OK), 0);
+                assert_eq!(a.handle(KEY_OVERRIDE_HEAD), 0);
+                assert_eq!(a.handle(PENDING_FORGET), 0);
+                // A 0.8 key file has no key code.
+                assert!(a.keys_view().code.is_none());
+            });
+            let press = |id: i32, password: &str| {
+                with_app(|a| {
+                    SetWindowTextW(a.handle(CURRENT_PASS), wide(password).as_ptr());
+                    a.retry = Instant::now();
+                });
+                SendMessageW(h, 0x111, id as usize, 0);
+            };
+            let rolled_back = || with_app(|a| a.session.as_ref().unwrap().local_rollback());
+            // Nothing is pending: refused at once. Nor is a halted copy
+            // overridden during the hold (S23-3 #5).
+            press(PENDING_FORGET, old);
+            with_app(|a| assert_eq!(*a.status, *vault::NOTHING_HELD));
+            press(KEY_OVERRIDE_HEAD, old);
+            with_app(|a| assert_eq!(*a.status, fill(vault::LOCAL_ROLLBACK, &[&1, &0])));
+            assert!(asked.borrow().is_empty());
+            // No: nothing changes.
+            answer(&asked, false);
+            press(KEY_LOCAL_OK, old);
+            assert_eq!(
+                asked.borrow()[0],
+                fill(vault::LOCAL_OK_CONFIRM, &[&1, &0, &0])
+            );
+            assert!(rolled_back());
+            // A wrong password: a failed attempt, nothing changes.
+            answer(&asked, true);
+            press(KEY_LOCAL_OK, "wrong synthetic password");
+            with_app(|a| assert_eq!(a.failed, 1));
+            assert!(rolled_back());
+            // Yes, with the password: confirmed, and the button is gone.
+            answer(&asked, true);
+            press(KEY_LOCAL_OK, old);
+            assert_eq!(asked.borrow().len(), 3);
+            assert!(!rolled_back());
+            with_app(|a| {
+                assert!(a.screen == Screen::Keys && a.failed == 0 && a.flow.is_none());
+                assert_eq!(*a.status, *KEY_FILE_CONFIRMED);
+                assert_eq!(a.handle(KEY_LOCAL_OK), 0);
+            });
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Another PC changed the key and its copy halts sync here (spec
+    /// §7.5a): the Keys screen offers the head override, which asks
+    /// S-OVERRIDE-HEAD with that copy's revision, key and version, checks
+    /// the password again and pushes this PC's state over that version.
+    #[test]
+    fn the_keys_screen_overrides_a_halted_head() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("keys-override");
+        let mut server = Server::default();
+        vault::set_anchor_dir(Some(dir.join("anchor-a")));
+        let (mut a, vault_b, key_b) = two_pcs(&dir, &mut server, &["entry 0"]);
+        // A changes the key and uploads under it.
+        let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+        let change = vault::Change::Password(Zeroizing::new("synthetic key of A".into()));
+        a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
+            .unwrap();
+        upload(&mut server, &mut a);
+        assert_eq!(server.versions.len(), 2);
+        vault::set_anchor_dir(Some(dir.join("anchor")));
+        server.pass(&vault_b);
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoKeysOverrideTest");
+            let mut app = App::new(h);
+            app.vault_path = vault_b.clone();
+            app.key_path = key_b;
+            app.screen = Screen::Login;
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            with_app(|a| SetWindowTextW(a.handle(PASS), wide(SYNC_PASSWORD).as_ptr()));
+            SendMessageW(h, 0x111, SUBMIT as usize, 0);
+            let head = with_app(|a| {
+                assert!(a.screen == Screen::Vault);
+                a.session.as_ref().unwrap().halted_head().unwrap()
+            });
+            assert_eq!((head.epoch, head.version), (1, 2));
+            with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| {
+                assert_ne!(a.handle(KEY_OVERRIDE_HEAD), 0);
+                SetWindowTextW(a.handle(CURRENT_PASS), wide(SYNC_PASSWORD).as_ptr());
+            });
+            answer(&asked, true);
+            SendMessageW(h, 0x111, KEY_OVERRIDE_HEAD as usize, 0);
+            let values: [&dyn std::fmt::Display; 3] = [&1, &head.key_prefix(), &2];
+            assert_eq!(
+                asked.borrow().as_slice(),
+                [fill(vault::OVERRIDE_HEAD, &values)]
+            );
+            with_app(|a| {
+                assert!(a.screen == Screen::Vault && a.flow.is_none());
+                assert_eq!(*a.status, *HEAD_OVERRIDDEN);
+                assert!(a.session.as_ref().unwrap().halted_head().is_none());
+            });
+            // This PC's state goes up over that version.
+            let dir_b = syncfile::sync_dir(&vault_b).unwrap();
+            let bytes = std::fs::read(dir_b.join(syncfile::OUTGOING)).unwrap();
+            let (base, blob) = syncfile::parse_outgoing(&bytes).unwrap();
+            assert!(base == 2 && blob.starts_with(b"GOYOVA02"));
+            close_flow_window(h);
+        }
+        drop(a);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// [이 열쇠 파일이 맞습니다] on a vault that syncs says what follows,
+    /// in its question and its status: a server copy this PC wrote with the
+    /// newer key file it puts aside halts sync again, and the head override
+    /// replaces it (spec §2.18 #57).
+    #[test]
+    fn confirming_a_synced_put_back_key_file_says_what_follows() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("keys-rollback-synced");
+        let mut server = Server::default();
+        let (mut a, _, _) = two_pcs(&dir, &mut server, &["entry 0"]);
+        let (vault, key) = (a.path.clone(), dir.join("a").join("vault.goyokey"));
+        let (k0, v0) = (std::fs::read(&key).unwrap(), std::fs::read(&vault).unwrap());
+        let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+        let change = vault::Change::Password(Zeroizing::new("synthetic newer password".into()));
+        a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
+            .unwrap();
+        upload(&mut server, &mut a);
+        drop(a);
+        std::fs::write(&key, &k0).unwrap();
+        std::fs::write(&vault, &v0).unwrap();
+        let mut s = Session::unlock(&vault, &key, SYNC_PASSWORD, "").unwrap();
+        assert!(s.local_rollback() && s.badge().is_some());
+        // Shown at the unlock.
+        s.take_key_notices();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoKeysRollbackSyncedTest");
+            let mut app = App::new(h);
+            app.session = Some(s);
+            app.screen = Screen::Vault;
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| SetWindowTextW(a.handle(CURRENT_PASS), wide(SYNC_PASSWORD).as_ptr()));
+            answer(&asked, true);
+            SendMessageW(h, 0x111, KEY_LOCAL_OK as usize, 0);
+            assert_eq!(
+                asked.borrow().as_slice(),
+                [fill(vault::LOCAL_OK_CONFIRM_SYNCED, &[&1, &0, &0])]
+            );
+            with_app(|a| {
+                assert!(!a.session.as_ref().unwrap().local_rollback());
+                let lines: Vec<&str> = a.status.split("\r\n").collect();
+                assert_eq!(lines, [KEY_FILE_CONFIRMED, KEY_FILE_CONFIRMED_SYNCED]);
+            });
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A gate that comes up while S-ROTATE is open (a poll halts sync on
+    /// another PC's key change) is asked before the re-authentication
+    /// spends the OTP code: No changes nothing, and no question ends up as
+    /// a status line (spec §7.5, §2.18 #64).
+    #[test]
+    fn a_gate_that_comes_up_during_a_question_is_asked_first() {
+        let _korean = KoreanAfter::hold();
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let dir = test_dir("late-gate");
+        let mut server = Server::default();
+        vault::set_anchor_dir(Some(dir.join("anchor-a")));
+        let (mut a, vault_b, key_b) = two_pcs(&dir, &mut server, &["entry 0"]);
+        vault::set_anchor_dir(Some(dir.join("anchor")));
+        let b = Session::unlock(&vault_b, &key_b, SYNC_PASSWORD, "").unwrap();
+        assert_eq!(b.password_change(), Ok(None));
+        let key = std::fs::read(&key_b).unwrap();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
+        unsafe {
+            let h = flow_window("GoyoLateGateTest");
+            let mut app = App::new(h);
+            app.session = Some(b);
+            app.screen = Screen::Vault;
+            app.build();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            with_app(|a| a.command(CHANGE, 0)).unwrap();
+            with_app(|a| a.command(KEY_PASSWORD, 0)).unwrap();
+            let next = "synthetic late gate password";
+            with_app(|a| {
+                for (id, text) in [(CURRENT_PASS, SYNC_PASSWORD), (PASS, next), (CONFIRM, next)] {
+                    SetWindowTextW(a.handle(id), wide(text).as_ptr());
+                }
+            });
+            // While S-ROTATE is open, A changes the key and B's poll halts.
+            let record = asked.clone();
+            ANSWER.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |text: &str| {
+                    record.borrow_mut().push(text.to_owned());
+                    let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+                    let to = Zeroizing::new("synthetic key of A".to_owned());
+                    let change = vault::Change::Password(to);
+                    a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
+                        .unwrap();
+                    upload(&mut server, &mut a);
+                    server.pass(&vault_b);
+                    with_app(|app| app.session.as_mut().unwrap().poll_sync());
+                    answer(&record, false);
+                    true
+                }))
+            });
+            SendMessageW(h, 0x111, SUBMIT as usize, 0);
+            assert_eq!(
+                asked.borrow().as_slice(),
+                [
+                    ROTATE_QUESTION_SYNCED.to_owned(),
+                    vault::Gate::KeyHalt.question().to_owned()
+                ]
+            );
+            with_app(|a| {
+                assert!(a.flow.is_none() && a.failed == 0);
+                assert_ne!(*a.status, *vault::Gate::KeyHalt.question());
+                assert!(a.session.as_ref().unwrap().halted_head().is_some());
+            });
+            assert_eq!(std::fs::read(&key_b).unwrap(), key);
+            close_flow_window(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// While a flow runs, an open vault locks after FLOW_IDLE unused at the
+    /// earliest, and the 30-second away lock waits for the same limit
+    /// (spec §9.2a); "off" stays off. Without a flow both apply as set.
+    #[test]
+    fn flows_raise_the_idle_limit() {
+        let dir = test_dir("flow-idle");
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            for (flow, idle, away, locks) in [
+                (Some(SUBMIT), 120, 0, false),
+                (Some(SUBMIT), 120, 60, false),
+                (Some(SUBMIT), 601, 0, true),
+                (None, 120, 0, true),
+                (None, 0, 60, true),
+            ] {
+                app.session = Some(synthetic_session(&dir, "synthetic idle password"));
+                app.screen = Screen::Keys;
+                app.build();
+                app.flow = flow;
+                app.auto_lock = 0;
+                let now = Instant::now();
+                app.activity = now - Duration::from_secs(idle);
+                app.away_since = (away > 0).then(|| now - Duration::from_secs(away));
+                app.inactive = true;
+                // The timer trusts the real foreground window: in front, it
+                // was never away.
+                let front = away > 0 && is_foreground(h);
+                app.timer();
+                if !front {
+                    assert_eq!(app.session.is_none(), locks, "{flow:?} {idle} {away}");
+                }
+                app.lock("synthetic lock", true);
+                for name in ["vault.goyo", "vault.goyokey"] {
+                    let _ = std::fs::remove_file(dir.join(name));
+                }
+            }
+            // "Off" stays off during a flow.
+            app.session = Some(synthetic_session(&dir, "synthetic idle password"));
+            app.auto_lock = AUTO_LOCKS.len() - 1;
+            app.flow = Some(SUBMIT);
+            app.activity = Instant::now() - Duration::from_secs(3600);
+            app.away_since = None;
+            app.timer();
+            assert!(app.session.is_some());
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// An input dialog answers only to this thread (spec §9.2a): another
+    /// thread, standing in for another program, posts and sends "OK" in
+    /// every form, types into its password field and reads it, and the
+    /// dialog still waits, with nothing typed or read. This thread, standing
+    /// in for the user, then types and answers it; a lock cancels it. It
+    /// shows a real dialog for about a second each time.
+    #[test]
+    fn input_dialog_ignores_other_programs() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed};
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetDlgItem(h: Hwnd, id: i32) -> Hwnd;
+            fn KillTimer(h: Hwnd, id: usize) -> i32;
+        }
+        static TRIED: AtomicBool = AtomicBool::new(false);
+        /// What this thread does once the other one is done: 0 cancels,
+        /// 1 types and answers, 2 locks, 3 types and waits for a read.
+        static USER: AtomicU8 = AtomicU8::new(0);
+        static TYPED: AtomicBool = AtomicBool::new(false);
+        /// The field as this thread read it after the other thread was done.
+        static SEEN: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        /// The field's text as this thread reads it.
+        fn field(d: Hwnd) -> String {
+            let edit = unsafe { GetDlgItem(d, INPUT_EDIT) };
+            INTERNAL_READ.with(|f| f.set(true));
+            let text = caption(edit);
+            INTERNAL_READ.with(|f| f.set(false));
+            text
+        }
+        unsafe extern "system" fn user(_: Hwnd, _: u32, _: usize, _: u32) {
+            let d = input_box();
+            if d == 0 {
+                return;
+            }
+            let edit = unsafe { GetDlgItem(d, INPUT_EDIT) };
+            if USER.load(Relaxed) == 3 && !TYPED.swap(true, Relaxed) {
+                unsafe { SetWindowTextW(edit, wide("synthetic typed secret").as_ptr()) };
+            }
+            if !TRIED.swap(false, Relaxed) {
+                return;
+            }
+            // Whatever the other thread sent did not reach the field.
+            *SEEN.lock().unwrap() = field(d);
+            unsafe {
+                match USER.load(Relaxed) {
+                    1 => {
+                        SetWindowTextW(edit, wide("synthetic typed password").as_ptr());
+                        SendMessageW(d, 0x111, 1, 0);
+                    }
+                    2 => cancel_input(),
+                    _ => {
+                        SendMessageW(d, 0x111, 2, 0);
+                    }
+                }
+            }
+        }
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            // Shown without activation, so that activation goes back to this
+            // thread's window when a dialog closes, never to a window of
+            // another test's thread, which pumps no messages.
+            ShowWindow(h, 8);
+            // The app's edit subclass needs the edit class's own procedure.
+            let mut app = App::new(h);
+            app.build();
+            let hook = filter_queue(h);
+            assert_ne!(hook, 0);
+            let timer = SetTimer(0, 0, 50, user as *const () as isize);
+            assert_ne!(timer, 0);
+            type Attack = fn(Hwnd, Hwnd, Hwnd);
+            let attacks: [(&str, Attack, u8); 8] = [
+                (
+                    "posted WM_COMMAND",
+                    |d, _, _| {
+                        PostMessageW(d, 0x111, 1, 0);
+                    },
+                    0,
+                ),
+                (
+                    "posted BM_CLICK",
+                    |_, ok, _| {
+                        PostMessageW(ok, 0xf5, 0, 0);
+                    },
+                    0,
+                ),
+                (
+                    "sent WM_COMMAND",
+                    |d, _, _| {
+                        SendMessageW(d, 0x111, 1, 0);
+                    },
+                    0,
+                ),
+                (
+                    "sent BM_CLICK",
+                    |_, ok, _| {
+                        SendMessageW(ok, 0xf5, 0, 0);
+                    },
+                    0,
+                ),
+                (
+                    "sent mouse click",
+                    |_, ok, _| {
+                        SendMessageW(ok, 0x201, 1, 0);
+                        SendMessageW(ok, 0x202, 0, 0);
+                    },
+                    0,
+                ),
+                (
+                    "sent WM_SETTEXT",
+                    |_, _, e| {
+                        SendMessageW(e, 0xc, 0, wide("forged").as_ptr() as isize);
+                    },
+                    0,
+                ),
+                (
+                    "sent WM_GETTEXT",
+                    |_, _, e| {
+                        let mut buf = [0u16; 64];
+                        let n = SendMessageW(e, 0xd, 64, buf.as_mut_ptr() as isize);
+                        assert_eq!(n, 0, "the field was read");
+                    },
+                    3,
+                ),
+                ("a lock", |_, _, _| {}, 2),
+            ];
+            let others = attacks.into_iter().map(|(n, a, u)| (n, a, u, false));
+            for (name, attack, mode, last) in
+                others.chain([("the user", (|_, _, _| {}) as Attack, 1, true)])
+            {
+                TRIED.store(false, Relaxed);
+                TYPED.store(false, Relaxed);
+                USER.store(mode, Relaxed);
+                let other = std::thread::spawn(move || {
+                    // Whatever happens here, this thread is told to answer,
+                    // so a failure ends the dialog instead of leaving it open.
+                    let tried = std::panic::catch_unwind(|| {
+                        // Wait until the dialog is up with its controls, and
+                        // where this thread types first, until it did: a busy
+                        // machine may take a while.
+                        let start = Instant::now();
+                        let ready = |d: Hwnd| {
+                            d != 0 && IsWindowVisible(d) != 0 && (mode != 3 || TYPED.load(Relaxed))
+                        };
+                        let mut d = input_box();
+                        while !ready(d) && start.elapsed() < Duration::from_secs(20) {
+                            std::thread::sleep(Duration::from_millis(20));
+                            d = input_box();
+                        }
+                        assert!(ready(d), "the dialog never opened");
+                        let (ok, edit) = (GetDlgItem(d, 1), GetDlgItem(d, INPUT_EDIT));
+                        assert!(ok != 0 && edit != 0);
+                        attack(d, ok, edit);
+                        std::thread::sleep(Duration::from_millis(200));
+                        input_box() == d
+                    });
+                    TRIED.store(true, Relaxed);
+                    tried.unwrap_or_else(|e| std::panic::resume_unwind(e))
+                });
+                let answer = input_dialog(
+                    h,
+                    InputKind::Password,
+                    NEWPASS_OTHER,
+                    &[OK_BUTTON, CANCEL_BUTTON],
+                    edit_proc,
+                );
+                let open = other.join().unwrap();
+                assert!(open, "{name} answered the dialog");
+                let expect = if mode == 3 {
+                    "synthetic typed secret"
+                } else {
+                    ""
+                };
+                assert_eq!(*SEEN.lock().unwrap(), expect, "{name} reached the field");
+                match answer {
+                    InputAnswer::Password(p) => {
+                        assert!(last, "{name}");
+                        assert_eq!(&*p, "synthetic typed password");
+                    }
+                    InputAnswer::Cancel(2) => assert!(!last, "{name}"),
+                    _ => panic!("{name}: another answer"),
+                }
+                assert_eq!(input_box(), 0);
+            }
+            KillTimer(0, timer);
+            UnhookWindowsHookEx(hook);
+            FILTERED_WINDOW.with(|f| f.set(0));
+            drop(app);
+            DestroyWindow(h);
         }
     }
 }

@@ -35,6 +35,10 @@ pub const EPOCH_MAX: u64 = (1 << 48) - 1;
 /// counts (spec §4.3): whoever knows the current data key can plant a vault
 /// file with any epoch, and honest ones are ahead only by a few changes.
 pub const EPOCH_SILENT: u64 = 1 << 8;
+/// How far above this PC's confirmed state a key file found at login may
+/// lie (spec §4.1, §5.10): one planted far ahead would otherwise make every
+/// later key change fail at EPOCH_MAX.
+pub const EPOCH_WINDOW: u64 = 1 << 16;
 /// Most tombstones a key file carries. None is ever dropped, so an old
 /// credential can never come back (spec §4.1).
 pub const TOMB_MAX: usize = 480;
@@ -89,7 +93,7 @@ impl Magic {
             Self::Ks01 => b"GOYOKS01",
         }
     }
-    fn of(magic: &[u8]) -> Option<Self> {
+    pub(crate) fn of(magic: &[u8]) -> Option<Self> {
         Self::ALL.into_iter().find(|m| m.bytes() == magic)
     }
     /// GOYOKH01 or GOYOKS01: opens only with a security key.
@@ -1336,6 +1340,37 @@ pub(super) fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
     Ok((id, key, otp))
 }
 
+/// A GOYOKE03 of `spec` and `bundle` sealed with `password` whose key-ID
+/// list states `ids` instead of the bundle's own: what a key file claiming
+/// a data key it lacks looks like (spec §3.4 step 6). Its commitment, body
+/// and every chain entry verify; the key-ID check of `open` refuses it.
+#[cfg(test)]
+pub(crate) fn seal_claiming(
+    spec: &Spec,
+    bundle: &Bundle,
+    password: &str,
+    ids: &[[u8; 16]],
+) -> Vec<u8> {
+    let (bytes, _) = seal(spec, bundle, password, Plan::PasswordOnly).unwrap();
+    let w = parse(&bytes).unwrap().w;
+    let mut out = bytes[..w].to_vec();
+    for (i, id) in ids.iter().enumerate() {
+        out[96 + 16 * i..96 + 16 * (i + 1)].copy_from_slice(id);
+    }
+    let pw_key = crypto::derive(password.as_bytes(), &[1; 32]).unwrap();
+    out.extend_from_slice(&spec.resume);
+    out.extend_from_slice(&[1; 32]);
+    out.extend_from_slice(&[2; 24]);
+    let (k_body, c_body) = body_keys(&pw_key, &[0; 32], &sha256(&[&out]));
+    out.extend_from_slice(&c_body);
+    let body = crypto::seal(&k_body, &[2; 24], &out, &bundle.plain()).unwrap();
+    out.extend_from_slice(&body);
+    let end = sha256(&[&out]);
+    for key in bundle.keys() {
+        out.extend_from_slice(&chain_mac(&spec.vault_id, key, &end));
+    }
+    out
+}
 /// A well-formed GOYOKS01 (`sync`) or GOYOKH01 of three keys from the
 /// grammar tests, for the tests of what a build without security-key
 /// support does with one. Its wraps and body are filler.

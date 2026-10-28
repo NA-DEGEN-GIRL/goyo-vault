@@ -79,6 +79,8 @@ Every vault made before 0.5.0 uses an OTP and still opens as before. A vault mad
 
 From 0.8.0, **a vault with sync turned on, and its backups, open only in 0.8.0 or later.** A vault without sync keeps its format and still opens in 0.7.x and older.
 
+From 0.9.0, **a vault whose key was changed (its password changed, or another PC's new key file received), and its later backups, open only in 0.9.0 or later.** A vault whose key was never changed keeps the 0.8 format and still opens in 0.8. For a synced vault, first update the server script and every PC to 0.9.0, then change the key.
+
 > [!NOTE]
 > ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault from another location**.
 
@@ -177,9 +179,35 @@ Use the buttons at the bottom of the vault screen.
 
 To restore, press **Restore from backup** on the first-start or open screen. Choose the backup and the key file, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
-### 7. Change the password
+### 7. Key management: change the password, receive a new key file
 
-**Change password** on the vault screen asks for the current password and the new one (and a fresh OTP code if the vault uses one), then re-encrypts the key file. **Back up the key again** afterwards.
+**Key management** at the bottom of the vault screen changes the password, receives a key file changed on another PC, and backs up the key. From 0.9.0, changing the key **changes the vault's data key itself.**
+
+**Change password.** **Change password…** asks for the current password and the new one (and a fresh OTP code if the vault uses one). It says once what will change, then goes ahead.
+
+- Changing the password encrypts the vault again with a new data key and writes a new key file. Other PCs stop syncing until they take that key file with 'Key management › Receive a new key file'. Do not copy it over their key files.
+- It is different when several PCs share one vault file (a USB stick or a shared folder) while each PC keeps its own key file. After a password change on one PC the vault file is saved under the new key, so the other PCs' key files no longer open it. Carry the new key file of the PC that changed it to them by USB and open with it. Losing that new key file loses the vault on every PC, so use 'Back up key' right after the change.
+- A vault whose key was changed, and its later backups, **no longer open in 0.8 or older.** Change the key on one PC at a time.
+- When it is done, the app offers to back up the new key file now and shows the new key check code in the status line.
+- If the power fails or the stick is pulled at any moment of the change, the key file and the vault file still form a pair that opens. The next unlock finishes the change, or opens with the old key and the old password ("The last key change did not finish, so the vault opened with the old key."). When the app can tell which password opens the files, a failed unlock says so.
+
+**Receive a new key file.** Bring the key file changed on another PC by USB, choose it with **Receive a new key file…**, type this PC's current password (and a fresh OTP code) and press **Open**. Do not copy it over this PC's key file yourself.
+
+- A file that is a newer version continuing this PC's key file is taken as it is. If the two PCs changed the key separately and diverged, or the file lacks something only this PC has, a key file joining both is written under a new data key; the other PCs must then take this PC's new key file. With three or more PCs, do not receive the same file on two PCs separately: carry the newest result from PC to PC.
+- If the file is locked with another password, the app asks for it. Before anything is taken it shows what will be done (and, for a file taken as it is, the resulting key check code); when joining, you choose the password to use from now on. Afterwards it says which password opens the vault and offers a backup of the new key file.
+- A file older than this PC's, the same file, another vault's file, or one that lacks a removal this PC recorded is refused.
+
+**Key check code.** A vault whose key was changed shows a code such as `E3 · 7F2A-90C4-1B5E-D836` in **Key management** (the number after E is the key file's revision). Two PCs that show the same code have the same key file: compare them after another PC has taken the new key file. The code does not reveal the key.
+
+**Warnings and buttons in Key management.**
+
+- **An older key file:** opening with a key file older than the one this PC wrote before is reported in red, and sync (merging and uploads) and key changes stop meanwhile. 'Receive a new key file' then takes only a file that continues the key file this PC last wrote, and the server-copy overwrite below is not offered. Press **This key file is right** only if you really went back to an old backup yourself: it checks the password (and OTP) again and takes the current key file as the reference. On a vault that syncs, sync stops again afterwards if the server copy was saved under the newer key (usually this PC's own earlier upload); if this PC uploaded it, use the server-copy overwrite below.
+- **Overwrite the server copy with this PC's state…:** only when sync stopped because of a server copy from another PC that changed the key and that PC's key file cannot be had (the PC died with no key backup), or when you are sure the server copy is forged. The overwritten copy is not merged; it stays only in the server history. If the PC that changed the key is alive, do not overwrite: take its key file. That PC would later see this PC's copy as an old-key copy and overwrite it in turn.
+- **Discard the unfinished key change…:** see 'This PC's key record' below.
+
+**Old copies.** Changing the key (a password change; turning security keys on or off, or removing one) does not change copies made before (vault backups, pre-merge copies, the server's last 200 versions): they keep opening with the key file and password (and the keys registered) of their time. A key change protects what you save afterwards. The current key file also holds the 63 most recent data keys and the first one, so old backups still restore. The OTP secret does not change, so an old key copy still reveals it. If you change the key because it may have leaked, also change the secrets kept in the vault (the real passwords and keys).
+
+Bring an old backup back with 'Restore from backup' to a new file. A vault file saved under an old key that is simply put in place is not opened unless it is under the key this PC used last (this stops someone with an old key copy from swapping it in). An old key file put in place makes this PC warn about an older key file and stop sync and key changes. Someone with an old key file and its password who builds a new key file from it is refused too, unless that file continues the key file this PC wrote last. A vault restored with the key file of that time uses another key file than the one this PC saw, so that vault changes no key and uploads nothing; use it to look up entries. A vault restored with the current key file does not change the key or receive a new key file either: the original vault file uses the same key file, so a change would leave it under an older key, to be opened only through Restore. To keep using the restored file, lock and open it by logging in. All of this assumes this PC has a key record for the vault ([This PC's key record](#this-pcs-key-record)).
 
 ### 8. OTP backup (in case you lose your phone)
 
@@ -203,12 +231,12 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 |What|When|How|
 |---|---|---|
 |**Vault backup** (`.goyo`)|After adding or changing entries, especially a new seed phrase or private key|**Back up vault** at the bottom of the vault screen|
-|**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time you change the password**|**Back up key** at the bottom of the vault screen|
+|**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time the key changes** (a password change, a received key file; the app asks right after)|**Back up key** in **Key management** or at the bottom of the vault screen|
 |**OTP backup** (vaults with the OTP only)|**Once** right after creating the vault|**OTP backup**: enroll a spare phone or write the setup key on paper. Turning on the authenticator app's own backup also works.|
 |**Password**|Once, when you create the vault|Memorize it or write it down somewhere safe. **The app has no recovery of any kind.**|
 |**Restore drill**|Every few months|**Restore from backup** to a new file; the original is not changed.|
 
-**No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language), `goyo-vault.autolock` (auto-lock) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker.
+**No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language), `goyo-vault.autolock` (auto-lock) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker. `%LOCALAPPDATA%\GoyoVault\goyo-vault.keys` (this PC's key record) holds no secret either and belongs to this PC alone.
 
 **A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
 
@@ -217,21 +245,42 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 **Where to keep them**
 - Keep vault backups and key backups on **different drives**, for example the vault backup on an external disk and the key backup on a USB stick.
 - Each is encrypted and safe on its own, but together they leave only the password, so never keep both on one USB stick or in one cloud account.
-- After changing the password, make a new key backup and destroy the old ones: an old key copy still opens the vault with the old password.
+- After a password change or a received key file, back up the new key file at once. An old key backup cannot open what you save afterwards, while old vault backups keep opening with the key copy of their time.
 - Do not let this vault be the only copy of a valuable seed phrase; also keep it on paper or metal.
 
 ## Sync (optional)
 
 To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC gets its vault with 'Get from server…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
 
-- **Every PC needs 0.8.0 or later.** A synced vault and its backups do not open in 0.7.x or older. Each vault asks at every unlock until you agree, and only vaults you agree for change.
+- **Every PC needs 0.8.0 or later.** A synced vault and its backups do not open in 0.7.x or older. Each vault asks at every unlock until you agree, and only vaults you agree for change. Before changing the key, update the server script and every PC to 0.9.0.
 - The key file and password are never sent. Move the key file between PCs by USB.
 - When two PCs edit the same entry, both versions are kept. Delete the one you do not need.
 - **Deletions spread to the other PCs.** After a mistake, get entries back from the server history (the last 200 versions) or a `pre-merge-*.goyo` copy in the sync folder.
 - The server cannot read the vault, but it learns the vault ID, its size, when the contents changed and your IP address. The helper connects about once a minute, so it also learns when each PC is on. OTP-only unlocks are not uploaded, and even when the server takes no upload, a waiting upload is not made again at each unlock, so the server normally does not learn when you open the vault. The exception: when changes are still waiting to go up and a new copy arrives from the server, they go up again after the merge (at the next unlock if the app was closed), so it learns that moment.
 - While sync is on, never drop another file in place of `vault.goyo` by hand. Open other copies with Restore from backup.
-- After changing the password on one PC, copy the new key file to the others. The data key stays the same, so old key copies keep working.
+- A password change on one PC encrypts the vault again with a new data key, so the other PCs stop syncing until they take that PC's new key file by USB with 'Key management › Receive a new key file'. Do not copy it over their key files. Halts, diverged key files and overwriting a server copy are covered in 'After a key change' in [docs/SYNC.en.md](docs/SYNC.en.md).
 - "Synced" means "checked with the key to match the copy the server last sent or acknowledged". It neither proves that the server really stored it nor that the server keeps it safe. The same check code (`XXXX-XXXX-XXXX-XXXX`, covering the entries' text too) on two PCs means the same contents.
+
+## This PC's key record
+
+From 0.9.0 Goyo Vault notes the key-file state it has seen for each vault in `%LOCALAPPDATA%\GoyoVault\goyo-vault.keys`. It is the first file the app writes outside its own folder, and there is one per PC and Windows user. A vault that only ever used a 0.8 key file (its key never changed) has no record.
+
+- **No secrets.** It holds vault IDs, the key files' revisions and state tags, prefixes of key IDs, the key changes and removals this PC saw, whether a key backup was made, and, while a key change is being written, the path of the new key file. No password, data key or key check code. It is not authenticated: code running as the same user, which can write that folder, can change it.
+- **What it does:** a second reference against someone who can change only the vault folder or the key stick. Before asking for any password it notices an old key file put back (the 'older key file' warning), a key file that diverged from this PC's, one with an abnormally large revision, and one that lacks a removal this PC recorded. After a key change cut off by a crash it recognizes the change as this PC's own and finishes it, or says which password opens the files.
+- The same folder can hold the lock file `goyo-vault.keys.lock` and, while it is written, `goyo-vault.keys.<16 hex digits>.tmp`; the app cleans them up. If the folder cannot be written, the record is kept for this session only and the status line says so; a record written by a later Goyo Vault is never changed.
+- **A key change that may have been saved to a key file elsewhere:** if a key change was cut off and the vault is then opened with another copy of the key file, key changes and receiving key files stop until the key file the change was written to has been opened once. If that file is lost for good, **Discard the unfinished key change…** in Key management checks the password (and OTP) again and ends the hold; a file found later is treated like any other key file (if it diverged, join it with 'Receive a new key file').
+- **Deleting it** loses this PC's record for **every** vault. The reference starts again from the next key file opened: earlier rollbacks and diverged files are no longer noticed, a key change in progress is no longer recognized as this PC's own, and the mark that the last key change completed is forgotten, so putting back the vault file from before that change is asked about again. A security-key vault (experimental build) needs another PC's key check code again at its next unlock.
+- **Last resort:** if this record keeps the right key file from opening ("…another key file that split from it", "…lacks a key removal this PC recorded", "…opened with a security-key key file") and nothing else helps, close every Goyo Vault window, delete `goyo-vault.keys` and every `.tmp` file starting with `goyo-vault.keys.` in that folder, and open the vault again. What is lost is listed just above. "This key file's revision … is abnormally far above the one this PC saw" usually means a forged key file: do not delete the record; use another key file (a key backup, another PC).
+
+## Security keys (experimental)
+
+The source contains an experimental feature that locks the key file with both the password and a security key (YubiKey or another FIDO2 key), but **it is not in the ZIP used for installing (the default build `package_release.py` makes) and was not verified with real keys.** The default build refuses a security-key key file before asking for any password and never says the password is wrong. See [docs/SECURITY_KEY.en.md](docs/SECURITY_KEY.en.md).
+
+|Mode|Build|What the server holds|
+|---|---|---|
+|No security keys (this README)|Default (install ZIP)|Encrypted vault files only. The key file never leaves the PCs.|
+|Security keys, key file on the PCs only|Security-key build (experimental)|Encrypted vault files only|
+|Security keys + key-file sync|Security-key build (experimental)|Vault files and every key file uploaded. To anyone with server access the key file is no longer a separate factor.|
 
 ## Please read
 
@@ -239,7 +288,7 @@ To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only t
 - **There is no recovery.** Lose the vault file, the key file or the password (or the OTP, if you turned it on) and this app cannot open the vault. There is no way around it. With the OTP on, prepare for a lost phone with **OTP backup**.
 - **Neither delete nor rename `.goyotmp` files.** If power fails or a USB stick is pulled during a save, a temporary file such as `vault.goyo.<32 hex digits>.goyotmp` may be all that is left, and it can be the only copy. The app recovers it by itself the next time you unlock: a missing vault file comes back from a temporary file this vault's key opens, and a missing or damaged key file from a temporary key file of the same vault, each under its original name again. If a password change was cut off, try the new password first, then the old one. After the unlock, temporary files that are no longer needed are deleted and the ones it cannot judge stay. If it cannot recover by itself, the app tells you on screen.
 - **The OTP is an extra check inside this app.** It is off by default because of the lost-phone risk, but turning it on is recommended. An OTP code changes every 30 seconds and cannot serve as an encryption key, and to check codes the app has to keep the same OTP secret as your phone in the key file. So someone with both files and your password can decrypt the vault without the OTP. What the OTP stops is someone who knows your password opening the vault with this app on this PC. The real extra protection against stolen files is keeping the key file elsewhere.
-- **Changing the password does not revoke old key copies.** An old key copy plus the old password still opens later versions of the vault. If you suspect a leak, destroy old copies yourself.
+- **Copies made before a key change still open with the old key.** A password change replaces the data key, so an old key copy and the old password cannot open what you save afterwards, but vault backups and server history from before the change still open. If you suspect a leak, also change the secrets in the vault ('Old copies' in section 7).
 - **Anything you copy can be read by other programs.** Copy only when needed. When you paste into a password or secret field, the app clears the clipboard right away, but it cannot erase what the source app left behind (for example in Win+V history).
 - **It cannot protect an infected PC.** A keylogger records the password, and malware running as you can copy the vault and key or replace the program. Malware with administrator rights, kernel attacks and a camera pointed at the screen are also out of reach. Use a hardware wallet for large holdings.
 
@@ -251,6 +300,7 @@ To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only t
 **Cryptography**
 - **XChaCha20-Poly1305** from RustCrypto: 256-bit key, 192-bit nonce, 128-bit tag. Data and headers are authenticated.
 - **Argon2id v1.3** with 256 MiB memory, 3 passes and parallelism 1 derives the key-file encryption key from the password. The key file holds a random data key, plus the OTP secret for vaults with the OTP on.
+- **Key changes (0.9.0):** a password change, or joining two diverged key files, makes a new random data key and encrypts the vault again; the key file (`GOYOKE03`) keeps the 63 most recent data keys and the first one (to restore old backups). The vault file's header also states the key file's state (revision and tag), so copies under other keys are told apart before any key derivation. The new key file and vault file are opened again in memory before they are written, and the writes go in the order this PC's key record, vault file (old key), key file, vault file (new key), record, so a pair that opens is left at every moment. The format is in 'Key changes' in [docs/FORMAT.md](docs/FORMAT.md).
 - Randomness comes from the CPU's **RDSEED** conditioned with SHA-512. Windows CNG, DPAPI, BCrypt random and `getrandom` are not used. The CPU, firmware and any hypervisor are trusted; simple sanity checks do not certify the hardware.
 - The file format is documented in [docs/FORMAT.md](docs/FORMAT.md).
 
@@ -277,7 +327,7 @@ To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only t
 - The optional `goyo-sync.exe` also looks up DLLs in System32 only and turns on the same defenses, except the ban on child processes, because it has to start `ssh.exe`. It holds no secrets, so it skips the memory-access restriction below. It never opens the vault or key file. Like the vault app, its settings window ignores clicks, commands and input that other programs send or post to it.
 - Access to the process and all its threads is narrowed so other programs running as you cannot read or write the app's memory or start threads in it to inject code. Threads Windows starts later (for example for a file dialog) get the same restriction within 0.5 seconds. Programs with administrator (debug) rights are not stopped.
 - An attached user-mode debugger or a Remote Desktop (RDP) session locks the vault or blocks actions. These are best-effort checks that can be bypassed; they do not detect remote-control tools such as TeamViewer, memory reading or keyloggers, and the app never claims that the PC is "safe".
-- Rolling a vault back to an old backup, resetting the retry delay by restarting the app, and malicious apps bypassing the checks cannot be fully prevented without a server or separate trusted hardware. With sync, a server replaying old data cannot delete entries and is reported; a PC receiving its first copy trusts it, so compare the check code.
+- Rolling a vault back to an old backup, resetting the retry delay by restarting the app, and malicious apps bypassing the checks cannot be fully prevented without a server or separate trusted hardware. With sync, a server replaying old data cannot delete entries and is reported; a PC receiving its first copy trusts it, so compare the check code. From 0.9.0 this PC's key record notices an old key file put back and warns, but code running as the same user can change that record too.
 - 256-bit symmetric keys are used, but no post-quantum certification or guarantee is claimed.
 
 Review notes (in Korean): [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).

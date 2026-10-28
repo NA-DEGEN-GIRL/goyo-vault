@@ -13,8 +13,14 @@ pub type Result<T> = std::result::Result<T, &'static str>;
 pub type Key = Zeroizing<[u8; 32]>;
 pub const KDF_MEMORY_KIB: u32 = 262_144;
 pub const KDF_PASSES: u32 = 3;
-pub const AUTH_ERROR: &str =
-    "인증 실패: 비밀번호·열쇠·새 OTP·시스템 시간과 파일 상태를 확인하세요.";
+/// The text of AUTH_ERROR, for messages that add a line to it.
+macro_rules! auth_error {
+    () => {
+        "인증 실패: 비밀번호·열쇠·새 OTP·시스템 시간과 파일 상태를 확인하세요."
+    };
+}
+pub(crate) use auth_error;
+pub const AUTH_ERROR: &str = auth_error!();
 
 /// Argon2 settings for `derive`. Only builds with debug assertions (the
 /// tests) can pick the cheap ones; a release build has the constants alone.

@@ -165,6 +165,7 @@ unsafe extern "system" {
     pub fn MapWindowPoints(from: Hwnd, to: Hwnd, points: *mut Point, count: u32) -> i32;
     pub fn SetTimer(h: Hwnd, id: usize, ms: u32, callback: isize) -> usize;
     pub fn MessageBoxW(h: Hwnd, text: *const u16, title: *const u16, flags: u32) -> i32;
+    fn AdjustWindowRectEx(r: *mut Rect, style: u32, menu: i32, ex: u32) -> i32;
     pub fn LoadCursorW(instance: isize, id: *const u16) -> isize;
     pub fn BeginPaint(h: Hwnd, p: *mut Paint) -> isize;
     pub fn GetDC(h: Hwnd) -> isize;
@@ -531,6 +532,589 @@ unsafe extern "system" fn confirm_proc(h: Hwnd, m: u32, w: usize, l: isize) -> i
     }
     let old = CONFIRM_PROC.load(Ordering::Relaxed);
     unsafe { CallWindowProcW(std::mem::transmute::<isize, Option<Proc>>(old), h, m, w, l) }
+}
+/// What a button of a guarded input dialog does (spec §9.2a): it answers,
+/// it switches to another kind of entry, or it cancels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    Accept,
+    Switch,
+    Cancel,
+}
+/// A button of a guarded input dialog. The caller passes every label, so
+/// this file gains no text of its own.
+#[derive(Clone, Copy)]
+pub struct DialogButton<'a> {
+    pub id: i32,
+    pub label: &'a str,
+    pub role: Role,
+}
+/// What a guarded input dialog asks for. The security-key build adds a
+/// pick and a code entry.
+#[derive(Clone, Copy)]
+pub enum InputKind<'a> {
+    /// A masked password field under the text.
+    Password,
+    /// The text read-only and scrollable (a preview the caller composed),
+    /// with an optional check box: its control ID, label and first state.
+    Preview { check: Option<(i32, &'a str, bool)> },
+}
+/// How a guarded input dialog was answered. A dialog that could not be
+/// guarded, or that closed because the app locked, answers its cancel
+/// button.
+pub enum InputAnswer {
+    Password(Zeroizing<String>),
+    Accept { checked: bool },
+    Switch(i32),
+    Cancel(i32),
+}
+/// The control ID of the password field of an input dialog: the edit
+/// subclass clears a password pasted into it from the clipboard.
+pub const INPUT_EDIT: i32 = 0x7f01;
+/// The open input dialog (0 when none), for the queue filter: like a
+/// confirm box it is an owned popup, not a child of the main window.
+static INPUT_BOX: AtomicIsize = AtomicIsize::new(0);
+pub fn input_box() -> Hwnd {
+    INPUT_BOX.load(Ordering::Relaxed)
+}
+/// The open input dialog's controls and answer.
+#[derive(Default)]
+struct Input {
+    /// The password field, and its own procedure under the caller's
+    /// subclass, through which this file reads and wipes it.
+    edit: Hwnd,
+    edit_own: isize,
+    check: Hwnd,
+    /// The other controls under input_child_proc, with their procedures.
+    children: Vec<(Hwnd, isize)>,
+    buttons: Vec<(i32, Role)>,
+    /// The button that answered.
+    answer: Option<(i32, Role)>,
+}
+thread_local! {
+    static INPUT: std::cell::RefCell<Input> = std::cell::RefCell::new(Input::default());
+}
+/// Asks for input that only the user can give, inside a flow (spec §9.2a):
+/// an owned modal window that changes neither the main window's screen nor
+/// anything else about it. Like a confirm box, it drops commands and input
+/// sent from another thread (its own procedure and input_child_proc), and
+/// posted fakes are refused by the queue filter (see input_box). It is
+/// excluded from screen capture, and its password field carries the
+/// caller's edit subclass (`edit_proc`) and the password input scope. If
+/// any of that cannot be set up, it answers "cancel", as it does when the
+/// app locks while it is open (cancel_input).
+pub fn input_dialog(
+    h: Hwnd,
+    kind: InputKind,
+    text: &str,
+    buttons: &[DialogButton],
+    edit_proc: Proc,
+) -> InputAnswer {
+    let cancel = buttons
+        .iter()
+        .find(|b| b.role == Role::Cancel)
+        .map_or(2, |b| b.id);
+    modal(|| unsafe { run_input(h, kind, text, buttons, edit_proc) })
+        .unwrap_or(InputAnswer::Cancel(cancel))
+}
+/// Closes the open input dialog, if any, with its cancel button: the app
+/// locked, which voids the flow that asked.
+pub fn cancel_input() {
+    let open = INPUT.with(|s| {
+        let mut s = s.borrow_mut();
+        let cancel = s.buttons.iter().find(|(_, r)| *r == Role::Cancel).copied();
+        if input_box() != 0 && s.answer.is_none() {
+            s.answer = Some(cancel.unwrap_or((2, Role::Cancel)));
+        }
+        input_box()
+    });
+    if open != 0 {
+        unsafe {
+            PostMessageW(open, 0, 0, 0); // wakes its message loop
+        }
+    }
+}
+unsafe fn run_input(
+    owner: Hwnd,
+    kind: InputKind,
+    text: &str,
+    buttons: &[DialogButton],
+    edit_proc: Proc,
+) -> Option<InputAnswer> {
+    // One at a time: a flow asks one question after the other.
+    if input_box() != 0 || buttons.is_empty() {
+        return None;
+    }
+    let class = wide("GoyoInputDialog");
+    static REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let registered = *REGISTERED.get_or_init(|| unsafe {
+        let wc = WndClass {
+            style: 0,
+            proc: Some(input_proc),
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance: GetModuleHandleW(std::ptr::null()),
+            icon: 0,
+            cursor: LoadCursorW(0, 32512usize as *const u16),
+            background: 16, // COLOR_BTNFACE + 1, as a message box
+            menu: std::ptr::null(),
+            class: class.as_ptr(),
+        };
+        RegisterClassW(&wc) != 0
+    });
+    if !registered {
+        return None;
+    }
+    let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
+    let px = |n: i32| (n as f32 * scale) as i32;
+    let font = unsafe {
+        CreateFontW(
+            -px(12),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            5,
+            0,
+            // The app's faces: Malgun Gothic draws a backslash as a won sign.
+            wide(if crate::i18n::english() {
+                "Segoe UI"
+            } else {
+                "맑은 고딕"
+            })
+            .as_ptr(),
+        )
+    };
+    if font == 0 {
+        return None;
+    }
+    INPUT.with(|s| {
+        *s.borrow_mut() = Input {
+            buttons: buttons.iter().map(|b| (b.id, b.role)).collect(),
+            ..Input::default()
+        }
+    });
+    let answer = unsafe { build_input(owner, kind, text, buttons, edit_proc, font, &px) };
+    unsafe {
+        DeleteObject(font);
+    }
+    INPUT.with(|s| *s.borrow_mut() = Input::default());
+    INPUT_BOX.store(0, Ordering::Relaxed);
+    answer
+}
+/// Lays out the dialog, runs it and takes its answer; the dialog is gone
+/// when this returns.
+unsafe fn build_input(
+    owner: Hwnd,
+    kind: InputKind,
+    text: &str,
+    buttons: &[DialogButton],
+    edit_proc: Proc,
+    font: isize,
+    px: &dyn Fn(i32) -> i32,
+) -> Option<InputAnswer> {
+    let class = wide("GoyoInputDialog");
+    let text = tr(text);
+    // Client width 480 (96 DPI); the text's height as it wraps.
+    let (width, margin) = (px(480), px(16));
+    let inner = width - 2 * margin;
+    let text_h = match kind {
+        InputKind::Preview { .. } => px(240),
+        InputKind::Password => unsafe {
+            let dc = GetDC(owner);
+            let old = SelectObject(dc, font);
+            let mut r = Rect {
+                right: inner,
+                ..Rect::default()
+            };
+            let s = wide(text);
+            DrawTextW(dc, s.as_ptr(), -1, &mut r, 0x400 | 0x800 | 0x10); // CALCRECT | NOPREFIX | WORDBREAK
+            SelectObject(dc, old);
+            ReleaseDC(owner, dc);
+            r.bottom.clamp(px(20), px(320))
+        },
+    };
+    let mut y = margin + text_h + px(12);
+    let field_y = y;
+    match kind {
+        InputKind::Password => y += px(26) + px(16),
+        InputKind::Preview { check: Some(_) } => y += px(22) + px(12),
+        InputKind::Preview { check: None } => {}
+    }
+    let buttons_y = y;
+    let height = y + px(30) + margin;
+    // The window around that client area, centred on the owner.
+    let style = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000; // WS_POPUP | WS_CAPTION | WS_SYSMENU
+    let ex = 0x1; // WS_EX_DLGMODALFRAME
+    let mut frame = Rect {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    let mut parent = Rect::default();
+    unsafe {
+        AdjustWindowRectEx(&mut frame, style, 0, ex);
+        GetWindowRect(owner, &mut parent);
+    }
+    let (w, h) = (frame.right - frame.left, frame.bottom - frame.top);
+    let x = parent.left + (parent.right - parent.left - w) / 2;
+    let top = parent.top + (parent.bottom - parent.top - h) / 2;
+    let dialog = unsafe {
+        CreateWindowExW(
+            ex,
+            class.as_ptr(),
+            wide(tr("고요 금고")).as_ptr(),
+            style,
+            x,
+            top,
+            w,
+            h,
+            owner,
+            0,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        )
+    };
+    if dialog == 0 {
+        return None;
+    }
+    INPUT_BOX.store(dialog, Ordering::Relaxed);
+    let answer = unsafe {
+        fill_input(
+            owner,
+            dialog,
+            kind,
+            text,
+            buttons,
+            edit_proc,
+            font,
+            px,
+            [text_h, field_y, buttons_y],
+        )
+    };
+    unsafe {
+        // The owner first, so that it is activated again, not another app.
+        EnableWindow(owner, 1);
+        DestroyWindow(dialog);
+    }
+    answer
+}
+/// Creates the dialog's controls and guards them, runs its message loop
+/// and reads the answer, wiping the password field.
+#[allow(clippy::too_many_arguments)] // Native control geometry follows Win32.
+unsafe fn fill_input(
+    owner: Hwnd,
+    dialog: Hwnd,
+    kind: InputKind,
+    text: &str,
+    buttons: &[DialogButton],
+    edit_proc: Proc,
+    font: isize,
+    px: &dyn Fn(i32) -> i32,
+    [text_h, field_y, buttons_y]: [i32; 3],
+) -> Option<InputAnswer> {
+    let (width, margin) = (px(480), px(16));
+    let inner = width - 2 * margin;
+    let child = |class: &str,
+                 text: &str,
+                 style: u32,
+                 ex: u32,
+                 (x, y, w, h): (i32, i32, i32, i32),
+                 id: i32| unsafe {
+        let c = CreateWindowExW(
+            ex,
+            wide(class).as_ptr(),
+            secret_wide(text).as_ptr(),
+            0x5000_0000 | style, // WS_CHILD | WS_VISIBLE
+            x,
+            y,
+            w,
+            h,
+            dialog,
+            id as isize,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        if c != 0 {
+            SendMessageW(c, 0x30, font as usize, 0); // WM_SETFONT
+        }
+        c
+    };
+    // Every control but the password field takes input only from this
+    // thread; the password field gets the caller's subclass instead.
+    let guard = |c: Hwnd| unsafe {
+        if c == 0 {
+            return false;
+        }
+        let own = SetWindowLongPtrW(c, -4, input_child_proc as *const () as isize);
+        if own == 0 {
+            return false;
+        }
+        INPUT.with(|s| s.borrow_mut().children.push((c, own)));
+        true
+    };
+    let mut ok = true;
+    let text_box = if let InputKind::Preview { .. } = kind {
+        // ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+        let lines = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        child(
+            "EDIT",
+            &lines,
+            0x4 | 0x40 | 0x800 | 0x0020_0000,
+            0x200,
+            (margin, margin, inner, text_h),
+            0,
+        )
+    } else {
+        child("STATIC", text, 0x80, 0, (margin, margin, inner, text_h), 0) // SS_NOPREFIX
+    };
+    ok &= guard(text_box);
+    match kind {
+        InputKind::Password => {
+            // ES_PASSWORD | ES_AUTOHSCROLL, WS_TABSTOP, with a sunken edge.
+            let edit = child(
+                "EDIT",
+                "",
+                0x20 | 0x80 | 0x0001_0000,
+                0x200,
+                (margin, field_y, inner, px(26)),
+                INPUT_EDIT,
+            );
+            ok &= edit != 0;
+            if edit != 0 {
+                unsafe {
+                    // The mask goes first: the subclass blocks EM_SETPASSWORDCHAR.
+                    SendMessageW(edit, 0xcc, '•' as usize, 0);
+                    SendMessageW(edit, 0xc5, 1024, 0); // EM_LIMITTEXT
+                    let own = SetWindowLongPtrW(edit, -4, edit_proc as *const () as isize);
+                    ok &= own != 0 && SetInputScope(edit, 31) == 0;
+                    INPUT.with(|s| {
+                        let mut s = s.borrow_mut();
+                        s.edit = edit;
+                        s.edit_own = own;
+                    });
+                }
+            }
+        }
+        InputKind::Preview {
+            check: Some((id, label, on)),
+        } => {
+            // BS_AUTOCHECKBOX, WS_TABSTOP
+            let check = child(
+                "BUTTON",
+                tr(label),
+                0x3 | 0x0001_0000,
+                0,
+                (margin, field_y, inner, px(22)),
+                id,
+            );
+            ok &= guard(check);
+            if check != 0 {
+                unsafe {
+                    SendMessageW(check, 0xf1, on as usize, 0); // BM_SETCHECK
+                }
+                INPUT.with(|s| s.borrow_mut().check = check);
+            }
+        }
+        InputKind::Preview { check: None } => {}
+    }
+    // The buttons right-aligned, the first one the default.
+    let mut right = width - margin;
+    let mut first = 0;
+    for (i, b) in buttons.iter().enumerate().rev() {
+        let label = tr(b.label);
+        let w = (unsafe { text_width(dialog, font, label) } + px(24)).max(px(96));
+        right -= w;
+        let style = 0x0001_0000 | if i == 0 { 0x1 } else { 0 }; // WS_TABSTOP, BS_DEFPUSHBUTTON
+        let c = child(
+            "BUTTON",
+            label,
+            style,
+            0,
+            (right, buttons_y, w, px(30)),
+            b.id,
+        );
+        ok &= guard(c);
+        right -= px(8);
+        if i == 0 {
+            first = c;
+        }
+    }
+    // Capture exclusion, read back.
+    let mut affinity = 0;
+    ok &= unsafe {
+        SetWindowDisplayAffinity(dialog, 0x11) != 0
+            && GetWindowDisplayAffinity(dialog, &mut affinity) != 0
+            && affinity == 0x11
+    };
+    if !ok {
+        unsafe { wipe_input() };
+        return None;
+    }
+    unsafe {
+        // Active first, then the owner disabled: activation stays with this
+        // thread's windows.
+        ShowWindow(dialog, 5);
+        let edit = INPUT.with(|s| s.borrow().edit);
+        SetFocus(if edit != 0 { edit } else { first });
+        EnableWindow(owner, 0);
+    }
+    let mut msg = Msg::default();
+    loop {
+        if INPUT.with(|s| s.borrow().answer.is_some()) || unsafe { IsWindow(dialog) } == 0 {
+            break;
+        }
+        let got = unsafe { GetMessageW(&mut msg, 0, 0, 0) };
+        if got <= 0 {
+            // WM_QUIT is for the app's own loop.
+            if got == 0 {
+                unsafe { PostQuitMessage(msg.wparam as i32) };
+            }
+            break;
+        }
+        unsafe {
+            if IsDialogMessageW(dialog, &mut msg) == 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+    let (answer, check) = INPUT.with(|s| {
+        let s = s.borrow();
+        (s.answer, s.check)
+    });
+    let result = match answer {
+        Some((_, Role::Accept)) => match kind {
+            InputKind::Password => unsafe { read_input() }.map(InputAnswer::Password),
+            InputKind::Preview { .. } => Some(InputAnswer::Accept {
+                checked: check != 0 && unsafe { SendMessageW(check, 0xf0, 0, 0) } == 1, // BM_GETCHECK
+            }),
+        },
+        Some((id, Role::Switch)) => Some(InputAnswer::Switch(id)),
+        Some((id, Role::Cancel)) => Some(InputAnswer::Cancel(id)),
+        None => None,
+    };
+    unsafe { wipe_input() };
+    result
+}
+/// The width of `text` in `font`.
+unsafe fn text_width(h: Hwnd, font: isize, text: &str) -> i32 {
+    unsafe {
+        let dc = GetDC(h);
+        let old = SelectObject(dc, font);
+        let s = wide(text);
+        let mut size = Size::default();
+        GetTextExtentPoint32W(dc, s.as_ptr(), s.len() as i32 - 1, &mut size);
+        SelectObject(dc, old);
+        ReleaseDC(h, dc);
+        size.cx
+    }
+}
+/// The password field's text, read past the caller's subclass, which drops
+/// every outside read.
+unsafe fn read_input() -> Option<Zeroizing<String>> {
+    let (edit, own) = INPUT.with(|s| {
+        let s = s.borrow();
+        (s.edit, s.edit_own)
+    });
+    if edit == 0 || own == 0 {
+        return None;
+    }
+    let own = unsafe { std::mem::transmute::<isize, Option<Proc>>(own) };
+    unsafe {
+        let n = CallWindowProcW(own, edit, 0xe, 0, 0).clamp(0, 32767) as usize; // WM_GETTEXTLENGTH
+        let mut buf = Zeroizing::new(vec![0u16; n + 1]);
+        let got = CallWindowProcW(own, edit, 0xd, buf.len(), buf.as_mut_ptr() as isize).max(0);
+        secret_utf8(&buf[..(got as usize).min(n)]).ok()
+    }
+}
+/// Overwrites the password field's text in place before the dialog goes.
+unsafe fn wipe_input() {
+    let (edit, own) = INPUT.with(|s| {
+        let s = s.borrow();
+        (s.edit, s.edit_own)
+    });
+    if edit == 0 || own == 0 {
+        return;
+    }
+    let own = unsafe { std::mem::transmute::<isize, Option<Proc>>(own) };
+    unsafe {
+        let n = CallWindowProcW(own, edit, 0xe, 0, 0).clamp(0, 32767) as usize;
+        let spaces = secret_wide(&" ".repeat(n));
+        CallWindowProcW(own, edit, 0xb1, 0, -1); // EM_SETSEL
+        CallWindowProcW(own, edit, 0xc2, 0, spaces.as_ptr() as isize); // EM_REPLACESEL
+        CallWindowProcW(own, edit, 0xc, 0, wide("").as_ptr() as isize); // WM_SETTEXT
+        CallWindowProcW(own, edit, 0xcd, 0, 0); // EM_EMPTYUNDOBUFFER
+    }
+}
+/// The input dialog's own procedure: a button answers, closing cancels.
+/// Commands and input sent from another thread are dropped (the
+/// confirm_proc rule); app messages its controls post (a cleared paste)
+/// go to the main window.
+unsafe extern "system" fn input_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+    if from_other_thread() && matches!(m, 0x10 | 0x111 | 0x112 | 0x100..=0x109 | 0x201..=0x20e) {
+        return 0;
+    }
+    match m {
+        0x111 => {
+            let id = (w & 0xffff) as i32;
+            INPUT.with(|s| {
+                let mut s = s.borrow_mut();
+                // Enter and Esc arrive as IDOK and IDCANCEL.
+                let pick = |role: Role| s.buttons.iter().find(|(_, r)| *r == role).copied();
+                let pressed = match s.buttons.iter().find(|(b, _)| *b == id) {
+                    Some(b) => Some(*b),
+                    None if id == 1 => pick(Role::Accept),
+                    None if id == 2 => pick(Role::Cancel),
+                    None => None,
+                };
+                if s.answer.is_none() && pressed.is_some() {
+                    s.answer = pressed;
+                }
+            });
+            0
+        }
+        0x10 => {
+            INPUT.with(|s| {
+                let mut s = s.borrow_mut();
+                let cancel = s.buttons.iter().find(|(_, r)| *r == Role::Cancel).copied();
+                if s.answer.is_none() {
+                    s.answer = Some(cancel.unwrap_or((2, Role::Cancel)));
+                }
+            });
+            0
+        }
+        0x8000..=0xbfff => {
+            unsafe { PostMessageW(GetParent(h), m, w, l) };
+            0
+        }
+        _ => unsafe { DefWindowProcW(h, m, w, l) },
+    }
+}
+/// The input dialog's controls other than the password field: anything
+/// sent from another thread is dropped, as for the main window's list.
+unsafe extern "system" fn input_child_proc(h: Hwnd, m: u32, w: usize, l: isize) -> isize {
+    if from_other_thread() {
+        return 0;
+    }
+    let own = INPUT.with(|s| {
+        s.borrow()
+            .children
+            .iter()
+            .find(|(c, _)| *c == h)
+            .map_or(0, |(_, p)| *p)
+    });
+    if own == 0 {
+        return unsafe { DefWindowProcW(h, m, w, l) };
+    }
+    unsafe { CallWindowProcW(std::mem::transmute::<isize, Option<Proc>>(own), h, m, w, l) }
 }
 pub fn dialog(h: Hwnd, save: bool, key: bool) -> Option<PathBuf> {
     pick_file(

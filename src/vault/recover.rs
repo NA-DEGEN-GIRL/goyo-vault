@@ -266,20 +266,25 @@ pub(super) fn vault_candidate(
 /// deletes the temp files of this vault's key file (the key file in use
 /// opened, so they are older or unfinished writes of it) and the vault's
 /// temp files whose contents the vault file already holds. Every other
-/// temp file stays.
-pub(super) fn clean(s: &Session, key: &Path) {
-    let stale: Vec<PathBuf> = candidates(key, KEY_LIMIT)
+/// temp file stays. True when a deleted key file's temp had a later epoch
+/// than the key file: a key change that never landed (S-NOTFINISHED).
+pub(super) fn clean(s: &Session, key: &Path) -> bool {
+    let stale: Vec<(PathBuf, u64)> = candidates(key, KEY_LIMIT)
         .into_iter()
-        .filter(|c| c.path != s.key_path && key_head(&c.bytes).is_some_and(|h| h.id == s.id))
-        .map(|c| c.path)
+        .filter(|c| c.path != s.key_path)
+        .filter_map(|c| {
+            let head = key_head(&c.bytes).filter(|h| h.id == s.id)?;
+            Some((c.path, head.epoch))
+        })
         .collect();
+    let mut unfinished = false;
     // The key file's lock keeps this off a password change running in
     // another window; taken only when there is something to delete.
     if !stale.is_empty()
         && let Ok(_lock) = FileLock::acquire(key)
     {
-        for path in stale {
-            let _ = fs::remove_file(path);
+        for (path, epoch) in stale {
+            unfinished |= fs::remove_file(path).is_ok() && epoch > s.key_state.epoch;
         }
     }
     // Under any key of the bundle: an older-key copy of the same contents
@@ -298,6 +303,7 @@ pub(super) fn clean(s: &Session, key: &Path) {
             let _ = fs::remove_file(&c.path);
         }
     }
+    unfinished
 }
 /// The same entries (IDs, parents and text), tombstones and counters; the
 /// OTP watermark `last` does not count. `seen` does: a copy that knew a

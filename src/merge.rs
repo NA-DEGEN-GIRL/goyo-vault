@@ -7,7 +7,7 @@
 //! local, so the copies converge and stop uploading.
 use crate::vault::{
     Contents, DataRef, Entry, EntryId, Format, MAX_ENTRIES, MAX_FILE, MAX_TOMBSTONES, derived_id,
-    plain_size,
+    keyfile::KeyState, plain_size,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -223,8 +223,16 @@ pub(crate) fn merge(
 /// key, so it reveals nothing about the entries, and 64 bits, so not even a
 /// key holder can make other contents match a given code. The OTP watermark
 /// is left out because OTP-only changes are not synced. `id_key` is the
-/// vault's ID key, the same on every PC whatever key changes it saw.
-pub(crate) fn check_code(id_key: &[u8; 32], entries: &[Entry], tombstones: &[EntryId]) -> String {
+/// vault's ID key, the same on every PC whatever key changes it saw. A KF2
+/// session also covers its key file's state (`state`, spec v3 §4.8): a PC
+/// that is behind on its key file, or on a fork, shows another code. None
+/// (a 0.8 key file) gives 0.8's code.
+pub(crate) fn check_code(
+    id_key: &[u8; 32],
+    entries: &[Entry],
+    tombstones: &[EntryId],
+    state: Option<KeyState>,
+) -> String {
     let live: BTreeMap<EntryId, &Entry> = entries.iter().map(|e| (e.id(), e)).collect();
     let dead: BTreeSet<&EntryId> = tombstones.iter().collect();
     let mut mac = Hmac::<Sha256>::new_from_slice(id_key).expect("HMAC accepts any key size");
@@ -243,6 +251,11 @@ pub(crate) fn check_code(id_key: &[u8; 32], entries: &[Entry], tombstones: &[Ent
     mac.update(&[0xFF; 16]);
     for id in dead {
         mac.update(id);
+    }
+    if let Some(state) = state {
+        mac.update(&[0xFE; 16]);
+        mac.update(&state.epoch.to_le_bytes());
+        mac.update(&state.tag);
     }
     let d = mac.finalize().into_bytes();
     format!(
@@ -658,34 +671,53 @@ mod tests {
                 7,
             )
         };
-        let code = check_code(&KEY, &a.entries, &a.tombstones);
-        assert_eq!(code, check_code(&KEY, &b.entries, &b.tombstones));
+        let code = check_code(&KEY, &a.entries, &a.tombstones, None);
+        assert_eq!(code, check_code(&KEY, &b.entries, &b.tombstones, None));
         assert_eq!(code.len(), 19);
         // Every PC must show the same code: vector from Python's hmac.
         assert_eq!(
-            check_code(&KEY, &a.entries, &[[3; 16]]),
+            check_code(&KEY, &a.entries, &[[3; 16]], None),
             "A694-933F-6829-CF9C"
         );
         // Other text under the same IDs, even in one field, is another code.
         let mut swapped = b.clone();
         swapped.entries[0] = entry(y, NO_ID, "y", "3");
-        assert_ne!(code, check_code(&KEY, &swapped.entries, &b.tombstones));
+        assert_ne!(
+            code,
+            check_code(&KEY, &swapped.entries, &b.tombstones, None)
+        );
         let mut noted = b.clone();
         *noted.entries[1].notes = "n".into();
-        assert_ne!(code, check_code(&KEY, &noted.entries, &b.tombstones));
+        assert_ne!(code, check_code(&KEY, &noted.entries, &b.tombstones, None));
         // Field boundaries count: "x" + "1" is not "x1" + "".
         let mut shifted = b.clone();
         *shifted.entries[1].title = "x1".into();
         shifted.entries[1].secret.clear();
-        assert_ne!(code, check_code(&KEY, &shifted.entries, &b.tombstones));
+        assert_ne!(
+            code,
+            check_code(&KEY, &shifted.entries, &b.tombstones, None)
+        );
         // A live ID moved to the tombstones is a different state.
         assert_ne!(
             code,
-            check_code(&KEY, &a.entries[..1], &[[3; 16], [4; 16], y])
+            check_code(&KEY, &a.entries[..1], &[[3; 16], [4; 16], y], None)
         );
-        assert_ne!(code, check_code(&KEY, &a.entries, &a.tombstones[..1]));
+        assert_ne!(code, check_code(&KEY, &a.entries, &a.tombstones[..1], None));
         // Another vault's key gives another code for the same contents.
-        assert_ne!(code, check_code(&[8; 32], &a.entries, &a.tombstones));
+        assert_ne!(code, check_code(&[8; 32], &a.entries, &a.tombstones, None));
+        // A KF2 session's code also covers its key file's state: the same
+        // contents at another epoch or tag is another code (spec v3 §4.8).
+        let state = |epoch, tag| Some(KeyState { epoch, tag });
+        let kf2 = check_code(&KEY, &a.entries, &[[3; 16]], state(5, [9; 16]));
+        assert_eq!(kf2, "1757-8F5E-1185-229E");
+        assert_ne!(
+            kf2,
+            check_code(&KEY, &a.entries, &[[3; 16]], state(6, [9; 16]))
+        );
+        assert_ne!(
+            kf2,
+            check_code(&KEY, &a.entries, &[[3; 16]], state(5, [8; 16]))
+        );
     }
 
     /// Fixed-seed xorshift64*: repeatable, no RNG crate, no OS randomness.

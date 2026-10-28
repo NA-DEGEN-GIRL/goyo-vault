@@ -371,8 +371,8 @@ pub const EN: &[(&str, &str)] = &[
     ("비밀번호 · 12자 이상", "Password · 12+ characters"),
     ("비밀번호 변경", "Change password"),
     (
-        "비밀번호 변경 완료. 새 열쇠 파일을 백업하세요. 이전 사본은 자동 폐기되지 않습니다.",
-        "Password changed. Back up the new key file; old copies are not revoked.",
+        "비밀번호를 바꾸고 금고를 새 열쇠로 다시 암호화했습니다.",
+        "Password changed; the vault was encrypted again with a new key.",
     ),
     ("비밀번호 보기", "Show password"),
     ("비밀번호 숨기기", "Hide password"),
@@ -600,16 +600,16 @@ pub const EN: &[(&str, &str)] = &[
         "This vault file was saved with a key file locked by a security key. This Goyo Vault build has no security-key support, so it cannot open it. Your password is not wrong.",
     ),
     (
-        "이 금고 파일은 이 열쇠 파일에 없는 열쇠로 저장되어 있습니다. 이 금고를 마지막으로 연 열쇠 파일을 선택하세요. 다른 PC에서 이 금고 파일의 열쇠를 바꿨다면 그 PC의 새 열쇠 파일로 여세요.",
-        "This vault file is saved under a key that is not in this key file. Choose the key file that last opened this vault. If this vault file's key was changed on another PC, open it with that PC's new key file.",
+        "이 금고 파일은 이 열쇠 파일에 없는 열쇠로 저장되어 있습니다. 이 금고를 마지막으로 연 열쇠 파일을 선택하세요. 다른 PC에서 열쇠를 바꿨다면 이 PC의 원래 열쇠 파일로 연 뒤 '열쇠 관리 › 새 열쇠 파일 받기'로 새 열쇠 파일을 받으세요.",
+        "This vault file is saved under a key that is not in this key file. Choose the key file that last opened this vault. If the key was changed on another PC, open the vault with this PC's own key file and then take the new key file with 'Key management › Receive a new key file'.",
     ),
     (
         "이 금고 파일은 이 열쇠 파일의 형식으로 다시 저장하면 용량 제한(8 MiB)을 넘어 열지 않았습니다. 비밀번호가 틀린 것이 아닙니다. 이 금고의 예전 열쇠 파일(0.8 형식)이 있으면 그것으로 열어 항목을 줄인 뒤 다시 여세요.",
         "This vault file was not opened: saved again in this key file's format, it would exceed the size limit (8 MiB). Your password is not wrong. If you still have this vault's earlier key file (0.8 format), open it with that one, remove entries, then open it again.",
     ),
     (
-        "이 금고 파일은 이 PC의 열쇠 파일보다 새로운 열쇠 파일로 저장되었습니다. 다른 PC에서 이 금고의 열쇠 파일을 바꾼 것으로 보입니다. 그 PC의 새 열쇠 파일을 USB로 가져와 그것으로 여세요.",
-        "This vault file was saved with a newer key file than this PC's. The vault's key file seems to have been changed on another PC. Bring that PC's new key file over by USB and open the vault with it.",
+        "이 금고 파일은 이 PC의 열쇠 파일보다 새로운 열쇠 파일로 저장되었습니다. 다른 PC에서 이 금고의 열쇠 파일을 바꾼 것으로 보입니다. 그 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 그 전에는 이 PC에서 열쇠를 바꾸지 마세요.",
+        "This vault file was saved with a newer key file than this PC's. The vault's key file seems to have been changed on another PC. Bring that key file over by USB and take it with 'Key management › Receive a new key file'. Do not change the key on this PC before that.",
     ),
     (
         "이 금고 파일은 이 열쇠 파일의 예전 열쇠로 저장되어 있습니다.\n다른 PC에서 열쇠를 바꾼 뒤 이 PC에서 처음 여는 것이라면 정상입니다(같은 열쇠 파일을 함께 쓰거나 새 열쇠 파일을 옮겨 온 경우).\n그런 일이 없었다면 예전 열쇠를 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 그 경우 '아니요'를 누르고 백업이나 서버 기록을 확인하세요.\n이 파일을 열고 새 열쇠로 다시 저장할까요?",
@@ -850,16 +850,16 @@ pub const EN: &[(&str, &str)] = &[
     ("항목이 너무 깁니다.", "The entry is too long."),
     ("현재 비밀번호", "Current password"),
     (
-        "현재 비밀번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다.",
-        "Checks the current password, then re-encrypts the key file.",
+        "현재 비밀번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다.",
+        "Checks the current password, then encrypts the vault again with a new key.",
     ),
     (
-        "현재 비밀번호와 새 OTP 번호를 확인한 뒤 열쇠 파일을 다시 암호화합니다.",
-        "Checks the current password and a fresh OTP code, then re-encrypts the key file.",
+        "현재 비밀번호와 새 OTP 번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다.",
+        "Checks the current password and a fresh OTP code, then encrypts the vault again with a new key.",
     ),
     (
-        "현재 열쇠 파일만 갱신됩니다. 이전 열쇠와 이전 비밀번호로 이후 금고도 열 수 있습니다. 유출 대응용 키 교체가 아닙니다. 변경 후 새 열쇠 파일을 별도로 백업하세요.",
-        "Only the current key file changes. An old key copy with the old password still opens later versions of the vault, so this is no key rotation after a leak. Back up the new key file afterwards.",
+        "새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다. 예전 열쇠 파일과 예전 비밀번호로는 앞으로 저장하는 내용을 열 수 없습니다. 바꾼 뒤 새 열쇠 파일을 백업하세요.",
+        "The vault is encrypted again with a new data key, and a new key file is written. The old key file and old password cannot open what you save from now on. Back up the new key file after the change.",
     ),
     (
         "현재 화면에서 허용되지 않는 작업입니다.",
@@ -1348,4 +1348,410 @@ pub const EN: &[(&str, &str)] = &[
         "로그인할 때 자동으로 시작하지 않습니다.",
         "It no longer starts when you sign in.",
     ),
+    (
+        "열쇠는 바꾸지 않았습니다. 지금까지 쓰던 비밀번호로 다시 여세요.",
+        "The key was not changed. Open the vault again with the password you have used so far.",
+    ),
+    (
+        "열쇠 변경은 저장되었습니다. 다음에 열 때는 바뀐 열쇠 파일의 비밀번호로 여세요(비밀번호를 바꿨다면 새 비밀번호입니다). 연 뒤 '열쇠 백업'을 하세요.",
+        "The key change was saved. Next time, open the vault with the changed key file's password (the new one, if you changed the password). After opening, use 'Back up key'.",
+    ),
+    (
+        "열쇠 백업을 다시 읽어 확인하지 못했습니다. 다른 저장장치에 다시 백업하세요.",
+        "The key backup could not be read back and checked. Back up again to another drive.",
+    ),
+    (
+        "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '복원'으로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.",
+        "This vault file is saved under an older key, not the key this PC used last, so it was not opened. Someone with an old copy of the key may have swapped the vault file. To bring back an old backup, restore it to a new file with 'Restore from backup'. If nothing like that happened, compare this vault file with a recent backup or the server history.",
+    ),
+    (
+        "이 금고 파일은 예전 열쇠로 저장되어 있고 저장 횟수 기록이 비정상적으로 커서 열지 않았습니다. 손상되었거나 예전 열쇠 사본을 가진 누군가가 만든 파일일 수 있습니다. 비밀번호가 틀린 것이 아닙니다. 다른 백업이나 서버 기록을 확인하세요.",
+        "This vault file is saved under an older key and its save counters are abnormally large, so it was not opened. It may be damaged, or made by someone with an old copy of the key. Your password is not wrong. Check another backup or the server history.",
+    ),
+    (
+        "지난 열쇠 변경이 끝나지 않아 예전 열쇠로 열었습니다. 다시 바꾸려면 '열쇠 관리'를 쓰세요.",
+        "The last key change did not finish, so the vault opened with the old key. To change it again, use 'Key management'.",
+    ),
+    (
+        "열쇠 변경이 중간에 끊긴 흔적이 있습니다. 예전 비밀번호(와 보안 키)로 열어 보세요.",
+        "A key change was cut off midway. Try opening with the old password (and security key).",
+    ),
+    (
+        "이 PC에서 한 열쇠 변경은 저장되었습니다. 새로 정한 비밀번호로 여세요.",
+        "The key change made on this PC was saved. Open the vault with the password you just set.",
+    ),
+    (
+        "이 PC에서 받은 열쇠 파일은 저장되었습니다. 그 열쇠 파일의 비밀번호(다른 PC에서 정한 비밀번호)로 여세요.",
+        "The key file this PC received was saved. Open the vault with that key file's password (the one set on the other PC).",
+    ),
+    (
+        "이 PC에서 한 열쇠 변경 뒤에 다른 PC가 이 열쇠 파일을 다시 바꿨습니다. 그 PC에서 정한 비밀번호로 여세요.",
+        "After this PC's key change, another PC changed this key file again. Open the vault with the password set on that PC.",
+    ),
+    (
+        "열쇠 변경이 거의 끝난 상태로 열쇠 파일이 임시 파일로 남았습니다. 새 비밀번호(와 보안 키)로 여세요. 예전 비밀번호로 열려면 예전 열쇠 파일 백업이 필요합니다.",
+        "A key change almost finished, and the key file was left as a temporary file. Open the vault with the new password (and security key). Opening it with the old password needs a backup of the old key file.",
+    ),
+    (
+        "이 열쇠 파일은 이 고요 금고가 전에 본 것(수정 {old})보다 오래되었습니다(수정 {new}). 직접 예전 백업으로 되돌렸거나, 같은 고요 금고 폴더를 다른 PC와 함께 쓰는데 그 PC에서 바꾼 새 열쇠 파일을 아직 받지 않은 경우라면 정상입니다(뒤의 경우 '새 열쇠 파일 받기'를 하세요). 그런 일이 없었다면 누군가 예전 열쇠 파일과 금고 파일로 바꿔 놓았을 수 있으니 백업을 확인하세요.",
+        "This key file is older than the one this Goyo Vault saw before (revision {old}; this one is revision {new}). That is normal if you went back to an old backup yourself, or if you share this Goyo Vault folder with another PC and have not received the new key file changed there yet (then use 'Receive a new key file'). If nothing like that happened, someone may have put back an old key file and vault file: check your backups.",
+    ),
+    (
+        "이 PC가 마지막으로 본 열쇠 파일(수정 {old})과 다른 열쇠 파일(수정 {new})로 복원했습니다. 복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받거나 서버에 올리거나 서버 사본을 합치지 않습니다. 필요한 항목을 확인하는 데 쓰세요.",
+        "Restored with a key file other than the one this PC saw last (revision {old}): this one is revision {new}. The restored vault changes no key, receives no key file, uploads nothing and merges no server copy. Use it to look up the entries you need.",
+    ),
+    (
+        "복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 바꾸면 같은 열쇠 파일을 쓰는 다른 금고 파일은 '복원'으로만 열립니다. 복원한 파일을 계속 쓰려면 잠근 뒤 로그인으로 여세요.",
+        "A restored vault does not change its key or receive a new key file: other vault files that use the same key file would then open only through Restore. To keep using the restored file, lock it and open it by logging in.",
+    ),
+    (
+        "이 PC의 열쇠 기록(goyo-vault.keys)을 처음에 읽지 못했거나 여는 동안 바뀌어 열지 않았습니다. 다시 여세요.",
+        "This PC's key record (goyo-vault.keys) could not be read at first, or changed while the vault was opening, so it was not opened. Open it again.",
+    ),
+    (
+        "이 PC에서 하던 열쇠 변경이 아직 끝나지 않았습니다. 원래 금고 파일을 그 열쇠 파일로 다시 열면 마저 끝납니다. 그때까지 복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받거나 서버에 올리거나 서버 사본을 합치지 않습니다. 필요한 항목을 확인하는 데 쓰세요.",
+        "A key change on this PC has not finished yet. Opening the original vault file with that key file finishes it. Until then the restored vault changes no key, receives no key file, uploads nothing and merges no server copy. Use it to look up the entries you need.",
+    ),
+    (
+        "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 열쇠 파일로 열면 마저 끝납니다. 그때까지 이 PC에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 더 쓸 수 없다면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.",
+        "A key change on this PC may have been saved in another key file ({path}), which could not be read. Opening the vault with that key file finishes it. Until then this PC changes no key and receives no key file. If that file is lost or can no longer be used, press [Discard the unfinished key change…] in 'Key management'.",
+    ),
+    (
+        "이 PC에서 하던 열쇠 변경이 {path}에 저장되었는지 확인하지 않고 그 기록을 버립니다. 그 열쇠 파일을 잃어버렸거나 더 쓸 수 없을 때만 계속하세요. 나중에 그 파일을 다시 찾으면 이 PC의 것으로 알아보지 못하고 다른 열쇠 파일처럼 다룹니다(갈라졌다면 '새 열쇠 파일 받기'로 합치세요). 계속할까요?",
+        "This discards the record of this PC's key change without checking whether it was saved in {path}. Continue only if that key file is lost or can no longer be used. If you find the file again later, this PC will not recognize it as its own and treats it like any other key file (if they diverged, join them with 'Receive a new key file'). Continue?",
+    ),
+    (
+        "끝나지 않은 열쇠 변경 기록을 버렸습니다. 이제 이 PC에서 열쇠를 바꾸거나 새 열쇠 파일을 받을 수 있습니다.",
+        "The record of the unfinished key change was discarded. This PC can now change keys and receive key files again.",
+    ),
+    (
+        "이 열쇠 파일은 아직 '열쇠 백업'으로 백업하지 않았습니다. 열쇠 파일을 잃으면 비밀번호가 있어도 열 수 없습니다.",
+        "This key file has not been backed up with 'Back up key' yet. If you lose the key file, the vault cannot be opened even with the password.",
+    ),
+    (
+        "이 PC가 마지막으로 본 열쇠 파일(수정 {old}) 대신 지금 열쇠 파일(수정 {new})을 이 금고의 열쇠 파일로 정합니다. 직접 예전 열쇠 파일로 되돌린 것이 맞을 때만 계속하세요. 그 뒤로 이 PC는 수정 {new}보다 나중의 열쇠 변경을 기억하지 않습니다. 계속할까요?",
+        "In place of the key file this PC saw last (revision {old}), this makes the current key file (revision {new}) this vault's key file. Continue only if you went back to the old key file yourself. Afterwards this PC no longer remembers key changes later than revision {new}. Continue?",
+    ),
+    (
+        "이 PC가 마지막으로 본 열쇠 파일(수정 {old}) 대신 지금 열쇠 파일(수정 {new})을 이 금고의 열쇠 파일로 정합니다. 직접 예전 열쇠 파일로 되돌린 것이 맞을 때만 계속하세요. 그 뒤로 이 PC는 수정 {new}보다 나중의 열쇠 변경을 기억하지 않습니다.\n서버 사본이 더 나중의 열쇠로 저장되어 있으면 그 뒤 동기화가 멈춥니다. 그 사본을 이 PC가 올렸다면 '열쇠 관리'에서 [서버 사본을 이 PC 상태로 덮어쓰기…]를 누르세요.\n계속할까요?",
+        "In place of the key file this PC saw last (revision {old}), this makes the current key file (revision {new}) this vault's key file. Continue only if you went back to the old key file yourself. Afterwards this PC no longer remembers key changes later than revision {new}.\nIf the server copy was saved under a later key, sync then stops. If this PC uploaded that copy, press [Overwrite the server copy with this PC's state…] under 'Key management'.\nContinue?",
+    ),
+    (
+        "이 PC에서 이 금고는 보안 키 열쇠 파일로 열었습니다. 비밀번호만으로 여는 열쇠 파일로는 열지 않습니다. 다른 PC에서 보안 키를 끈 것이 맞다면, 보안 키를 지원하는 고요 금고에서 원래 열쇠 파일로 연 뒤 '새 열쇠 파일 받기'로 받으세요.",
+        "On this PC this vault was opened with a security-key key file. It is not opened with a key file that needs only the password. If security keys were really turned off on another PC, open the vault with the original key file in a Goyo Vault with security-key support, then take the new file with 'Receive a new key file'.",
+    ),
+    (
+        "이 열쇠 파일에는 이 PC가 기록해 둔 키 제거 기록이 빠져 있습니다. 예전 열쇠 파일로 되돌려졌거나 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요. 다른 PC의 열쇠 파일이라면 이 PC의 원래 열쇠 파일로 연 뒤 '새 열쇠 파일 받기'로 받으세요.",
+        "This key file lacks a key removal this PC recorded. It may have been put back to an old key file or forged, so it was not opened. Use the latest key file (a key backup, another PC). If it is another PC's key file, open the vault with this PC's original key file, then take it with 'Receive a new key file'.",
+    ),
+    (
+        "이 열쇠 파일이 맞는 것이 확실하고 다른 방법이 없으면, 마지막 방법으로 고요 금고를 모두 닫고 %LOCALAPPDATA%\\GoyoVault 폴더의 goyo-vault.keys와 goyo-vault.keys.로 시작하는 .tmp 파일을 지운 뒤 다시 여세요. 이 PC에 있는 모든 금고의 열쇠 기록이 함께 지워집니다(README의 '이 PC의 열쇠 기록'을 보세요).",
+        "If you are sure this key file is right and nothing else works, as a last resort close every Goyo Vault, delete goyo-vault.keys and the .tmp files starting with goyo-vault.keys. in the %LOCALAPPDATA%\\GoyoVault folder, and open the vault again. This deletes the key records of every vault on this PC (see 'This PC's key record' in the README).",
+    ),
+    (
+        "이 열쇠 파일의 수정 번호(수정 {new})가 이 PC가 본 것(수정 {old})보다 비정상적으로 큽니다. 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.",
+        "This key file's revision (revision {new}) is abnormally far above the one this PC saw (revision {old}). It may be forged, so it was not opened. Use the latest key file (a key backup, another PC).",
+    ),
+    (
+        "이 PC의 열쇠 기록(goyo-vault.keys)은 더 새로운 고요 금고가 쓴 것이라 이 버전은 고치지 않습니다. 이번 세션 동안만 기억합니다. 더 새로운 고요 금고를 쓰세요.",
+        "This PC's key record (goyo-vault.keys) was written by a newer Goyo Vault, so this version does not change it and remembers this session only. Use the newer Goyo Vault.",
+    ),
+    (
+        "이 PC의 열쇠 상태 기록(goyo-vault.keys)을 저장하지 못했습니다. 이번 세션 동안만 기억합니다. 잠근 뒤에는 이 PC가 예전 열쇠 파일로 되돌려진 것을 알아채지 못하거나, 끊긴 열쇠 변경을 이 PC의 것으로 알아보지 못할 수 있습니다. %LOCALAPPDATA%\\GoyoVault 폴더의 쓰기 권한을 확인하세요.",
+        "This PC's key state record (goyo-vault.keys) could not be saved, so it is remembered for this session only. After locking, this PC may not notice that an old key file was put back, or may not recognize a cut-off key change as its own. Check the write permission of the %LOCALAPPDATA%\\GoyoVault folder.",
+    ),
+    (
+        "새 비밀번호가 지금 비밀번호와 같습니다.",
+        "The new password is the same as the current one.",
+    ),
+    (
+        "열쇠를 바꿨습니다. 금고 파일을 아직 새 열쇠로 다시 저장하지 못했습니다. 저장장치를 확인하세요. 다음 저장이나 잠금 해제 때 자동으로 마칩니다.",
+        "The key was changed. The vault file could not be saved under the new key yet. Check the drive. The next save or unlock finishes it automatically.",
+    ),
+    (
+        "열쇠 파일 이름 바꾸기가 끊겨 임시 파일로 두었습니다. 자동으로 다시 시도합니다.",
+        "Renaming the key file was cut off, so it was kept as a temporary file. It is tried again automatically.",
+    ),
+    (
+        "열쇠 파일과 그 임시 파일을 모두 찾지 못했습니다. 잠그기 전에 '열쇠 백업'으로 새 열쇠 파일을 저장하세요. 그 파일과 새 비밀번호로 이 금고를 열 수 있습니다.",
+        "Neither the key file nor its temporary file can be found. Before locking, save the new key file with 'Back up key'. That file and the new password open this vault.",
+    ),
+    (
+        "열쇠 파일을 저장하지 못했습니다(저장장치·쓰기 권한 확인). 아무것도 바뀌지 않았습니다.",
+        "The key file could not be saved (check the drive and write permission). Nothing was changed.",
+    ),
+    (
+        "열쇠 파일을 저장했는지 확인하지 못했습니다. 잠그기 전에 새 열쇠 파일을 다른 저장장치에 저장하세요. 그 파일과 새 비밀번호(와 보안 키)로 이 금고를 열 수 있습니다.",
+        "It could not be confirmed that the key file was saved. Before locking, save the new key file to another drive ('Back up key'). That file and the new password (and security key) open this vault.",
+    ),
+    (
+        "열쇠 파일을 저장했는지 확인하지 못해 금고를 잠갔습니다. 먼저 새 비밀번호(와 보안 키)로 열어 보세요. 열리지 않으면 예전 비밀번호로 여세요. 예전 열쇠 파일이 없어졌다면 열쇠 백업이 필요합니다.",
+        "It could not be confirmed that the key file was saved, so the vault was locked. First try opening it with the new password (and security key). If that fails, open it with the old password. If the old key file is gone, you need a key backup.",
+    ),
+    (
+        "확인한 지 오래되었거나 다른 화면에서 확인한 것이라 다시 확인해야 합니다. 처음부터 다시 하세요.",
+        "The confirmation is too old or came from another screen, so it must be done again. Start over.",
+    ),
+    (
+        "새 열쇠 파일이나 금고 파일을 검증하지 못해 쓰지 않았습니다. 아무것도 바뀌지 않았습니다.",
+        "The new key file or vault file did not pass verification, so it was not written. Nothing was changed.",
+    ),
+    (
+        "다른 PC나 백업에 이 PC보다 새 열쇠 파일이 있습니다(보안 키 추가 등). 먼저 '새 열쇠 파일 받기'로 그 파일을 받으세요. 이대로 바꾸면 두 열쇠 파일이 갈라집니다(나중에 받으면 합쳐집니다). 그래도 계속할까요?",
+        "Another PC or a backup has a newer key file than this PC (a security key added, for example). First take that file with 'Receive a new key file'. Changing the key now splits the two key files (taking it later joins them). Continue anyway?",
+    ),
+    (
+        "이 PC가 서버와 맞춰졌는지 확인되지 않았습니다. 다른 PC에서도 따로 열쇠를 바꾸면 두 열쇠가 갈라져 '새 열쇠 파일 받기'로 합쳐야 합니다. 계속할까요?",
+        "It is not confirmed that this PC is up to date with the server. If another PC also changes the key on its own, the two keys split and must be joined with 'Receive a new key file'. Continue?",
+    ),
+    (
+        "확인하거나 버릴 열쇠 기록이 없습니다.",
+        "There is no key record to confirm or discard.",
+    ),
+    ("QR 데이터가 너무 깁니다.", "The QR data is too long."),
+    (
+        "이 열쇠 파일은 이 PC가 마지막으로 본 열쇠 파일에서 이어진 새 버전이 아니라, 그와 갈라진 다른 열쇠 파일입니다(다른 PC에서 따로 열쇠를 바꿨거나, 누군가 예전 열쇠 파일로 새로 만들었을 수 있습니다). 그대로 쓰면 이 PC의 열쇠 변경이 사라지므로 열지 않았습니다.",
+        "This key file is not a later version of the key file this PC saw last, but another key file that split from it (another PC changed the key on its own, or someone made it from an old key file). Using it would lose this PC's key changes, so it was not opened.",
+    ),
+    (
+        "다른 PC에서 바꾼 것이 맞다면 이 PC의 원래 열쇠 파일(열쇠 백업)로 연 뒤 '새 열쇠 파일 받기'로 이 파일을 받으면 두 파일이 합쳐집니다. 그런 변경을 한 PC가 없다면 받지 말고 백업을 확인하세요.",
+        "If another PC really changed it, open the vault with this PC's original key file (a key backup), then take this file with 'Receive a new key file': the two files are joined. If no PC made such a change, do not take it, and check your backups.",
+    ),
+    (
+        "금고 파일도 이 열쇠 파일의 열쇠로 저장되어 있어 이 PC의 원래 열쇠 파일로는 열리지 않습니다. 이 PC의 금고 백업이 있으면 원래 열쇠 파일과 그 백업으로 연 뒤 '새 열쇠 파일 받기'로 이 열쇠 파일을 받고, 이 금고 파일은 그 뒤 '복원'으로 새 파일에 되살려 항목을 확인하세요.",
+        "The vault file is saved under this key file's key too, so this PC's original key file cannot open it. If you have a vault backup of this PC, open it with the original key file, take this key file with 'Receive a new key file', and afterwards restore this vault file to a new file with 'Restore from backup' to check its entries.",
+    ),
+    (
+        "이 금고 파일의 항목만 확인하려면 지금 이 열쇠 파일로 '복원'하세요(복원한 금고에서는 열쇠를 바꾸거나 올리지 않습니다).",
+        "To only look at this vault file's entries, restore it now with this key file (a restored vault changes no key and uploads nothing).",
+    ),
+    (
+        "이 금고 파일은 다른 PC에서 바꾼 새 열쇠 파일(수정 {V.epoch})로 저장되어 있어 이 열쇠 파일(수정 {K.epoch})로는 열리지 않습니다.",
+        "This vault file is saved with a new key file changed on another PC (revision {V.epoch}), so this key file (revision {K.epoch}) cannot open it.",
+    ),
+    (
+        "금고 파일을 여러 PC가 함께 쓰고 열쇠 파일은 PC마다 따로 두었다면, 열쇠를 바꾼 PC의 새 열쇠 파일을 USB로 가져와 그 파일로 여세요. 이 PC에서 따로 열쇠를 바꾼 적이 없다면 그 파일을 이 PC의 열쇠 파일 자리에 두어도 됩니다. 그 새 열쇠 파일이 어디에도 없다면 열쇠를 바꾼 PC의 열쇠 백업이 필요합니다.",
+        "If several PCs share the vault file and each keeps its own key file, bring the new key file of the PC that changed the key by USB and open the vault with it. If this PC never changed the key on its own, that file may take this PC's key file's place. If that new key file is nowhere, you need the key backup of the PC that changed the key.",
+    ),
+    (
+        "이 금고 파일은 다른 PC에서 바꾼 새 열쇠 파일(수정 {V.epoch})로 저장되어 있어 이 열쇠 파일(수정 {K.epoch})로는 열리지 않습니다.\r\n금고 파일을 여러 PC가 함께 쓰고 열쇠 파일은 PC마다 따로 두었다면, 열쇠를 바꾼 PC의 새 열쇠 파일을 USB로 가져와 그 파일로 여세요. 이 PC에서 따로 열쇠를 바꾼 적이 없다면 그 파일을 이 PC의 열쇠 파일 자리에 두어도 됩니다. 그 새 열쇠 파일이 어디에도 없다면 열쇠를 바꾼 PC의 열쇠 백업이 필요합니다.",
+        "This vault file is saved with a new key file changed on another PC (revision {V.epoch}), so this key file (revision {K.epoch}) cannot open it.\r\nIf several PCs share the vault file and each keeps its own key file, bring the new key file of the PC that changed the key by USB and open the vault with it. If this PC never changed the key on its own, that file may take this PC's key file's place. If that new key file is nowhere, you need the key backup of the PC that changed the key.",
+    ),
+    (
+        "이미 같은 열쇠 파일입니다.",
+        "It is the same key file already.",
+    ),
+    (
+        "이 열쇠 파일은 이 PC의 열쇠 파일보다 오래되었습니다.",
+        "This key file is older than this PC's key file.",
+    ),
+    (
+        "이 PC의 열쇠 파일에 이미 모두 들어 있습니다.",
+        "This PC's key file already holds everything in it.",
+    ),
+    (
+        "이 열쇠 파일은 이 금고의 것이 아닙니다.",
+        "This key file does not belong to this vault.",
+    ),
+    (
+        "이 열쇠 파일은 받지 않았습니다({reason}). 이 PC의 열쇠 파일과 맞지 않는 변경이 들어 있어 손상되었거나 위조되었을 수 있습니다. 다른 PC에서 바꾼 것이 맞다면 그 PC의 최신 열쇠 파일을 다시 가져오세요.",
+        "This key file was not taken ({reason}). It holds changes that do not fit this PC's key file, so it may be damaged or forged. If another PC really changed it, bring that PC's latest key file again.",
+    ),
+    ("수정 번호가 너무 큼", "revision number too large"),
+    ("제거 기록이 빠짐", "a key removal is missing"),
+    (
+        "이 PC는 지금 이 PC가 전에 쓴 것(수정 {old})보다 오래된 열쇠 파일로 열려 있어, 그 최신 열쇠 파일에서 이어지지 않은 열쇠 파일은 받지 않았습니다. 이 PC가 전에 쓴 최신 열쇠 파일(열쇠 백업)로 다시 연 뒤 받으세요. 지금 열쇠 파일이 맞다면 먼저 '열쇠 관리'에서 [이 열쇠 파일이 맞습니다]를 누르세요.",
+        "This PC is open with a key file older than the one it wrote before (revision {old}), so a key file that does not follow from that latest key file was not taken. Open the vault again with the latest key file this PC wrote (a key backup), then take it. If the current key file is right, first press [This key file is right] in 'Key management'.",
+    ),
+    (
+        "받을 열쇠 파일을 확인한 뒤에 이 PC의 열쇠 파일이나 그 파일이 바뀌었습니다. 처음부터 다시 하세요.",
+        "This PC's key file or the key file to take changed after it was checked. Start over.",
+    ),
+    (
+        "다른 PC에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. 그 PC의 새 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일에 덮어쓰지는 마세요. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+        "Another PC changed this vault's key, so sync stopped. Bring that PC's new key file by USB and take it with 'Key management › Receive a new key file'. Do not copy it over this PC's key file. Until then, this PC's changes are saved on this PC only.",
+    ),
+    (
+        "어느 PC에서도 열쇠를 바꾸지 않았다면 서버 사본이 위조되었을 수 있습니다. 열쇠를 바꾼 PC를 더 쓸 수 없다면 '열쇠 관리'에서 서버 사본을 이 PC 상태로 덮어쓸 수 있습니다.",
+        "If no PC changed the key, the server copy may be forged. If the PC that changed the key can no longer be used, you can overwrite the server copy with this PC's state in 'Key management'.",
+    ),
+    (
+        "다른 PC에서 이 금고에 보안 키를 켜서 동기화를 멈췄습니다. 이 고요 금고 빌드는 보안 키를 지원하지 않아 그 열쇠 파일을 받을 수 없습니다(docs/SECURITY_KEY.md).",
+        "Another PC turned on security keys for this vault, so sync stopped. This Goyo Vault build does not support security keys and cannot take that key file (docs/SECURITY_KEY.md).",
+    ),
+    (
+        "이 PC의 변경은 이 PC에만 저장됩니다. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.",
+        "This PC's changes are saved on this PC only. If nothing like that happened, the server copy may be forged.",
+    ),
+    (
+        "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 한 PC에서 '열쇠 관리 › 새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받으면 두 열쇠 파일을 합칩니다. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.",
+        "Two PCs changed the key separately, so the key files diverged. Sync stopped. On one PC, take the other PC's key file with 'Key management › Receive a new key file' to join the two key files. If nothing like that happened, the server copy may be forged.",
+    ),
+    (
+        "서버 사본이 이 PC의 예전 열쇠 이름을 달고 있지만 열리지 않아 동기화를 멈췄습니다. 손상되었거나 위조된 사본일 수 있습니다. 다른 PC가 새 사본을 올리면 다시 이어집니다.",
+        "The server copy names an old key of this PC's but does not open with it, so sync stopped. It may be damaged or forged. Sync resumes when another PC uploads a new copy.",
+    ),
+    (
+        "그럴 PC가 없다면 '열쇠 관리'에서 서버 사본을 이 PC 상태로 덮어쓸 수 있습니다. 이 PC의 변경은 이 PC에 저장되어 있습니다.",
+        "If there is no such PC, you can overwrite the server copy with this PC's state in 'Key management'. This PC's changes are saved on this PC.",
+    ),
+    (
+        "이 PC는 이 PC가 전에 쓴 것보다 오래된 열쇠 파일로 열려 있어 동기화를 멈췄습니다. 서버 사본은 합치지도 덮어쓰지도 않습니다. 이 PC가 전에 쓴 최신 열쇠 파일(열쇠 백업)로 다시 열거나 '열쇠 관리 › 새 열쇠 파일 받기'로 그 파일을 받으세요.",
+        "This PC is open with a key file older than the one it wrote before, so sync stopped. The server copy is neither merged nor overwritten. Open the vault again with the latest key file this PC wrote (a key backup), or take that file with 'Key management › Receive a new key file'.",
+    ),
+    (
+        "지금 열쇠 파일이 맞다면 '열쇠 관리'에서 [이 열쇠 파일이 맞습니다]를 누르세요. 이 PC의 변경은 이 PC에 저장되어 있습니다.",
+        "If the current key file is right, press [This key file is right] in 'Key management'. This PC's changes are saved on this PC.",
+    ),
+    (
+        "다른 PC의 열쇠 파일이 이 PC의 것보다 새롭습니다. 동기화를 멈췄습니다. 그 열쇠 파일을 USB로 가져와 '열쇠 관리 › 새 열쇠 파일 받기'로 받으세요. 그 전에는 이 PC에서 열쇠를 바꾸지 마세요.",
+        "Another PC's key file is newer than this PC's. Sync stopped. Bring that key file by USB and take it with 'Key management › Receive a new key file'. Do not change the key on this PC before that.",
+    ),
+    (
+        "예전 열쇠로 만든 서버 사본은 합치지 않고 이 PC의 상태로 덮었습니다. 새 열쇠 파일을 아직 받지 않은 PC가 있으면 그 PC에서 '새 열쇠 파일 받기'를 하세요. 그 PC의 변경은 그 뒤에 합쳐집니다.",
+        "A server copy made with an old key was overwritten with this PC's state, not merged. If a PC has not taken the new key file yet, use 'Receive a new key file' on that PC. Its changes are merged after that.",
+    ),
+    (
+        "그런 PC가 없다면 예전 열쇠 사본을 가진 누군가가 올린 것일 수 있습니다.",
+        "If there is no such PC, someone with an old copy of the key may have uploaded it.",
+    ),
+    (
+        "다른 PC에서 이 금고의 열쇠가 바뀐 것으로 보입니다. 먼저 '새 열쇠 파일 받기'를 하세요. 서버 사본이 위조된 것이 확실할 때만 계속하세요. 계속하면 두 PC의 열쇠가 갈라져 나중에 '새 열쇠 파일 받기'로 합쳐야 합니다. 그래도 계속할까요?",
+        "This vault's key seems to have been changed on another PC. First use 'Receive a new key file'. Continue only if you are sure the server copy is forged. If you continue, the two PCs' keys diverge and must be joined later with 'Receive a new key file'. Continue anyway?",
+    ),
+    (
+        "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라진 것으로 보입니다. 먼저 '새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받아 합치세요. 서버 사본이 위조된 것이 확실할 때만 계속하세요. 계속하면 열쇠 파일이 더 갈라져 나중에 '새 열쇠 파일 받기'로 합쳐야 합니다. 그래도 계속할까요?",
+        "Two PCs seem to have changed the key separately, so the key files diverged. First take the other PC's key file with 'Receive a new key file' to join them. Continue only if you are sure the server copy is forged. If you continue, the key files diverge further and must be joined later with 'Receive a new key file'. Continue anyway?",
+    ),
+    (
+        "서버의 최신 사본(수정 {epoch}, 열쇠 {key}, 서버 버전 {v})을 이 PC의 상태로 덮어씁니다. 그 사본은 합치지 않고 서버 기록에만 남습니다. 다른 PC에서 열쇠를 바꾼 것이 맞다면 덮어쓰지 말고 그 PC의 열쇠 파일을 받으세요.",
+        "This overwrites the server's latest copy (revision {epoch}, key {key}, server version {v}) with this PC's state. That copy is not merged; it stays only in the server history. If another PC really changed the key, do not overwrite: take that PC's key file instead.",
+    ),
+    (
+        "그 PC를 더 쓸 수 없거나 위조된 사본이 확실할 때만 계속하세요. 다른 PC에 더 새 열쇠 파일이 있다면 그 PC는 이후 이 PC의 사본을 예전 열쇠 사본으로 보고 덮어씁니다.",
+        "Continue only if that PC can no longer be used, or you are sure the copy is forged. If another PC has a newer key file, it will later treat this PC's copy as an old-key copy and overwrite it.",
+    ),
+    (
+        "서버의 최신 사본(수정 {epoch}, 열쇠 {key}, 서버 버전 {v})을 이 PC의 상태로 덮어씁니다. 그 사본은 합치지 않고 서버 기록에만 남습니다. 다른 PC에서 열쇠를 바꾼 것이 맞다면 덮어쓰지 말고 그 PC의 열쇠 파일을 받으세요.\r\n그 PC를 더 쓸 수 없거나 위조된 사본이 확실할 때만 계속하세요. 다른 PC에 더 새 열쇠 파일이 있다면 그 PC는 이후 이 PC의 사본을 예전 열쇠 사본으로 보고 덮어씁니다.",
+        "This overwrites the server's latest copy (revision {epoch}, key {key}, server version {v}) with this PC's state. That copy is not merged; it stays only in the server history. If another PC really changed the key, do not overwrite: take that PC's key file instead.\r\nContinue only if that PC can no longer be used, or you are sure the copy is forged. If another PC has a newer key file, it will later treat this PC's copy as an old-key copy and overwrite it.",
+    ),
+    (
+        "멈춘 동기화가 없어 덮어쓸 서버 사본이 없습니다.",
+        "Sync is not stopped, so there is no server copy to overwrite.",
+    ),
+    (
+        "확인한 뒤에 서버의 최신 사본이 바뀌어 덮어쓰지 않았습니다. 처음부터 다시 하세요.",
+        "The server's latest copy changed after it was checked, so it was not overwritten. Start over.",
+    ),
+    (
+        "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n계속할까요?",
+        "This changes the key: the vault is encrypted again with a new data key, and a new key file is written.\n• Afterwards the old key file and old password (or a removed security key) cannot open what you save from now on. Backups made before the change and older versions on the server still open with an old key copy.\n• Version 0.8 and older can no longer open this vault.\n• When it is done, back up the new key file.\nContinue?",
+    ),
+    (
+        "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n• 동기화 중인 금고입니다. 다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다(USB로 '새 열쇠 파일 받기'). 열쇠는 한 번에 한 PC에서만 바꾸고, 서버 스크립트와 모든 PC(고요 금고·goyo-sync)를 먼저 0.9.0으로 업데이트하세요.\n계속할까요?",
+        "This changes the key: the vault is encrypted again with a new data key, and a new key file is written.\n• Afterwards the old key file and old password (or a removed security key) cannot open what you save from now on. Backups made before the change and older versions on the server still open with an old key copy.\n• Version 0.8 and older can no longer open this vault.\n• When it is done, back up the new key file.\n• This vault syncs. Other PCs stop syncing until they take this key file (by USB, with 'Receive a new key file'). Change the key on one PC at a time, and first update the server script and every PC (Goyo Vault and goyo-sync) to 0.9.0.\nContinue?",
+    ),
+    (
+        "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요? 예전 열쇠 백업으로는 앞으로 저장하는 내용을 열 수 없습니다.",
+        "The key file changed. Back up the new key file now? An old key backup cannot open what you save from now on.",
+    ),
+    (
+        "열쇠 파일을 저장했는지 확인하지 못했습니다. 잠그기 전에 새 열쇠 파일을 다른 저장장치에 저장하세요. 그 파일과 새 비밀번호(와 보안 키)로 이 금고를 열 수 있습니다.\n지금 저장할까요?",
+        "Could not confirm that the key file was saved. Before the vault locks, save the new key file to another drive. That file and the new password (and security key) open this vault.\nSave it now?",
+    ),
+    (
+        "열쇠 확인 코드: {code}. 다른 PC에서 새 열쇠 파일을 받은 뒤 그 PC의 코드와 같은지 비교하세요.",
+        "Key check code: {code}. Once another PC has taken the new key file, check that its code is the same.",
+    ),
+    (
+        "받을 열쇠 파일은 다른 비밀번호로 잠겨 있습니다. 그 PC에서 바꾼 새 비밀번호를 입력하세요.",
+        "The key file to receive is locked with another password. Enter the new password set on that PC.",
+    ),
+    (
+        "이 열쇠 파일은 이 PC의 열쇠 파일에서 이어진 새 버전입니다. 그대로 받습니다.",
+        "This key file is a newer version that continues this PC's key file. It is taken as it is.",
+    ),
+    (
+        "이 열쇠 파일은 이 PC의 열쇠 파일과 갈라졌거나, 이 PC에서 추가한 것이 빠져 있습니다. 두 파일을 합치고 새 데이터 키(보안 키가 있으면 새 키세트 비밀도)로 금고를 다시 암호화합니다. 다른 PC는 그 뒤 이 PC의 열쇠 파일을 받아야 합니다.",
+        "This key file has diverged from this PC's key file, or lacks something added on this PC. The two files are joined, and the vault is encrypted again with a new data key (with security keys, also a new keyset secret). Other PCs must then take this PC's key file.",
+    ),
+    (
+        "받은 뒤의 열쇠 파일: 수정 {epoch}",
+        "Key file afterwards: revision {epoch}",
+    ),
+    (
+        "받은 뒤의 열쇠 확인 코드: {code}",
+        "Key check code afterwards: {code}",
+    ),
+    (
+        "앞으로도 이 PC의 비밀번호로 엽니다.",
+        "The vault still opens with this PC's password.",
+    ),
+    (
+        "앞으로는 가져온 열쇠 파일의 비밀번호로 엽니다.",
+        "From now on the vault opens with the received key file's password.",
+    ),
+    ("이 PC의 비밀번호 쓰기", "Use this PC's password"),
+    (
+        "두 PC에서 모두 비밀번호를 바꿨습니다. 앞으로 쓸 비밀번호를 정하세요. '이 PC의 비밀번호 쓰기'를 켜면 이 PC의 비밀번호를, 끄면 가져온 열쇠 파일의 비밀번호를 씁니다. 다른 PC는 받을 때 그 비밀번호를 입력합니다. 이대로 받을까요?",
+        "Both PCs changed the password. Choose the password to use from now on: with 'Use this PC's password' ticked, this PC's password; unticked, the received key file's password. Other PCs enter that password when they take the key file. Receive it like this?",
+    ),
+    (
+        "서버 사본 대신 이 PC의 상태를 올립니다. goyo-sync가 올리면 동기화가 다시 이어집니다.",
+        "This PC's state is uploaded in place of the server copy. Sync resumes once goyo-sync has uploaded it.",
+    ),
+    (
+        "지금 열쇠 파일을 이 금고의 열쇠 파일로 정했습니다. 동기화와 열쇠 변경을 다시 할 수 있습니다.",
+        "The current key file is now this vault's key file. Sync and key changes work again.",
+    ),
+    (
+        "서버 사본이 더 나중의 열쇠로 저장되어 있으면 동기화가 다시 멈춥니다. 그 사본을 이 PC가 올렸다면 [서버 사본을 이 PC 상태로 덮어쓰기…]를 누르세요.",
+        "If the server copy was saved under a later key, sync stops again. If this PC uploaded that copy, press [Overwrite the server copy with this PC's state…].",
+    ),
+    (
+        "끝나지 않은 열쇠 변경 버리기…",
+        "Discard the unfinished key change…",
+    ),
+    ("이 열쇠 파일이 맞습니다", "This key file is right"),
+    (
+        "서버 사본 때문에 동기화가 멈춰 있습니다. 그 사본을 올린 PC의 열쇠 파일을 받을 수 없을 때만 서버 사본을 덮어쓰세요.",
+        "A server copy has stopped sync. Overwrite the server copy only if the key file of the PC that uploaded it cannot be received.",
+    ),
+    (
+        "서버 사본을 이 PC 상태로 덮어쓰기…",
+        "Overwrite the server copy with this PC's state…",
+    ),
+    ("열쇠 관리", "Key management"),
+    (
+        "다른 PC에서 비밀번호를 바꿨다면 그 PC의 새 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.",
+        "If another PC changed the password, bring that PC's new key file by USB and take it with 'Receive a new key file'. Do not copy it over this PC's key file.",
+    ),
+    ("비밀번호 변경…", "Change password…"),
+    ("다른 PC의 열쇠 파일", "Another PC's key file"),
+    ("새 열쇠 파일 받기…", "Receive a new key file…"),
+    ("열쇠 확인 코드", "Key check code"),
+    (
+        "두 PC의 열쇠 확인 코드가 같으면 같은 열쇠 파일입니다. 열쇠를 바꾼 뒤 다른 PC에서 새 열쇠 파일을 받았다면 두 코드를 비교하세요.",
+        "Two PCs that show the same key check code have the same key file. After a key change, once another PC has taken the new key file, compare the two codes.",
+    ),
+    ("새 열쇠 파일 받기", "Receive a new key file"),
+    (
+        "다른 PC에서 바꾼 열쇠 파일을 이 PC의 열쇠 파일과 비교합니다. 이어진 새 버전이면 그대로 받고, 갈라졌으면 두 파일을 합칩니다. 받기 전에 무엇이 바뀌는지 보여 줍니다.",
+        "The key file changed on another PC is compared with this PC's. A newer version that continues it is taken as it is; a diverged one is joined with it. You see what changes before anything is taken.",
+    ),
+    ("받을 열쇠 파일", "Key file to receive"),
+    ("0.8 형식 열쇠 파일", "Key file in the 0.8 format"),
+    ("열쇠 파일 수정 {epoch}", "Key file revision {epoch}"),
+    ("이 PC의 현재 비밀번호", "This PC's current password"),
+    ("열기", "Open"),
+    (
+        "받을 열쇠 파일의 비밀번호가 이 PC와 다르면 열 때 그 비밀번호를 묻습니다.",
+        "If the key file to receive has another password than this PC's, you are asked for it when it is opened.",
+    ),
+    (
+        "받을 열쇠 파일을 고르세요.",
+        "Choose the key file to receive.",
+    ),
+    ("확인", "OK"),
+    ("받기", "Accept"),
 ];

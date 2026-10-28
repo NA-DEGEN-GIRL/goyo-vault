@@ -337,8 +337,12 @@ fn two_pcs_end_to_end() {
     assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
     let mut sb = b.unlock("");
     assert_eq!(sb.take_unlock_notice(), None);
-    // Nothing fetched yet: B offers its copy from no version; it loses to
-    // version 1, which B's app merges with nothing to add.
+    // Nothing fetched yet: B offers its copy from no version at its first
+    // poll that finds no incoming either (one listing could be the moment
+    // the helper replaces it); it loses to version 1, which B's app merges
+    // with nothing to add.
+    assert_eq!(b.outgoing(), None);
+    let _ = sb.poll_sync();
     assert_eq!(b.outgoing(), Some(0));
     assert_eq!(b.pass(), report(SyncState::Ok, 1, None, Some(1)));
     assert_eq!(b.incoming(), Some((1, first.clone())));
@@ -665,10 +669,12 @@ fn an_otp_vault_syncs_the_same_way() {
     );
     let mut sb = Session::restore(&fetched, &b.key, &b.vault, PASSWORD, &otp.next()).unwrap();
     // B's helper makes the folder; the restored session links on its next
-    // poll and offers its copy from no version.
+    // poll and offers its copy from no version at the poll after.
     assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
     assert_eq!(sb.badge(), None);
     assert!(sb.poll_sync().unwrap().badge_changed);
+    assert_eq!(b.outgoing(), None);
+    let _ = sb.poll_sync();
     assert_eq!(b.outgoing(), Some(0));
     assert_eq!(b.pass(), report(SyncState::Ok, 1, None, Some(1)));
     assert_eq!(notice(sb.poll_sync()), synced(&sb));

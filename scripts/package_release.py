@@ -30,11 +30,12 @@ for program in ('goyo-vault.exe', 'goyo-sync.exe'):
         for form in (private, private.replace('\\', '/')):
             if form.lower().encode() in binary.lower() or form.lower().encode('utf-16-le') in binary.lower():
                 sys.exit(f'Refusing to package: {program} contains a local path or user name ({form!r}).')
-    # The cheap test KDF exists only in builds with debug assertions
-    # (src/crypto.rs); its marker in a release exe means they were on.
-    marker = 'goyo-test-kdf'
-    if marker.encode() in binary.lower() or marker.encode('utf-16-le') in binary.lower():
-        sys.exit(f'Refusing to package: {program} contains the test KDF hook ({marker}).')
+    # The cheap test KDF and the anchor folder a test sets exist only in
+    # builds with debug assertions (src/crypto.rs, src/vault/anchor.rs);
+    # either marker in a release exe means they were on.
+    for marker, hook in (('goyo-test-kdf', 'test KDF'), ('goyo-test-anchor', 'test anchor folder')):
+        if marker.encode() in binary.lower() or marker.encode('utf-16-le') in binary.lower():
+            sys.exit(f'Refusing to package: {program} contains the {hook} hook ({marker}).')
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe', 'target/release/goyo-sync.exe'], cwd=root)
@@ -81,12 +82,14 @@ def pack(folder, staged, sums, archive, programs, exact=None):
     staged = staged + [checksums]
     names = [f'GoyoVault/{p.relative_to(folder).as_posix()}' for p in staged]
     # Explicit lists already keep these out; a slip in a list must not ship
-    # the private server settings, logs, vault data, local paths, server data
-    # or Python caches.
+    # the private server settings, logs, vault data, local paths, server data,
+    # this PC's key records (the anchor and the merge log, with their temp
+    # and lock files) or Python caches.
     for name in names:
         lower = name.lower()
         if lower.endswith(('goyo-sync.conf', '.log', '.log.1', '.pyc', '.goyo', '.goyokey', '.goyosync', '.goyolock', '.goyotmp', 'goyo-vault.paths')) \
-                or '/data/' in lower or '__pycache__' in lower or '.goyo.sync/' in lower:
+                or '/data/' in lower or '__pycache__' in lower or '.goyo.sync/' in lower \
+                or 'goyo-vault.keys' in lower or 'goyo-vault.merges' in lower:
             sys.exit(f'Refusing to package: {name} must never be in a release.')
     found = [n for n in names if n.lower().endswith(PROGRAMS)]
     if found != programs:

@@ -13,16 +13,32 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+mod anchor;
 pub mod keyfile;
 mod recover;
+mod rotate;
 mod sync;
+#[cfg(debug_assertions)]
+pub use anchor::set_anchor_dir;
+pub use anchor::{
+    ANCHOR_DOWNGRADE, ANCHOR_EPOCH, ANCHOR_FORK, ANCHOR_FORK_VAULT, ANCHOR_NEWER, ANCHOR_RELIST,
+    AnchorClass, SIDECAR_FAILED,
+};
+use anchor::{Decision, Refusal, Seen};
 use keyfile::{
     Bundle, EPOCH_LIMIT, EPOCH_MAX, EPOCH_SILENT, KEY_FILE_LIMIT, KeyFile, KeyState, Magic,
     NEWER_KEY_FORMAT, NO_SECURITY_KEY_SUPPORT, NO_SECURITY_KEY_SUPPORT_DAMAGED, encode_key,
 };
 pub use keyfile::{KeyInfo, key_info};
 pub use recover::Recovery;
-pub use sync::{SyncBadge, SyncEvent, SyncNotice};
+pub use rotate::{
+    ADOPT_CONTAINED, ADOPT_EQUAL, ADOPT_OLDER, ADOPT_REFUSED, ADOPT_ROLLBACK, Acks, AdoptCheck,
+    AdoptClass, AdoptPlan, Adopted, Change, Consent, Gate, GatePass, KEY_DAMAGED,
+    KEY_DAMAGED_LOCKED, KEY_NOT_SAVED, KEYTEMP, KEYTEMP_GONE, LostKeyAddOn, NOT_THIS_VAULT,
+    NOTHING_HELD, OVERRIDE_HEAD, OtherOpened, PassInForce, Preview, REAUTH_MAX, Reauth, Rekeyed,
+    SAMEPASS, Source, UnionPassword, VPENDING,
+};
+pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
 /// A vault without sync; 0.7.x and older read only this.
 const DATA_MAGIC_V1: &[u8; 8] = b"GOYOVA01";
@@ -51,14 +67,32 @@ const TOO_LARGE: &str = "파일 크기 제한 초과";
 /// A file is missing and a temp file of it is there that no unlock took
 /// back: only the user can tell what it holds.
 pub const LEFTOVER_TEMP: &str = "파일이 없고, 저장이 끊기며 남은 임시 파일(.goyotmp)이 같은 폴더에 있습니다. 지우지 마세요. 그 파일 이름을 원래 이름으로 바꾸면 복구될 수 있습니다.";
+/// The text of GAP_KEPT, for messages that add a line to it.
+macro_rules! gap_kept {
+    () => {
+        "파일 교체가 끊겨 임시 파일(.goyotmp)을 남겼습니다. 다음에 열 때 자동으로 복구합니다."
+    };
+}
 /// A vault or key file save whose replace was cut off (see atomic_write):
 /// the file is gone and its temp file holds the new state. The app locks,
 /// so that the next unlock takes it back.
-pub const GAP_KEPT: &str =
-    "파일 교체가 끊겨 임시 파일(.goyotmp)을 남겼습니다. 다음에 열 때 자동으로 복구합니다.";
-/// The vault file's key is not in the key file (spec §5.1 step 4). Stage
-/// 2's wording: "새 열쇠 파일 받기" arrives with stage 3.
-pub const KEY_NOT_IN_KEY_FILE: &str = "이 금고 파일은 이 열쇠 파일에 없는 열쇠로 저장되어 있습니다. 이 금고를 마지막으로 연 열쇠 파일을 선택하세요. 다른 PC에서 이 금고 파일의 열쇠를 바꿨다면 그 PC의 새 열쇠 파일로 여세요.";
+pub const GAP_KEPT: &str = gap_kept!();
+/// GAP_KEPT after a key change whose first vault file write hit the gap: the
+/// key did not change (S-GAP-NOTCHANGED).
+pub const GAP_NOT_CHANGED: &str = concat!(
+    gap_kept!(),
+    "\r\n",
+    "열쇠는 바꾸지 않았습니다. 지금까지 쓰던 비밀번호로 다시 여세요."
+);
+/// GAP_KEPT after a key change whose last vault file write hit the gap: the
+/// new key file is in place (S-GAP-CHANGED).
+pub const GAP_CHANGED: &str = concat!(
+    gap_kept!(),
+    "\r\n",
+    "열쇠 변경은 저장되었습니다. 다음에 열 때는 바뀐 열쇠 파일의 비밀번호로 여세요(비밀번호를 바꿨다면 새 비밀번호입니다). 연 뒤 '열쇠 백업'을 하세요."
+);
+/// The vault file's key is not in the key file (spec §5.1 step 4).
+pub const KEY_NOT_IN_KEY_FILE: &str = "이 금고 파일은 이 열쇠 파일에 없는 열쇠로 저장되어 있습니다. 이 금고를 마지막으로 연 열쇠 파일을 선택하세요. 다른 PC에서 열쇠를 바꿨다면 이 PC의 원래 열쇠 파일로 연 뒤 '열쇠 관리 › 새 열쇠 파일 받기'로 새 열쇠 파일을 받으세요.";
 /// The same for a Restore: the backup's key aged out of the key file.
 pub const KEY_NOT_IN_BACKUP: &str = "이 백업은 이 열쇠 파일에 없는 열쇠로 잠겨 있습니다. 그 백업을 만들 때의 열쇠 파일 사본으로 복원하세요.";
 /// A vault file whose key the key file lacks, and whose header says a
@@ -71,6 +105,9 @@ pub const VAULT_DAMAGED: &str = "금고 파일의 머리글이 손상되어 열 
 pub const OTHER_VAULT: &str = "열쇠 파일과 금고 파일이 서로 다른 금고의 것입니다.";
 /// The 8 MiB limit, which a vault file and a merge result must fit.
 const VAULT_FULL: &str = "금고 용량 제한(8 MiB)을 초과했습니다.";
+/// A key backup that did not read back as written.
+const BACKUP_NOT_VERIFIED: &str =
+    "열쇠 백업을 다시 읽어 확인하지 못했습니다. 다른 저장장치에 다시 백업하세요.";
 /// An unlock or Restore that must save the vault file again under the key
 /// file's format, whose header is 44 bytes longer than 0.8's (spec §4.3),
 /// where the contents do not fit any more: nothing is written, and the
@@ -79,6 +116,106 @@ pub const RESAVE_TOO_LARGE: &str = "이 금고 파일은 이 열쇠 파일의 �
 /// An older-key vault file that changed after the user agreed to open it,
 /// or one opened with no agreement at all (spec §5.2 step 4).
 pub const OLDER_NOT_CONFIRMED: &str = "확인한 뒤에 금고 파일이 바뀌어 열지 않았습니다. 다시 열어 보세요. 그런 일이 없었다면 누군가 금고 파일을 바꿔 넣었을 수 있으니 백업이나 서버 기록을 확인하세요.";
+/// KEY_NOT_IN_KEY_FILE for a vault file whose header names a later key-file
+/// state than this key file's: another PC changed the key of a vault file
+/// both open (spec §5.1 step 4), filled with the two epochs.
+pub const KEY_NOT_IN_KEY_FILE_NEWER: &str = concat!(
+    "이 금고 파일은 다른 PC에서 바꾼 새 열쇠 파일(수정 {V.epoch})로 저장되어 있어 이 열쇠 파일(수정 {K.epoch})로는 열리지 않습니다.",
+    "\r\n",
+    "금고 파일을 여러 PC가 함께 쓰고 열쇠 파일은 PC마다 따로 두었다면, 열쇠를 바꾼 PC의 새 열쇠 파일을 USB로 가져와 그 파일로 여세요. 이 PC에서 따로 열쇠를 바꾼 적이 없다면 그 파일을 이 PC의 열쇠 파일 자리에 두어도 됩니다. 그 새 열쇠 파일이 어디에도 없다면 열쇠를 바꾼 PC의 열쇠 백업이 필요합니다."
+);
+/// An older-key vault file under another key than the one this PC last used
+/// (spec §5.1 step 6): refused before any key derivation.
+pub const OLDER_REFUSED: &str = "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '복원'으로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.";
+/// An older-key vault file whose counters an honest vault never reaches
+/// (spec §5.2 step 5): nothing is written.
+pub const VAULT_COUNTERS: &str = "이 금고 파일은 예전 열쇠로 저장되어 있고 저장 횟수 기록이 비정상적으로 커서 열지 않았습니다. 손상되었거나 예전 열쇠 사본을 가진 누군가가 만든 파일일 수 있습니다. 비밀번호가 틀린 것이 아닙니다. 다른 백업이나 서버 기록을 확인하세요.";
+/// The highest `generation` and `seen` an older-key vault file may state:
+/// an honest vault gains at most one per edit or merge (spec §5.2 step 5).
+pub(crate) const GEN_CEILING: u64 = 1 << 40;
+/// S-NOTFINISHED: a key change of this PC that never landed was dropped.
+pub const NOT_FINISHED: &str =
+    "지난 열쇠 변경이 끝나지 않아 예전 열쇠로 열었습니다. 다시 바꾸려면 '열쇠 관리'를 쓰세요.";
+/// AUTH_ERROR when this PC's own key change never landed and the key file is
+/// still the one it confirmed (spec §5.12, S-HINT-INTERRUPTED).
+pub const AUTH_HINT_INTERRUPTED: &str = concat!(
+    crypto::auth_error!(),
+    "\r\n",
+    "열쇠 변경이 중간에 끊긴 흔적이 있습니다. 예전 비밀번호(와 보안 키)로 열어 보세요."
+);
+/// AUTH_ERROR when the key file is this PC's own change that landed: with
+/// the password it set (S-HINT-LANDED-NEW), the other file's it took
+/// (S-HINT-LANDED-OTHER), or another PC's set on top of it
+/// (S-HINT-LANDED-LATER).
+pub const AUTH_LANDED_NEW: &str = concat!(
+    crypto::auth_error!(),
+    "\r\n",
+    "이 PC에서 한 열쇠 변경은 저장되었습니다. 새로 정한 비밀번호로 여세요."
+);
+pub const AUTH_LANDED_OTHER: &str = concat!(
+    crypto::auth_error!(),
+    "\r\n",
+    "이 PC에서 받은 열쇠 파일은 저장되었습니다. 그 열쇠 파일의 비밀번호(다른 PC에서 정한 비밀번호)로 여세요."
+);
+pub const AUTH_LANDED_LATER: &str = concat!(
+    crypto::auth_error!(),
+    "\r\n",
+    "이 PC에서 한 열쇠 변경 뒤에 다른 PC가 이 열쇠 파일을 다시 바꿨습니다. 그 PC에서 정한 비밀번호로 여세요."
+);
+/// Rule (i)'s failure text for a key file that is only a temp file at or
+/// above this PC's confirmed state: the change almost finished, and only
+/// the new factors open it (spec §5.12).
+pub const CHANGE_DONE_NEWPASS: &str = "열쇠 변경이 거의 끝난 상태로 열쇠 파일이 임시 파일로 남았습니다. 새 비밀번호(와 보안 키)로 여세요. 예전 비밀번호로 열려면 예전 열쇠 파일 백업이 필요합니다.";
+/// S-LOCAL-ROLLBACK, filled with the confirmed epoch and the key file's.
+pub const LOCAL_ROLLBACK: &str = "이 열쇠 파일은 이 고요 금고가 전에 본 것(수정 {old})보다 오래되었습니다(수정 {new}). 직접 예전 백업으로 되돌렸거나, 같은 고요 금고 폴더를 다른 PC와 함께 쓰는데 그 PC에서 바꾼 새 열쇠 파일을 아직 받지 않은 경우라면 정상입니다(뒤의 경우 '새 열쇠 파일 받기'를 하세요). 그런 일이 없었다면 누군가 예전 열쇠 파일과 금고 파일로 바꿔 놓았을 수 있으니 백업을 확인하세요.";
+/// S-RESTORE-OLDKEY, filled with the confirmed epoch and the key file's.
+pub const RESTORE_OLDKEY: &str = "이 PC가 마지막으로 본 열쇠 파일(수정 {old})과 다른 열쇠 파일(수정 {new})로 복원했습니다. 복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받거나 서버에 올리거나 서버 사본을 합치지 않습니다. 필요한 항목을 확인하는 데 쓰세요.";
+/// Every Restore: a key change or adopt there would rotate the key file
+/// that the live vault file shares, which would then open only through
+/// Restore (spec §2.18 #54).
+pub const RESTORE_KEYS: &str = "복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 바꾸면 같은 열쇠 파일을 쓰는 다른 금고 파일은 '복원'으로만 열립니다. 복원한 파일을 계속 쓰려면 잠근 뒤 로그인으로 여세요.";
+/// The anchor under its lock is not what the precheck compared the key file
+/// with (it could not be read then, or another process wrote it since): the
+/// unlock does not stand on that comparison (spec §2.18 #60).
+pub const ANCHOR_REREAD: &str = "이 PC의 열쇠 기록(goyo-vault.keys)을 처음에 읽지 못했거나 여는 동안 바뀌어 열지 않았습니다. 다시 여세요.";
+/// S-RESTORE-PENDING: a key change of this PC waits for a login.
+pub const RESTORE_PENDING: &str = "이 PC에서 하던 열쇠 변경이 아직 끝나지 않았습니다. 원래 금고 파일을 그 열쇠 파일로 다시 열면 마저 끝납니다. 그때까지 복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받거나 서버에 올리거나 서버 사본을 합치지 않습니다. 필요한 항목을 확인하는 데 쓰세요.";
+/// S-PENDING-ELSEWHERE, filled with the key file's path.
+pub const PENDING_ELSEWHERE: &str = "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 열쇠 파일로 열면 마저 끝납니다. 그때까지 이 PC에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 더 쓸 수 없다면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.";
+/// S-PENDING-DISCARD, filled with the key file's path (danger, default No).
+pub const PENDING_DISCARD: &str = "이 PC에서 하던 열쇠 변경이 {path}에 저장되었는지 확인하지 않고 그 기록을 버립니다. 그 열쇠 파일을 잃어버렸거나 더 쓸 수 없을 때만 계속하세요. 나중에 그 파일을 다시 찾으면 이 PC의 것으로 알아보지 못하고 다른 열쇠 파일처럼 다룹니다(갈라졌다면 '새 열쇠 파일 받기'로 합치세요). 계속할까요?";
+/// S-PENDING-DISCARDED.
+pub const PENDING_DISCARDED: &str = "끝나지 않은 열쇠 변경 기록을 버렸습니다. 이제 이 PC에서 열쇠를 바꾸거나 새 열쇠 파일을 받을 수 있습니다.";
+/// S-KEYBACKUP-DUE: no key backup of this KF2 key file yet.
+pub const KEYBACKUP_DUE: &str = "이 열쇠 파일은 아직 '열쇠 백업'으로 백업하지 않았습니다. 열쇠 파일을 잃으면 비밀번호가 있어도 열 수 없습니다.";
+/// S-LOCAL-OK-CONFIRM, filled with the confirmed epoch and the key file's
+/// (danger, default No).
+pub const LOCAL_OK_CONFIRM: &str = "이 PC가 마지막으로 본 열쇠 파일(수정 {old}) 대신 지금 열쇠 파일(수정 {new})을 이 금고의 열쇠 파일로 정합니다. 직접 예전 열쇠 파일로 되돌린 것이 맞을 때만 계속하세요. 그 뒤로 이 PC는 수정 {new}보다 나중의 열쇠 변경을 기억하지 않습니다. 계속할까요?";
+/// The same for a vault that syncs: the server copy this PC wrote with the
+/// newer key file then halts sync, and only the head override replaces it
+/// (spec §2.18 #57).
+pub const LOCAL_OK_CONFIRM_SYNCED: &str = "이 PC가 마지막으로 본 열쇠 파일(수정 {old}) 대신 지금 열쇠 파일(수정 {new})을 이 금고의 열쇠 파일로 정합니다. 직접 예전 열쇠 파일로 되돌린 것이 맞을 때만 계속하세요. 그 뒤로 이 PC는 수정 {new}보다 나중의 열쇠 변경을 기억하지 않습니다.\n서버 사본이 더 나중의 열쇠로 저장되어 있으면 그 뒤 동기화가 멈춥니다. 그 사본을 이 PC가 올렸다면 '열쇠 관리'에서 [서버 사본을 이 PC 상태로 덮어쓰기…]를 누르세요.\n계속할까요?";
+thread_local! {
+    /// The last refusal with `{…}` slots this thread got, and their values.
+    static FILLED: std::cell::RefCell<Option<(&'static str, Vec<String>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Returns `text` and keeps `values` for its `{…}` slots (see
+/// refusal_values).
+fn refuse(text: &'static str, values: Vec<String>) -> &'static str {
+    FILLED.with(|f| *f.borrow_mut() = Some((text, values)));
+    text
+}
+/// The values for the `{…}` slots of `text`, a refusal this thread got last
+/// from this module, in order; None for any other text.
+pub fn refusal_values(text: &str) -> Option<Vec<String>> {
+    FILLED.with(|f| {
+        f.borrow()
+            .as_ref()
+            .filter(|(t, _)| *t == text)
+            .map(|(_, values)| values.clone())
+    })
+}
 
 /// Identifies one version of an entry across copies of a vault. Random for
 /// new and edited entries, derived for v1 entries (`v1_ids`); never zero.
@@ -429,6 +566,8 @@ impl Provision {
         );
         session.last = last;
         session._locks = locks;
+        session.serial = u64::from_le_bytes(*crypto::random::<8>()?);
+        session.anchor.dir = anchor::locate();
         let data = session.encode()?;
         atomic_write(&session.key_path, session.key_file.bytes(), false)?;
         if let Err(e) = session.write_with(&data, false) {
@@ -537,7 +676,7 @@ pub fn password_policy(s: &str) -> Result<()> {
 }
 
 /// What the public precheck found about the vault file (spec §5.1 steps
-/// 5-7; the anchor's comparison of the key file arrives with stage 3).
+/// 5-7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VaultClass {
     /// Under the key file's current key. `stale_key_file`: its header epoch,
@@ -545,7 +684,8 @@ pub enum VaultClass {
     /// key file's, so the key file was changed elsewhere.
     Current { stale_key_file: bool },
     /// Under an older key of the key file, and the very file the key file's
-    /// last change expects to replace: the unlock completes it silently.
+    /// last change expects to replace, a change not yet completed on this
+    /// PC: the unlock completes it silently.
     Resume,
     /// Under an older key, and not that file: only the user's yes (S-OLDER)
     /// completes it, and only for these bytes (`sha`).
@@ -554,45 +694,106 @@ pub enum VaultClass {
     /// under the current key (rule iii).
     Missing,
 }
-/// The public precheck of a login or Restore (spec §5.1). The anchor's
-/// class (stage 3) and a waiting server key file (the security-key build)
-/// join it here.
+/// The public precheck of a login or Restore (spec §5.1): the vault file's
+/// class and how the key file stands against this PC's anchor. A waiting
+/// server key file (the security-key build) joins it here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Precheck {
     pub vault: VaultClass,
+    pub anchor: AnchorClass,
 }
 /// The public precheck (spec §5.1): the key file's magic family, the vault
-/// file's header, the vault IDs and the key lookup, all before any password,
-/// touch or key derivation. Its refusals are final for these files and say
-/// nothing about the password, so none counts as a failed attempt.
-/// `restore`: the vault file is a backup the user picked, which opens under
-/// any key of the key file and is never taken from a temp file.
-pub fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<Precheck> {
+/// file's header, the vault IDs, this PC's anchor and the key lookup, all
+/// before any password, touch or key derivation. Its refusals are final for
+/// these files and say nothing about the password, so none counts as a
+/// failed attempt. `restore`: the vault file is a backup the user picked,
+/// which opens under any key of the key file and is never taken from a temp
+/// file.
+fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<(Precheck, Seen)> {
     // Step 1: a security-key file, decided on its magic alone. Step 2 for
     // the key file: a newer magic never became a KeyFile.
     if let Some(refusal) = key.refusal() {
         return Err(refusal);
     }
     let data = match read_bounded(vault, MAX_FILE) {
-        Ok(data) => data,
-        Err(_) if !restore && !vault.exists() => {
-            return Ok(Precheck {
-                vault: VaultClass::Missing,
-            });
-        }
+        Ok(data) => Some(data),
+        Err(_) if !restore && !vault.exists() => None,
         Err(e) => return Err(e),
     };
-    // Step 2 for the vault file: a newer format, or a damaged header.
-    let (_, header) = read_header(&data)?;
-    // Step 3: the vault IDs are public.
-    if key.vault_id().as_ref().map(|id| &id[..]) != data.get(8..24) {
-        return Err(OTHER_VAULT);
-    }
-    // Step 4: the key, by the key file's public key-ID list.
+    // Step 2 for the vault file: a newer format, or a damaged header. Step
+    // 3: the vault IDs are public.
+    let id = key.vault_id().ok_or(AUTH_ERROR)?;
+    let header = match &data {
+        Some(data) => {
+            let (_, header) = read_header(data)?;
+            if data.get(8..24) != Some(&id[..]) {
+                return Err(OTHER_VAULT);
+            }
+            Some(header)
+        }
+        None => None,
+    };
+    // Step 9 runs here, before every step that depends on the vault file
+    // (S23-3 #16): this PC's anchor against the key file alone.
+    let mut seen = anchor::look(&id, key, key.path(), restore);
+    let confirmed = seen.confirmed();
     let kf2 = key.header();
-    let index = key_index(kf2.map(|h| h.key_ids.as_slice()), &header)
-        .ok_or(not_in_key(&header, restore))?;
+    let class = match kf2 {
+        Some(h) => anchor::compare(h, confirmed.as_ref()),
+        None => anchor::compare_legacy(confirmed.as_ref()),
+    };
+    seen.class = match class {
+        Ok(class) => class,
+        // A Restore reads a backup with the key file of its time: it runs
+        // held instead (spec §5.1, S23-1 #17).
+        Err(Refusal::Fork) if restore => AnchorClass::Fork,
+        Err(Refusal::Fork) => {
+            // The vault file under the forked branch's key too: this PC's own
+            // key file alone will not open it (S23-2 #9).
+            let line = confirmed.as_ref().ok_or(ANCHOR_FORK)?;
+            let ids = match &header {
+                Some(header) => vec![header_key_id(kf2, header)],
+                None => recover::candidates(vault, MAX_FILE)
+                    .iter()
+                    .filter_map(|c| read_header(&c.bytes).ok())
+                    .map(|(_, header)| header_key_id(kf2, &header))
+                    .collect(),
+            };
+            let foreign = !ids.is_empty()
+                && ids
+                    .iter()
+                    .all(|i| i.is_some_and(|i| anchor::foreign_key(line, &i)));
+            return Err(if foreign {
+                ANCHOR_FORK_VAULT
+            } else {
+                ANCHOR_FORK
+            });
+        }
+        Err(refusal) => return Err(refused(refusal)),
+    };
+    let check = |vault| Precheck {
+        vault,
+        anchor: seen.class,
+    };
+    let (Some(data), Some(header)) = (data, header) else {
+        // Step 7: rule (iii) looks for a temp copy of the vault file.
+        return Ok((check(VaultClass::Missing), seen));
+    };
+    // Step 4: the key, by the key file's public key-ID list.
     let epoch = kf2.map_or(0, |h| h.epoch);
+    let Some(index) = key_index(kf2.map(|h| h.key_ids.as_slice()), &header) else {
+        return Err(match header {
+            _ if header.hardware() => NO_SECURITY_KEY_SUPPORT_VAULT,
+            _ if restore => KEY_NOT_IN_BACKUP,
+            // Another PC changed the key of a vault file both PCs open, each
+            // with its own key-file copy (S23-3 #8). The epoch is only words.
+            Header::Keyed { state, .. } if state.epoch > epoch => refuse(
+                KEY_NOT_IN_KEY_FILE_NEWER,
+                vec![state.epoch.to_string(), epoch.to_string()],
+            ),
+            _ => KEY_NOT_IN_KEY_FILE,
+        });
+    };
     let vault = match header {
         // Step 5.
         Header::Keyed { state, .. } if index == 0 => VaultClass::Current {
@@ -602,28 +803,44 @@ pub fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<Precheck> 
             stale_key_file: false,
         },
         // Step 6. `resume` is public here and checked again once the key
-        // file opens.
+        // file opens. A change whose completion this PC already saw does
+        // not complete again: its probe came back from a backup.
         _ => {
             let sha = sha256(&data);
-            if kf2.is_some_and(|h| h.resume == sha) {
+            let line = confirmed.as_ref();
+            let consumed = line.and_then(|l| l.state.consumed);
+            let vkey = line.and_then(|l| l.vkey);
+            if kf2.is_some_and(|h| h.resume == sha) && consumed != Some(sha) {
                 VaultClass::Resume
+            } else if !restore && vkey.is_some() && vkey != header_key_id(kf2, &header) {
+                // Only an older vault file under the key this PC last used is
+                // legitimate at login (S23-1 #2); a Restore takes any.
+                return Err(OLDER_REFUSED);
             } else {
                 VaultClass::Older { sha }
             }
         }
     };
-    Ok(Precheck { vault })
+    Ok((check(vault), seen))
 }
-/// What a vault file whose key the key file lacks gets (spec §4.5, §5.1
-/// step 4). This build has no security-key support, so a vault file that a
-/// security-key file wrote says so instead.
-fn not_in_key(header: &Header, restore: bool) -> &'static str {
-    if header.hardware() {
-        NO_SECURITY_KEY_SUPPORT_VAULT
-    } else if restore {
-        KEY_NOT_IN_BACKUP
-    } else {
-        KEY_NOT_IN_KEY_FILE
+/// The key ID a vault file header names: its own, or for GOYOVA01/02 the
+/// ID key's, which a KF2 key file lists last. None under a 0.8 key file,
+/// which lists none.
+fn header_key_id(kf2: Option<&keyfile::KeyHeader>, header: &Header) -> Option<[u8; 16]> {
+    match header {
+        Header::Keyed { key_id, .. } => Some(*key_id),
+        Header::Legacy => kf2.and_then(|h| h.key_ids.last().copied()),
+    }
+}
+/// The text of an anchor refusal (spec §5.10).
+fn refused(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Downgrade => ANCHOR_DOWNGRADE,
+        Refusal::Relist => ANCHOR_RELIST,
+        Refusal::Fork => ANCHOR_FORK,
+        Refusal::TooFar { old, new } => {
+            refuse(ANCHOR_EPOCH, vec![new.to_string(), old.to_string()])
+        }
     }
 }
 /// Whether an unlock or Restore error came with no wrong password or OTP
@@ -639,22 +856,32 @@ pub fn not_a_failure(e: &str) -> bool {
         VAULT_DAMAGED,
         OTHER_VAULT,
         KEY_NOT_IN_KEY_FILE,
+        KEY_NOT_IN_KEY_FILE_NEWER,
         KEY_NOT_IN_BACKUP,
         OLDER_NOT_CONFIRMED,
+        OLDER_REFUSED,
+        VAULT_COUNTERS,
         RESAVE_TOO_LARGE,
+        ANCHOR_DOWNGRADE,
+        ANCHOR_RELIST,
+        ANCHOR_FORK,
+        ANCHOR_FORK_VAULT,
+        ANCHOR_EPOCH,
+        ANCHOR_REREAD,
     ]
     .contains(&e)
 }
 /// What phase 1 of a login or Restore read (spec §5.1, §9.2a): the key
 /// file, or the temp file an interrupted save left in place of a missing or
-/// unparseable one (rule i), and the precheck. Phase 3 opens exactly these
-/// key file bytes.
+/// unparseable one (rule i), the precheck and what it found in the anchor.
+/// Phase 3 opens exactly these key file bytes.
 pub struct Prepared {
     source: PathBuf,
     key_path: PathBuf,
     key: KeyFile,
     key_temp: Option<PathBuf>,
     check: Precheck,
+    seen: Seen,
 }
 impl Prepared {
     pub fn check(&self) -> Precheck {
@@ -664,6 +891,68 @@ impl Prepared {
     /// authentication may mean that copy needs other factors.
     pub fn key_temp(&self) -> bool {
         self.key_temp.is_some()
+    }
+    /// What a failed authentication of these files says instead of
+    /// AUTH_ERROR (spec §5.12): rule (i)'s text for a key file that is only
+    /// a temp file, or AUTH_ERROR with a hint when this PC's own key change
+    /// left the key file as it is.
+    pub fn auth_failure(&self) -> Option<&'static str> {
+        if self.key_temp.is_some() {
+            // The temp file is the only key file. At or above the state this
+            // PC confirmed it is the change that almost finished: only the
+            // new factors open it.
+            let current = self.key.header().is_some_and(|h| {
+                self.seen
+                    .lines
+                    .vault
+                    .as_ref()
+                    .is_none_or(|l| h.epoch >= l.state.epoch)
+            });
+            return Some(if current {
+                CHANGE_DONE_NEWPASS
+            } else {
+                LEFTOVER_TEMP
+            });
+        }
+        let pending = self.seen.lines.pending.as_ref()?;
+        // A 0.8 key file's state needs its key, so precheck never finds it
+        // Equal; with a confirmed 0.8 state (after [이 열쇠 파일이 맞습니다]
+        // on a 0.8 pair) and a change built on it that never landed, it is
+        // the key file that change left (spec §5.12 (b)).
+        let confirmed_08 = self.check.anchor == AnchorClass::Legacy
+            && self
+                .seen
+                .lines
+                .vault
+                .as_ref()
+                .is_some_and(|l| l.state.epoch == 0);
+        match self.seen.pending {
+            // This PC's change never landed and the key file is the state it
+            // confirmed: the old password still opens it (S23-3 #3, #9).
+            Decision::Drop { overtaken: false }
+                if self.check.anchor == AnchorClass::Equal
+                    || confirmed_08
+                    || self.seen.lines.vault.is_none() =>
+            {
+                Some(AUTH_HINT_INTERRUPTED)
+            }
+            // The key file is this PC's change, or one written on top of it:
+            // its password is the one that change set, unless another PC set
+            // another since (S23-1 #9, S23-2 #6).
+            Decision::Promote { own: true } => {
+                let h = self.key.header()?;
+                let set = pending.state.hist.first()?.pwid;
+                if h.pw_id[..4] != set {
+                    Some(AUTH_LANDED_LATER)
+                } else {
+                    match pending.pw? {
+                        anchor::Pw::New => Some(AUTH_LANDED_NEW),
+                        anchor::Pw::Other => Some(AUTH_LANDED_OTHER),
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 }
 /// Phase 1 of a login: reads the key file and prechecks the vault file.
@@ -690,13 +979,14 @@ fn prepared(source: &Path, key_path: &Path, restore: bool) -> Result<Prepared> {
         }
     };
     let key = KeyFile::from_bytes(&key_path, bytes)?;
-    let check = precheck(&source, &key, restore)?;
+    let (check, seen) = precheck(&source, &key, restore)?;
     Ok(Prepared {
         source,
         key_path,
         key,
         key_temp,
         check,
+        seen,
     })
 }
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -711,9 +1001,9 @@ fn too_large_to_resave(e: &'static str) -> &'static str {
 /// step 6): a question in between may take a while, an unattended one not.
 const OTP_TYPED_MAX: u64 = 180;
 
-/// What an unlock did with the vault file's key, for its first status line
-/// (spec §5.2 step 10).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What an unlock, a key change or a later save found about the key and
+/// vault files, for the status lines (spec §5.2 step 10, §5.11).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KeyNotice {
     /// The vault file that a key change left under the old key is saved
     /// under the new one: the change is complete.
@@ -731,6 +1021,34 @@ pub enum KeyNotice {
     /// does not fit the key file's format: deleting or shortening entries
     /// lets the next save do it.
     ResaveTooLarge,
+    /// A key change of this PC that never landed was dropped (S-NOTFINISHED).
+    NotFinished,
+    /// The key file is an older state of this PC (S-LOCAL-ROLLBACK): key
+    /// changes, uploads and merges wait until the user confirms it. The
+    /// confirmed epoch and the key file's.
+    LocalRollback { old: u64, new: u64 },
+    /// A key change of this PC may have landed in the key file at this
+    /// path, which could not be read (S-PENDING-ELSEWHERE).
+    PendingElsewhere(PathBuf),
+    /// A Restore with a key file other than the one this PC confirmed
+    /// (S-RESTORE-OLDKEY): the restored session is held.
+    RestoreOldKey { old: u64, new: u64 },
+    /// A Restore while a key change of this PC waits for a login
+    /// (S-RESTORE-PENDING): held as well.
+    RestorePending,
+    /// No key backup of this KF2 key file yet (S-KEYBACKUP-DUE).
+    KeyBackupDue,
+    /// The anchor could not be written: this session remembers what it
+    /// should hold (S-SIDECAR-FAILED).
+    SidecarFailed,
+    /// A later version wrote the anchor (S-ANCHOR-NEWER).
+    AnchorNewer,
+    /// The new key file is only a temp file whose rename is retried
+    /// (S-KEYTEMP).
+    KeyTemp,
+    /// That temp file and the key file are both gone: back up the key file
+    /// from memory now (S-KEYTEMP-GONE).
+    KeyTempGone,
 }
 
 pub struct Session {
@@ -780,10 +1098,61 @@ pub struct Session {
     /// later save does, and every poll tries (spec §5.2 step 8). Never set
     /// by a replace gap, which ends every write (see write).
     resave_due: bool,
-    /// What the unlock did with the vault file's key, for the first status
-    /// line.
-    key_notice: Option<KeyNotice>,
+    /// What the unlock, a key change or a later save found, for the status
+    /// lines; taken by the app.
+    key_notices: Vec<KeyNotice>,
+    /// Random per session: a Reauth token names it (spec §5.3).
+    serial: u64,
+    /// This KF2 key file state has no key backup yet (S-KEYBACKUP-DUE).
+    key_backup_due: bool,
+    /// A key change could not tell whether it saved the key file (spec §5.5
+    /// S2), or its key file and the temp file standing in for it are both
+    /// gone: `unsaved_key` or the session's key file is the one copy that
+    /// opens the vault file, and `backup_key` writes it without comparing.
+    key_file_damaged: bool,
+    /// The new key file of a change that could not tell whether it saved
+    /// it. The session keeps the old keys and writes the vault file no more.
+    unsaved_key: Option<Vec<u8>>,
+    /// The key file's temp file after a replace gap of a key change (spec
+    /// §5.5 S2, E-S2b): its rename is retried at every save and poll.
+    key_temp: Option<PathBuf>,
+    /// The key file is an older state of this PC, or a Restore read a key
+    /// file other than the one this PC confirmed (spec §5.10): no key
+    /// change, outgoing write or merge until the user confirms it.
+    local_rollback: bool,
+    /// A Restore with such a key file, or while a key change of this PC
+    /// waits for a login: no adopt either (spec §5.1).
+    restore_held: bool,
+    /// Opened by a Restore, whatever its key file: no key change or adopt
+    /// (RESTORE_KEYS).
+    restored: bool,
+    /// A key change of this PC may have landed in the key file at this
+    /// path, which could not be read: no key change until it is decided
+    /// (spec §5.1 step 9).
+    pending_elsewhere: Option<PathBuf>,
+    /// This vault's lines of the anchor as this session knows them, and
+    /// whether they still have to be written (spec §5.10).
+    anchor: AnchorView,
+    /// A key change whose vault file could only be saved later: the save
+    /// that does it seals the change in the anchor (spec §5.5 S3).
+    seal_due: bool,
     _locks: Vec<FileLock>,
+}
+/// A session's view of the anchor (spec §5.10).
+#[derive(Default)]
+struct AnchorView {
+    /// The anchor's folder; None when there is none.
+    dir: Option<PathBuf>,
+    /// This vault's lines as last read or written.
+    lines: anchor::Lines,
+    /// `lines` could not be written yet: the in-memory fallback of a
+    /// password-only session, retried at every save and poll.
+    unsaved: bool,
+    /// The anchor is a later version's, or could not be read: never
+    /// written.
+    frozen: bool,
+    /// S-SIDECAR-FAILED or S-ANCHOR-NEWER was shown.
+    told: bool,
 }
 impl Session {
     /// A session with no entries yet, its files not yet read or written.
@@ -816,7 +1185,18 @@ impl Session {
             key_state,
             stale_key_file: false,
             resave_due: false,
-            key_notice: None,
+            key_notices: Vec::new(),
+            serial: 0,
+            key_backup_due: false,
+            key_file_damaged: false,
+            unsaved_key: None,
+            key_temp: None,
+            local_rollback: false,
+            restore_held: false,
+            restored: false,
+            pending_elsewhere: None,
+            anchor: AnchorView::default(),
+            seal_due: false,
             _locks: Vec::new(),
         }
     }
@@ -883,11 +1263,13 @@ impl Session {
             key_path,
             key,
             key_temp,
+            seen,
             ..
         } = prepared;
+        let login = destination.is_none();
         // Restore inputs and key files are immutable read snapshots. They may be
         // on read-only media; only the live output needs a writable sidecar lock.
-        let mut locks = if destination.is_none() {
+        let mut locks = if login {
             vec![FileLock::acquire(&source)?]
         } else {
             Vec::new()
@@ -906,20 +1288,40 @@ impl Session {
         let kf2_ids = kf2.map(|h| h.key_ids.as_slice());
         let keys = opened.bundle;
         let key_state = opened.state;
-        let (format, header, contents, index, vault_temp, resumed) =
+        // A 0.8 key file of a vault this PC converted: its state needs its
+        // data key, so the anchor compares it only now (spec §5.1 step 9).
+        // Refused as before any derivation: not a failed attempt.
+        let confirmed = seen.confirmed();
+        let mut class = seen.class;
+        if class == AnchorClass::Legacy {
+            let line = confirmed.as_ref().ok_or(AUTH_ERROR)?;
+            class = match anchor::compare_opened_legacy(key_state, line) {
+                Ok(class) => class,
+                Err(Refusal::Fork) if !login => AnchorClass::Fork,
+                Err(refusal) => return Err(refused(refusal)),
+            };
+        }
+        let consumed = confirmed.as_ref().and_then(|l| l.state.consumed);
+        let (format, header, mut contents, index, vault_temp, resumed) =
             match read_bounded(&source, MAX_FILE) {
                 Ok(data) => {
                     let (_, header) = read_header(&data)?;
-                    let index = key_index(kf2_ids, &header)
-                        .ok_or(not_in_key(&header, destination.is_some()))?;
+                    let index = key_index(kf2_ids, &header).ok_or(if header.hardware() {
+                        NO_SECURITY_KEY_SUPPORT_VAULT
+                    } else if login {
+                        KEY_NOT_IN_KEY_FILE
+                    } else {
+                        KEY_NOT_IN_BACKUP
+                    })?;
                     // A login takes an older-key vault file only as the one
                     // the key file's last change expects to replace (its
-                    // `resume`, authenticated now) or as the bytes the user
-                    // agreed to open; a Restore under any key.
+                    // `resume`, authenticated now) and that change did not
+                    // complete here yet, or as the bytes the user agreed to
+                    // open; a Restore under any key.
                     let mut resumed = false;
-                    if index > 0 && destination.is_none() {
+                    if index > 0 && login {
                         let sha = sha256(&data);
-                        resumed = kf2.is_some_and(|h| h.resume == sha);
+                        resumed = kf2.is_some_and(|h| h.resume == sha) && consumed != Some(sha);
                         if !resumed && confirmed_older != Some(sha) {
                             return Err(OLDER_NOT_CONFIRMED);
                         }
@@ -932,7 +1334,7 @@ impl Session {
                 // its temp copy under the current key (rule iii). A restore
                 // never takes a temp copy: its source is the file the user
                 // picked.
-                Err(e) if destination.is_none() && !source.exists() => {
+                Err(e) if login && !source.exists() => {
                     let (temp, format, header, contents) = recover::vault_candidate(
                         &source, &id, &keys, kf2_ids,
                     )
@@ -945,6 +1347,18 @@ impl Session {
                 }
                 Err(e) => return Err(e),
             };
+        // A vault file under an older key authenticates only under a key
+        // that old key-file copies hold: its counters are not trusted (spec
+        // §5.2 step 5). Refused above GEN_CEILING, before anything is
+        // written; `seen` never above `generation`, the OTP watermark never
+        // ahead of the clock, as a merge takes them.
+        if index > 0 {
+            if contents.generation > GEN_CEILING || contents.seen > GEN_CEILING {
+                return Err(VAULT_COUNTERS);
+            }
+            contents.seen = contents.seen.min(contents.generation);
+            contents.last = contents.last.min(otp::now()? / 30 + 1);
+        }
         // The key-file state, and how far the vault file proves it (spec
         // §4.3): its header counts only under the current key, and only up
         // to EPOCH_SILENT above the key file.
@@ -967,23 +1381,20 @@ impl Session {
             || matches!(header, Header::Keyed { state, .. } if state.epoch < key_state.epoch);
         // A synced copy is merged (in memory) before the OTP check, so that a
         // code already used on another PC is refused once its content synced.
+        // Not when this login is a local rollback: whoever put the older pair
+        // back may know its key, so nothing is fetched (S23-2 #5).
         let own = sync::Own {
             id: &id,
             keys: &keys,
-            kf2: kf2.map(|h| (h.current_key_id(), key_state)),
+            ids: kf2_ids,
+            state: key_state,
+            hold: class == AnchorClass::Rollback,
         };
-        let pending = sync::Pending::find(
-            destination.is_none(),
-            &source,
-            &key_path,
-            format,
-            own,
-            contents.view(),
-        );
+        let pending = sync::Pending::find(login, &source, &key_path, format, own, contents.view());
         let Contents {
             last,
             generation,
-            seen,
+            seen: seen_generation,
             entries,
             tombstones,
         } = contents;
@@ -1014,10 +1425,26 @@ impl Session {
         };
         // A backup or restore keeps the format, IDs, tombstones and counters.
         let mut s = Session::new(path, key_path, id, keys, key, key_state);
-        (s.last, s.format, s.generation, s.seen) = (step, format, generation, seen);
+        s.serial = u64::from_le_bytes(*crypto::random::<8>()?);
+        (s.last, s.format, s.generation, s.seen) = (step, format, generation, seen_generation);
         (s.entries, s.tombstones) = (entries, tombstones);
         (s.max_epoch, s.stale_key_file) = (max_epoch, stale_key_file);
         s._locks = locks;
+        s.anchor = AnchorView {
+            dir: seen.dir.clone(),
+            lines: seen.lines.clone(),
+            frozen: seen.newer,
+            ..AnchorView::default()
+        };
+        // An older state of this PC: held until the user confirms it. A
+        // Restore with a key file other than the confirmed one, or while a
+        // key change of this PC waits for a login, runs held too and takes
+        // no key file (spec §5.1).
+        let restore_held = !login
+            && (matches!(class, AnchorClass::Fork | AnchorClass::Rollback)
+                || seen.lines.pending.is_some());
+        s.local_rollback = class == AnchorClass::Rollback || restore_held;
+        (s.restore_held, s.restored) = (restore_held, !login);
         // The vault file's name back first, without replacing a file that
         // appeared meanwhile; if the rename fails, the contents are saved
         // under it instead.
@@ -1045,9 +1472,9 @@ impl Session {
         // not yet under the current key with this key file's header.
         let otp = s.uses_otp();
         let mut too_large = false;
-        if !merged && (destination.is_some() || otp || rekeyed) {
+        if !merged && (!login || otp || rekeyed) {
             let written = match s.encode() {
-                Ok(data) => s.write_with(&data, destination.is_none()),
+                Ok(data) => s.write_with(&data, login),
                 // A 0.8 file within 44 bytes of the limit: the longer
                 // header of this key file's format does not fit.
                 Err(e) if e == VAULT_FULL => {
@@ -1061,14 +1488,18 @@ impl Session {
                 // the file on disk still opens as it did. A replace gap is
                 // not a failed write: the newest state is only in its temp
                 // file, which the next unlock takes back (spec §5.7).
-                if s.gap_kept || destination.is_some() || otp {
+                if s.gap_kept || !login || otp {
                     return Err(e);
                 }
                 s.resave_due = true;
             }
         }
-        if destination.is_none() {
-            s.key_notice = if too_large {
+        if login {
+            // The anchor (spec §5.2 step 7, step 9): this PC's pending change
+            // promoted or dropped, the confirmed line of a new or later key
+            // file, and the vault file now current sealed. A Restore never
+            // writes it (S23-3 #18).
+            let first = if too_large {
                 Some(KeyNotice::ResaveTooLarge)
             } else if s.resave_due {
                 Some(KeyNotice::ResavePending)
@@ -1081,37 +1512,238 @@ impl Session {
             } else {
                 None
             };
+            s.key_notices.extend(first.clone());
+            let not_finished = s.anchor_at_unlock(&seen, class, index == 0, rekeyed)?;
+            if class == AnchorClass::Rollback {
+                let old = confirmed.as_ref().map_or(0, |l| l.state.epoch);
+                s.key_notices.push(KeyNotice::LocalRollback {
+                    old,
+                    new: key_state.epoch,
+                });
+            }
+            if let Some(path) = &s.pending_elsewhere {
+                s.key_notices
+                    .push(KeyNotice::PendingElsewhere(path.clone()));
+            }
+            // The unlock succeeded: the key file's name goes back to the temp
+            // copy it came from, or the session keeps using the copy.
+            let key_path = s.key_path.clone();
+            if let Some(temp) = key_temp
+                && !recover::restore_key(&temp, &key_path)
+            {
+                s.key_path = temp.clone();
+                s.recovered.key_kept = Some(temp);
+            }
+            // Temp files that hold nothing the opened files lack (rule iv).
+            // A key file's temp of a later epoch is a change that never
+            // landed: told once, with a pending entry dropped above.
+            if recover::clean(&s, &key_path) || not_finished {
+                s.key_notices
+                    .insert(usize::from(first.is_some()), KeyNotice::NotFinished);
+            }
+            s.key_backup_due = s.key_file.header().is_some()
+                && !s
+                    .anchor
+                    .lines
+                    .vault
+                    .as_ref()
+                    .is_some_and(|v| v.state.key_state() == key_state && v.state.flags.b);
+            if s.key_backup_due {
+                s.key_notices.push(KeyNotice::KeyBackupDue);
+            }
+        } else if restore_held {
+            let old = confirmed.as_ref().map_or(0, |l| l.state.epoch);
+            s.key_notices.push(if seen.lines.pending.is_some() {
+                KeyNotice::RestorePending
+            } else {
+                KeyNotice::RestoreOldKey {
+                    old,
+                    new: key_state.epoch,
+                }
+            });
+        }
+        // A login that moved the vault file to the current key, or completed
+        // a key change of this PC, offers its state at once, whatever
+        // incoming showed: an outgoing copy under an older key must not stay
+        // (spec §14.5 I5).
+        if login
+            && (rekeyed || matches!(seen.pending, Decision::Promote { .. }))
+            && let Some(link) = s.sync.as_mut()
+        {
+            link.mark_due();
         }
         // Outgoing only after the vault file: the server never holds content
-        // the file lacks.
+        // the file lacks. Held during a local rollback.
         s.flush_outgoing();
-        // The unlock succeeded: the key file's name goes back to the temp
-        // copy it came from, or the session keeps using the copy. A restore
-        // only reads its inputs, which may be on read-only media: the key
-        // file stays missing until the next unlock takes the copy back.
-        let key_path = s.key_path.clone();
-        if let Some(temp) = key_temp
-            && destination.is_none()
-            && !recover::restore_key(&temp, &key_path)
-        {
-            s.key_path = temp.clone();
-            s.recovered.key_kept = Some(temp);
-        }
-        // Temp files that hold nothing the opened files lack (rule iv).
-        if destination.is_none() {
-            recover::clean(&s, &key_path);
-        }
         Ok(s)
+    }
+    /// The anchor at a login (spec §5.2 step 7): a pending change of this PC
+    /// promoted when it landed, dropped when it never did; a new or later
+    /// password-only key file recorded silently; and, when the vault file
+    /// the unlock read is current under the key file's current key, or a
+    /// change completed and it is now, its key and the change's resume digest
+    /// sealed (`vkey`, `consumed`), so the change never completes silently
+    /// again. A 0.8 session writes nothing of its own. Every change of these
+    /// lines is one locked write, made only while they are still what the
+    /// precheck read; when it cannot be written, a password-only session
+    /// keeps it in memory. Returns whether a pending entry was dropped.
+    fn anchor_at_unlock(
+        &mut self,
+        seen: &Seen,
+        class: AnchorClass,
+        current_at_read: bool,
+        rekeyed: bool,
+    ) -> Result<bool> {
+        let snapshot = seen.lines.clone();
+        let mut wanted = snapshot.clone();
+        let mut dropped = false;
+        match &seen.pending {
+            Decision::Promote { .. } => {
+                if let Some(p) = wanted.pending.take() {
+                    wanted.vault = Some(p.promoted(wanted.vault.as_ref()));
+                }
+            }
+            Decision::Drop { .. } => {
+                // A dropped TOFU entry is no change of this PC's own.
+                dropped = snapshot
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.src != anchor::Src::Tofu);
+                wanted.pending = None;
+            }
+            Decision::Leave(path) => self.pending_elsewhere = Some(path.clone()),
+            Decision::None => {}
+        }
+        let kf2 = self.key_file.header().cloned();
+        if let Some(h) = &kf2 {
+            match class {
+                AnchorClass::New => wanted.vault = Some(anchor::line_of(h, None)),
+                AnchorClass::Newer => {
+                    wanted.vault = Some(anchor::line_of(h, wanted.vault.as_ref()));
+                }
+                _ => {}
+            }
+            let seal =
+                class != AnchorClass::Rollback && (current_at_read || (rekeyed && self.current()));
+            // The vault file could not be saved under the current key yet:
+            // the save that does it seals the change.
+            self.seal_due = !seal && class != AnchorClass::Rollback && rekeyed;
+            if let Some(v) = wanted.vault.as_mut().filter(|_| seal)
+                && v.state.key_state() == self.key_state
+            {
+                v.vkey = Some(h.current_key_id());
+                if h.resume != [0; 32] {
+                    v.state.consumed = Some(h.resume);
+                }
+            }
+        }
+        let changed = (&wanted.vault, &wanted.pending) != (&snapshot.vault, &snapshot.pending);
+        // Line order is recency: an unlock moves its vault's lines first.
+        let moved = kf2.is_some() && wanted.vault.is_some() && !snapshot.first;
+        let mut differed = false;
+        if changed || moved {
+            self.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
+                if (&lines.vault, &lines.pending) != (&snapshot.vault, &snapshot.pending) {
+                    differed = true;
+                    return false;
+                }
+                lines.vault = wanted.vault.clone();
+                lines.pending = wanted.pending.clone();
+                true
+            })?;
+        }
+        // The lines under the lock are not the ones the key file was
+        // compared with: a read that failed at precheck took a put-back key
+        // file for a new one, say. Nothing is written, and the next try
+        // compares again.
+        if differed {
+            return Err(ANCHOR_REREAD);
+        }
+        Ok(dropped)
+    }
+    /// Whether the vault file on disk is under the current key with this
+    /// key file's state: the change it waited for is complete.
+    fn current(&self) -> bool {
+        let Some(h) = self.key_file.header() else {
+            return false;
+        };
+        let head = keyfile::read_head(&self.path, KEYED_OVERHEAD + 32).unwrap_or_default();
+        matches!(
+            read_header(&head),
+            Ok((_, Header::Keyed { key_id, state, .. }))
+                if key_id == h.current_key_id() && state == self.key_state
+        )
+    }
+    /// Writes this vault's anchor lines through `change` (spec §5.10),
+    /// waiting at most `wait` for another process's lock. When the anchor
+    /// cannot be written, a password-only session keeps the lines in memory
+    /// and says so once (S-SIDECAR-FAILED, or S-ANCHOR-NEWER for a later
+    /// version's file, which is never written); every save and poll tries
+    /// again. Ok(false) then; Err only for a test's simulated crash.
+    fn anchor_update(
+        &mut self,
+        wait: std::time::Duration,
+        change: &mut dyn FnMut(&mut anchor::Lines) -> bool,
+    ) -> Result<bool> {
+        let failure = match (&self.anchor.dir, self.anchor.frozen) {
+            (Some(dir), false) => {
+                let held = self.anchor.unsaved.then(|| self.anchor.lines.clone());
+                let result = anchor::update(dir, &self.id, wait, &mut |lines| {
+                    if let Some(held) = &held {
+                        lines.vault.clone_from(&held.vault);
+                        lines.pending.clone_from(&held.pending);
+                    }
+                    change(lines) || held.is_some()
+                });
+                match result {
+                    Ok(lines) => {
+                        self.anchor.lines = lines;
+                        self.anchor.unsaved = false;
+                        return Ok(true);
+                    }
+                    #[cfg(test)]
+                    Err(anchor::Failure::Crash) => return Err(SIMULATED_CRASH),
+                    Err(failure) => failure,
+                }
+            }
+            (Some(_), true) => anchor::Failure::Newer,
+            (None, _) => anchor::Failure::Io,
+        };
+        let mut lines = self.anchor.lines.clone();
+        if change(&mut lines) {
+            self.anchor.lines = lines;
+            self.anchor.unsaved = true;
+        }
+        if failure == anchor::Failure::Newer {
+            self.anchor.frozen = true;
+        }
+        if self.anchor.unsaved && !std::mem::replace(&mut self.anchor.told, true) {
+            self.key_notices.push(if self.anchor.frozen {
+                KeyNotice::AnchorNewer
+            } else {
+                KeyNotice::SidecarFailed
+            });
+        }
+        Ok(false)
+    }
+    /// Writes the anchor lines this session holds only in memory, if any
+    /// (spec §5.10): at every save and poll, without waiting for a busy
+    /// lock.
+    fn retry_anchor(&mut self) {
+        if self.anchor.unsaved && !self.anchor.frozen {
+            let _ = self.anchor_update(std::time::Duration::ZERO, &mut |_| false);
+        }
     }
     /// What this unlock took back from temp files an interrupted save left;
     /// the next call returns nothing.
     pub fn take_recovery(&mut self) -> Recovery {
         std::mem::take(&mut self.recovered)
     }
-    /// What this unlock did with the vault file's key; the next call
-    /// returns nothing.
-    pub fn take_key_notice(&mut self) -> Option<KeyNotice> {
-        self.key_notice.take()
+    /// What the unlock, a key change or a later save found about the key
+    /// and vault files, in the order they are shown; the next call returns
+    /// only what came since.
+    pub fn take_key_notices(&mut self) -> Vec<KeyNotice> {
+        std::mem::take(&mut self.key_notices)
     }
     /// The key file's state (spec §4.3).
     pub fn key_state(&self) -> KeyState {
@@ -1130,14 +1762,58 @@ impl Session {
     pub fn gap_kept(&self) -> bool {
         self.gap_kept
     }
-    /// Whether this build can change this session's password. Key changes
-    /// of a KF2 key file (one a later build wrote here) arrive with the next
-    /// stage; until then nothing is written (spec §7.1, S23-2 #14).
-    pub fn password_change(&self) -> Result<()> {
-        if self.key_file.header().is_some() {
-            return Err(NEWER_KEY_FORMAT);
-        }
-        Ok(())
+    /// The key file is an older state of this PC, or a Restore read a key
+    /// file other than the one this PC confirmed: no key change, outgoing
+    /// write or merge until the user confirms it (spec §5.10).
+    pub fn local_rollback(&self) -> bool {
+        self.local_rollback
+    }
+    /// A Restore held as above, which takes no key file either (spec §5.1).
+    pub fn restore_held(&self) -> bool {
+        self.restore_held
+    }
+    /// Opened by a Restore: no key change or adopt (RESTORE_KEYS).
+    pub fn restored(&self) -> bool {
+        self.restored
+    }
+    /// A Restore held because a key change of this PC is still pending
+    /// (S-RESTORE-PENDING rather than S-RESTORE-OLDKEY).
+    pub fn restore_pending(&self) -> bool {
+        self.restore_held && self.anchor.lines.pending.is_some()
+    }
+    /// The key code of the key file's state (spec §4.8), as the Keys screen
+    /// shows it: `E{epoch} · XXXX-XXXX-XXXX-XXXX`. None for a 0.8 key file,
+    /// which has none.
+    pub fn key_code(&self) -> Option<String> {
+        self.key_file.header()?;
+        let code = keyfile::key_code(&self.id, self.keys.current(), self.key_state);
+        Some(code.show(self.key_state.epoch))
+    }
+    /// The key file a key change of this PC may have landed in, which could
+    /// not be read: no key change until an unlock with it, or the user's
+    /// discard (spec §5.1 step 9).
+    pub fn pending_elsewhere(&self) -> Option<&Path> {
+        self.pending_elsewhere.as_deref()
+    }
+    /// The key file of this state has no key backup yet.
+    pub fn key_backup_due(&self) -> bool {
+        self.key_backup_due
+    }
+    /// The new key file is only a temp file whose rename is retried (spec
+    /// §5.5 S2).
+    pub fn key_temp(&self) -> bool {
+        self.key_temp.is_some()
+    }
+    /// A key change could not tell whether it saved the new key file: this
+    /// session holds it for a key backup and writes nothing more (spec
+    /// §5.5 S2).
+    pub fn key_unsaved(&self) -> bool {
+        self.unsaved_key.is_some()
+    }
+    /// The epoch of the state this PC confirmed for this vault, for the
+    /// local-rollback texts; None without a line.
+    pub fn confirmed_epoch(&self) -> Option<u64> {
+        self.anchor.lines.vault.as_ref().map(|v| v.state.epoch)
     }
     fn data(&self) -> DataRef<'_> {
         DataRef {
@@ -1171,7 +1847,19 @@ impl Session {
     }
     pub fn save(&mut self) -> Result<()> {
         let data = self.encode()?;
-        self.write(&data)
+        self.write(&data)?;
+        // What a key change left to finish: the key file's name, and the
+        // anchor lines held in memory (spec §5.5 S2, §5.10).
+        self.seal_saved();
+        self.retry_key_temp();
+        self.retry_anchor();
+        Ok(())
+    }
+    /// Before the app locks: one more try at what a key change left to
+    /// finish (spec §5.5 S2).
+    pub fn before_lock(&mut self) {
+        self.retry_key_temp();
+        self.retry_anchor();
     }
     /// Writes `data`, a state of this session, as the vault file. A replace
     /// cut off by the FAT/exFAT gap leaves the vault file gone and the new
@@ -1188,6 +1876,12 @@ impl Session {
     fn write_with(&mut self, data: &[u8], replace: bool) -> Result<()> {
         if self.gap_kept {
             return Err(GAP_KEPT);
+        }
+        // A key change could not tell whether it saved the new key file: the
+        // vault file stays as it is, and both key files open it (spec §5.5
+        // S2).
+        if self.unsaved_key.is_some() {
+            return Err(rotate::KEY_DAMAGED);
         }
         let result = atomic_write(&self.path, data, replace);
         self.gap_kept = matches!(result, Err(AtomicError::GapKept(_)));
@@ -1329,15 +2023,56 @@ impl Session {
         let _lock = FileLock::acquire(&path)?;
         atomic_write(&path, &self.encode()?, false).map_err(Into::into)
     }
-    pub fn backup_key(&self, path: &Path) -> Result<()> {
-        if read_bounded(&self.key_path, KEY_FILE_LIMIT)? != self.key_file.bytes() {
-            return Err("열쇠 파일이 변경되었습니다. 잠근 뒤 새 비밀번호로 다시 열고 백업하세요.");
+    /// Saves a copy of the key file at `path` and reads it back (spec
+    /// §5.10). The key file on disk must still be this session's, or, after
+    /// a key change whose rename was cut off, the temp file standing in for
+    /// it. When a key change could not tell whether it saved the key file,
+    /// or once the key file and that temp file are both gone, the copy comes
+    /// from memory: it is the one key file that opens the vault file. A
+    /// backup of this session's KF2 state is recorded in the anchor (`b`).
+    pub fn backup_key(&mut self, path: &Path) -> Result<()> {
+        let bytes = match &self.unsaved_key {
+            Some(bytes) => bytes.clone(),
+            None => self.key_file.bytes().to_vec(),
+        };
+        if !self.key_file_damaged {
+            let disk = read_bounded(&self.key_path, KEY_FILE_LIMIT);
+            let disk = match &self.key_temp {
+                // The rename may have happened meanwhile, by this session or
+                // by another PC that opened the stick.
+                Some(temp) if disk.as_ref().ok() != Some(&bytes) => {
+                    read_bounded(temp, KEY_FILE_LIMIT)
+                }
+                _ => disk,
+            }?;
+            if disk != bytes {
+                return Err(
+                    "열쇠 파일이 변경되었습니다. 잠근 뒤 새 비밀번호로 다시 열고 백업하세요.",
+                );
+            }
         }
         let path = normalized(path)?;
         distinct(&path, &self.path)?;
         distinct(&path, &self.key_path)?;
         let _lock = FileLock::acquire(&path)?;
-        atomic_write(&path, self.key_file.bytes(), false).map_err(Into::into)
+        atomic_write(&path, &bytes, false)?;
+        if read_bounded(&path, KEY_FILE_LIMIT)? != bytes {
+            return Err(BACKUP_NOT_VERIFIED);
+        }
+        if self.unsaved_key.is_none() {
+            self.key_backup_due = false;
+            if self.key_file.header().is_some() {
+                let state = self.key_state;
+                self.anchor_update(anchor::LOCK_WAIT, &mut |lines| match lines.vault.as_mut() {
+                    Some(v) if v.state.key_state() == state && !v.state.flags.b => {
+                        v.state.flags.b = true;
+                        true
+                    }
+                    _ => false,
+                })?;
+            }
+        }
+        Ok(())
     }
     /// Whether this vault asks for an OTP code when it opens.
     pub fn uses_otp(&self) -> bool {
@@ -1367,39 +2102,6 @@ impl Session {
         if !self.key_file.open(password, None)?.bundle.same(&self.keys) {
             return Err(AUTH_ERROR);
         }
-        Ok(())
-    }
-    /// `input` is the phone's current code; ignored without an OTP. Only a
-    /// 0.8 key file so far, rewrapped in place (see password_change).
-    pub fn change_password(&mut self, current: &str, password: &str, input: &str) -> Result<()> {
-        self.password_change()?;
-        password_policy(password)?;
-        if current.len() > 1024 || (self.uses_otp() && !otp_format(input)) {
-            return Err(AUTH_ERROR);
-        }
-        let _lock = FileLock::acquire(&self.key_path)?;
-        if read_bounded(&self.key_path, KEY_FILE_LIMIT)? != self.key_file.bytes() {
-            return Err("열쇠 파일이 다른 곳에서 변경되었습니다. 잠근 뒤 다시 여세요.");
-        }
-        self.verify(current)?;
-        let step = match self.keys.otp() {
-            Some(secret) => {
-                otp::verify(secret, input, otp::now()?, Some(self.last)).map_err(|_| AUTH_ERROR)?
-            }
-            None => self.last,
-        };
-        let bytes = encode_key(&self.id, self.keys.current(), self.keys.otp(), password)?;
-        let key_file = KeyFile::from_bytes(&self.key_path, bytes)?;
-        // Only the OTP watermark changes. That is never synced, so the
-        // content counter stays.
-        let previous = self.last;
-        self.last = step;
-        if let Err(e) = self.save() {
-            self.last = previous;
-            return Err(e);
-        }
-        atomic_write(&self.key_path, key_file.bytes(), true)?;
-        self.key_file = key_file;
         Ok(())
     }
 }
@@ -1945,10 +2647,38 @@ thread_local! {
     /// for over 100 ms in a busy test run, longer than the retries last.
     static CLOSES_SOON: std::cell::RefCell<Option<File>> = const { std::cell::RefCell::new(None) };
 }
+#[cfg(test)]
+thread_local! {
+    /// The step of a key change whose writes run now (spec §14.5): "S0" to
+    /// "S5". A CRASH name "<step>.<point>", such as "S2.tmp_synced" or
+    /// "S3.gap", fires only within that step; a plain name fires at the
+    /// first write that reaches it.
+    pub(super) static STEP: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// Where CRASH points next once a "gap" has played out: a crash right
+    /// after a replace gap (spec §14.5, S1.gap to S3.gap).
+    pub(super) static THEN: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+/// Whether CRASH names `point`, plainly or qualified by the step that runs.
+#[cfg(any(test, debug_assertions))]
+fn crash_is(point: &str) -> bool {
+    let Some(set) = CRASH.with(|c| c.get()) else {
+        return false;
+    };
+    if set == point {
+        return true;
+    }
+    #[cfg(test)]
+    if let Some(step) = STEP.with(|s| s.get())
+        && set.strip_prefix(step).and_then(|r| r.strip_prefix('.')) == Some(point)
+    {
+        return true;
+    }
+    false
+}
 /// Err(SIMULATED_CRASH) once if a test set this point.
 #[cfg(test)]
 fn point(name: &'static str) -> Result<()> {
-    if CRASH.with(|c| c.get()) == Some(name) {
+    if crash_is(name) {
         CRASH.with(|c| c.set(None));
         return Err(SIMULATED_CRASH);
     }
@@ -1958,26 +2688,26 @@ fn point(name: &'static str) -> Result<()> {
 /// gap of a FAT or exFAT volume (see CRASH).
 fn publish_temp(temp: &Path, target: &Path, replace: bool) -> Result<()> {
     #[cfg(any(test, debug_assertions))]
-    match (CRASH.with(|c| c.get()), replace) {
-        (Some(step @ ("gap" | "gap_once")), true) => {
-            let _ = fs::remove_file(target);
-            CRASH.with(|c| c.set((step == "gap").then_some("gap_retry")));
-            return Err(SIMULATED_CRASH);
+    if replace && (crash_is("gap") || crash_is("gap_once")) {
+        let retry_fails = crash_is("gap");
+        let _ = fs::remove_file(target);
+        CRASH.with(|c| c.set(retry_fails.then_some("gap_retry")));
+        return Err(SIMULATED_CRASH);
+    } else if !replace && CRASH.with(|c| c.get()) == Some("gap_retry") {
+        #[cfg(test)]
+        let then = THEN.with(|t| t.take());
+        #[cfg(not(test))]
+        let then = None;
+        CRASH.with(|c| c.set(then));
+        return Err(SIMULATED_CRASH);
+    } else if replace && crash_is("unplugged") {
+        CRASH.with(|c| c.set(None));
+        for path in [temp, target] {
+            let mut away = path.as_os_str().to_owned();
+            away.push(".away");
+            let _ = fs::rename(path, away);
         }
-        (Some("gap_retry"), false) => {
-            CRASH.with(|c| c.set(None));
-            return Err(SIMULATED_CRASH);
-        }
-        (Some("unplugged"), true) => {
-            CRASH.with(|c| c.set(None));
-            for path in [temp, target] {
-                let mut away = path.as_os_str().to_owned();
-                away.push(".away");
-                let _ = fs::rename(path, away);
-            }
-            return Err(SIMULATED_CRASH);
-        }
-        _ => {}
+        return Err(SIMULATED_CRASH);
     }
     publish(temp, target, replace)
 }
@@ -2042,6 +2772,8 @@ mod workflow_tests {
     fn key_otp(path: &Path) -> Option<bool> {
         key_info(path).map(|i| i.otp)
     }
+    /// A test's folder, which is also its PC's anchor folder (`anchor` in
+    /// it): no test touches another's anchor or the developer's own.
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
@@ -2050,19 +2782,30 @@ mod workflow_tests {
                 u128::from_le_bytes(*crypto::random::<16>().unwrap())
             ));
             fs::create_dir(&p).unwrap();
+            set_anchor_dir(Some(p.join("anchor")));
             Self(p)
         }
         fn file(&self, n: &str) -> PathBuf {
             self.0.join(n)
         }
+        /// Another PC, or this PC with its anchor deleted: a fresh anchor
+        /// folder from now on.
+        fn other_anchor(&self, name: &str) -> PathBuf {
+            let dir = self.0.join(format!("anchor-{name}"));
+            set_anchor_dir(Some(dir.clone()));
+            dir
+        }
     }
     impl Drop for Temp {
         fn drop(&mut self) {
+            set_anchor_dir(None);
             for e in fs::read_dir(&self.0).unwrap() {
                 let e = e.unwrap();
-                // Sync folders (<vault>.sync) are the only folders tests make.
+                // Sync folders (<vault>.sync) and anchor folders are the only
+                // folders tests make.
+                let name = e.file_name().to_string_lossy().into_owned();
                 if e.file_type().unwrap().is_dir()
-                    && e.file_name().to_string_lossy().ends_with(".sync")
+                    && (name.ends_with(".sync") || name.starts_with("anchor"))
                 {
                     let _ = fs::remove_dir_all(e.path());
                     continue;
@@ -2072,6 +2815,32 @@ mod workflow_tests {
             }
             let _ = fs::remove_dir(&self.0);
         }
+    }
+    /// A password change as the app makes it: a Reauth with the current
+    /// password and a code typed now, then the key change, a gate answered
+    /// yes.
+    fn change_password(
+        s: &mut Session,
+        current: &str,
+        password: &str,
+        input: &str,
+    ) -> Result<Rekeyed> {
+        let r = s.reauth(current, Some((input, otp::now()?)), None)?;
+        let change = Change::Password(Zeroizing::new(password.to_owned()));
+        s.rekey(r, Vec::new(), change, Consent::default(), true)
+    }
+    /// Whether the key file at `path` opens with `password`.
+    fn opens(path: &Path, password: &str) -> bool {
+        KeyFile::read(path)
+            .and_then(|k| k.open(password, None))
+            .is_ok()
+    }
+    /// What an unlock says first about the key and vault files, but for the
+    /// reminder of a key backup.
+    fn key_notice(s: &mut Session) -> Option<KeyNotice> {
+        s.take_key_notices()
+            .into_iter()
+            .find(|n| *n != KeyNotice::KeyBackupDue)
     }
     fn entry(value: &str) -> Entry {
         Entry::new(
@@ -2182,15 +2951,19 @@ mod workflow_tests {
         s.delete(0).unwrap();
         assert!(s.entries.is_empty());
         s.put(None, entry("final secret")).unwrap();
-        assert!(s.change_password("wrong", changed, &input).is_err());
-        assert!(s.change_password(pass, changed, &input).is_err());
+        assert!(change_password(&mut s, "wrong", changed, &input).is_err());
+        assert!(change_password(&mut s, pass, changed, &input).is_err());
         s.last = 0; // simulate a later interval without sleeping
-        s.change_password(pass, changed, &input).unwrap();
+        assert_eq!(
+            change_password(&mut s, pass, changed, &input),
+            Ok(Rekeyed::Done)
+        );
+        // The 0.8 key file became a KF2 one, and the vault file moved to a
+        // new data key that the old key file lacks (spec §1 rule 15).
         assert_ne!(old_key, fs::read(&k).unwrap());
-        assert!(decode_key(&fs::read(&k).unwrap(), pass).is_err());
-        assert!(decode_key(&fs::read(&k).unwrap(), changed).is_ok());
+        assert!(!opens(&k, pass) && opens(&k, changed));
         let (_, old_master, _) = decode_key(&old_key, pass).unwrap();
-        assert!(decode_data(&p.id, &old_master, &old_master, &fs::read(&v).unwrap()).is_ok()); // documented non-revocation
+        assert!(decode_data(&p.id, &old_master, &old_master, &fs::read(&v).unwrap()).is_err());
         // Simulate time elapsed since backup without sleeping or weakening production verification.
         let old_backup = encode_data(
             &p.id,
@@ -2250,13 +3023,9 @@ mod workflow_tests {
         s.put(None, entry("no otp secret")).unwrap();
         s.backup(&b).unwrap();
         // Any code, or none, is ignored when the vault has no OTP.
-        s.change_password(pass, changed, "").unwrap();
-        assert!(
-            decode_key(&fs::read(&k).unwrap(), changed)
-                .unwrap()
-                .2
-                .is_none()
-        );
+        change_password(&mut s, pass, changed, "").unwrap();
+        let key = KeyFile::read(&k).unwrap();
+        assert!(!key.uses_otp() && key.open(changed, None).is_ok());
         assert_eq!(key_otp(&k), Some(false));
         drop(s);
         let before = fs::read(&v).unwrap();
@@ -2315,15 +3084,12 @@ mod workflow_tests {
         // Another vault copy can share this key; password rewrap must invalidate
         // this session's cached key backup instead of silently exporting it.
         let mut other = Session::restore(&src, &key, &t.file("other.goyo"), pass, &input).unwrap();
-        other.last = 0;
-        other
-            .change_password(pass, "another shared key password", &input)
-            .unwrap();
+        // As its login would be: a restored session changes no key (spec
+        // §2.18 #54).
+        (other.last, other.restored) = (0, false);
+        change_password(&mut other, pass, "another shared key password", &input).unwrap();
         assert!(s.backup_key(&t.file("stale.goyokey")).is_err());
-        assert!(
-            s.change_password(pass, "stale replacement password", &input)
-                .is_err()
-        );
+        assert!(change_password(&mut s, pass, "stale replacement password", &input).is_err());
         assert!(!t.file("stale.goyokey").exists());
         other.backup_key(&t.file("current.goyokey")).unwrap();
         drop(other);
@@ -2413,16 +3179,15 @@ mod workflow_tests {
         let before_key = fs::read(&k).unwrap();
         let before_vault = fs::read(&v).unwrap();
         assert_eq!(
-            s.change_password("incorrect password", next, &input)
-                .unwrap_err(),
+            change_password(&mut s, "incorrect password", next, &input).unwrap_err(),
             AUTH_ERROR
         );
         assert_eq!(
-            s.change_password(pass, next, "abc").unwrap_err(),
+            change_password(&mut s, pass, next, "abc").unwrap_err(),
             AUTH_ERROR
         );
         s.path = t.file("missing").join("failed.goyo");
-        assert!(s.change_password(pass, next, &input).is_err());
+        assert!(change_password(&mut s, pass, next, &input).is_err());
         assert_eq!(s.last, 0);
         assert_eq!(fs::read(&k).unwrap(), before_key);
         assert_eq!(fs::read(&v).unwrap(), before_vault);
@@ -2431,7 +3196,7 @@ mod workflow_tests {
         let mut read_only = original_permissions.clone();
         read_only.set_readonly(true);
         fs::set_permissions(&k, read_only).unwrap();
-        let result = s.change_password(pass, next, &input);
+        let result = change_password(&mut s, pass, next, &input);
         fs::set_permissions(&k, original_permissions).unwrap();
         assert!(result.is_err());
         assert!(s.last > 0);
@@ -2440,7 +3205,7 @@ mod workflow_tests {
         let (_, _, c) = decode_data(&p.id, &p.key, &p.key, &fs::read(&v).unwrap()).unwrap();
         assert_eq!(c.last, s.last);
         assert_eq!(
-            s.change_password(pass, next, &input).unwrap_err(),
+            change_password(&mut s, pass, next, &input).unwrap_err(),
             AUTH_ERROR
         );
     }
@@ -2829,13 +3594,19 @@ mod workflow_tests {
         let (format, _, c) = decode_data(&p.id, &p.key, &p.key, &fs::read(&b).unwrap()).unwrap();
         assert_eq!(format, Format::V2);
         check(&c);
-        // A password change, too, writes only the OTP watermark: no content
-        // change, so nothing to upload.
+        // A password change moves the file to a new data key and writes the
+        // OTP watermark, and no content change: nothing new to upload. Made
+        // as from a login of the restored file: a restored session changes
+        // no key (spec §2.18 #54).
         s.last = 0; // simulate a later interval without sleeping
-        s.change_password(pass, "another synthetic sync password", &input)
-            .unwrap();
-        let (format, _, c) = decode_data(&p.id, &p.key, &p.key, &fs::read(&out).unwrap()).unwrap();
+        s.restored = false;
+        change_password(&mut s, pass, "another synthetic sync password", &input).unwrap();
+        let saved = fs::read(&out).unwrap();
+        assert!(decode_data(&p.id, &p.key, &p.key, &saved).is_err());
+        let (format, header, c) =
+            decode_data(&p.id, s.keys.current(), s.keys.id_key(), &saved).unwrap();
         assert!(format == Format::V2 && c.last > 0);
+        assert_eq!(header, s.header());
         check(&c);
         drop(s);
     }
@@ -2974,7 +3745,7 @@ mod workflow_tests {
         assert_eq!(s.enable_sync(), Err(GAP_KEPT));
         assert_eq!(s.format(), Format::V1);
         assert_eq!(
-            s.change_password(pass, "synthetic other gap password", ""),
+            change_password(&mut s, pass, "synthetic other gap password", ""),
             Err(GAP_KEPT)
         );
         assert!(!v.exists() && temps(&v) == kept);
@@ -3390,6 +4161,10 @@ mod workflow_tests {
     fn header_of(path: &Path) -> Header {
         read_header(&fs::read(path).unwrap()).unwrap().1
     }
+    /// The header a session writes now.
+    fn current_of(s: &Session) -> Header {
+        s.header()
+    }
     fn secrets(s: &Session) -> Vec<String> {
         s.entries
             .iter()
@@ -3423,7 +4198,7 @@ mod workflow_tests {
         assert_eq!(fs::read(&v).unwrap(), before);
         assert_eq!(s.key_state(), state);
         assert_eq!((s.max_epoch(), s.stale_key_file()), (4, false));
-        assert_eq!(s.take_key_notice(), None);
+        assert_eq!(key_notice(&mut s), None);
         let mut by_id_key = es.to_vec();
         v1_ids(&id, &dk0, &mut by_id_key);
         let mut by_current = es.to_vec();
@@ -3489,13 +4264,13 @@ mod workflow_tests {
         fs::write(&k, &key).unwrap();
         assert_eq!(prepare(&v, &k).unwrap().check().vault, VaultClass::Resume);
         let mut s = Session::unlock(&v, &k, pass, "").unwrap();
-        assert_eq!(s.take_key_notice(), Some(KeyNotice::Resumed));
+        assert_eq!(key_notice(&mut s), Some(KeyNotice::Resumed));
         assert_eq!(secrets(&s), ["kept"]);
         assert_eq!(header_of(&v), current(&id, &dk1, state));
         drop(s);
         let completed = fs::read(&v).unwrap();
         let mut s = Session::unlock(&v, &k, pass, "").unwrap();
-        assert_eq!(s.take_key_notice(), None);
+        assert_eq!(key_notice(&mut s), None);
         drop(s);
         assert_eq!(fs::read(&v).unwrap(), completed);
 
@@ -3506,6 +4281,20 @@ mod workflow_tests {
             tag: [5; 16],
         };
         let older = kf2_vault(id, &dk0, planted_state, 0, Format::V1, &[entry("older")]);
+        fs::write(&v, &older).unwrap();
+        // This PC read the vault file as current under the new key: an
+        // older-key file is refused before any key derivation, and so is
+        // the probe the change completed, restored (S23-1 #2).
+        let derived = crypto::derive_count();
+        assert_eq!(prepare(&v, &k).err(), Some(OLDER_REFUSED));
+        fs::write(&v, &probe).unwrap();
+        assert_eq!(prepare(&v, &k).err(), Some(OLDER_REFUSED));
+        assert_eq!(Session::unlock(&v, &k, pass, "").err(), Some(OLDER_REFUSED));
+        assert_eq!(crypto::derive_count(), derived);
+        assert!(not_a_failure(OLDER_REFUSED));
+        // With no record of this vault on this PC (no anchor yet, or one
+        // deleted), only a yes for these very bytes opens such a file.
+        t.other_anchor("fresh");
         fs::write(&v, &older).unwrap();
         let prepared = prepare(&v, &k).unwrap();
         assert_eq!(
@@ -3540,7 +4329,7 @@ mod workflow_tests {
             panic!("not older");
         };
         let mut s = Session::login(prepared, pass, "", now, Some(sha)).unwrap();
-        assert_eq!(s.take_key_notice(), Some(KeyNotice::OlderAccepted));
+        assert_eq!(key_notice(&mut s), Some(KeyNotice::OlderAccepted));
         assert_eq!(secrets(&s), ["swapped"]);
         assert_eq!((s.max_epoch(), s.stale_key_file()), (1, false));
         assert_eq!(header_of(&v), current(&id, &dk1, state));
@@ -3551,7 +4340,7 @@ mod workflow_tests {
         fs::write(t.file("old-backup.goyo"), &older).unwrap();
         let mut s = Session::restore(&t.file("old-backup.goyo"), &k, &r, pass, "").unwrap();
         assert_eq!(
-            (secrets(&s), s.take_key_notice()),
+            (secrets(&s), key_notice(&mut s)),
             (vec!["older".into()], None)
         );
         assert_eq!(header_of(&r), current(&id, &dk1, state));
@@ -3639,7 +4428,8 @@ mod workflow_tests {
             OTHER_VAULT,
         );
         // A 0.8 key file lists no key ID: a GOYOVA03/04 file is under none
-        // of its keys.
+        // of its keys. Its header epoch, above a 0.8 key file's 0, says that
+        // another PC changed the key (S23-3 #8).
         let legacy = Provision::new().unwrap();
         fs::write(&k, encode_key(&legacy.id, &legacy.key, None, pass).unwrap()).unwrap();
         let header = Header::Keyed {
@@ -3650,8 +4440,13 @@ mod workflow_tests {
         let d = v1(0, &[]);
         refused(
             &encode_data(&legacy.id, &legacy.key, &header, Format::V1, d).unwrap(),
-            KEY_NOT_IN_KEY_FILE,
+            KEY_NOT_IN_KEY_FILE_NEWER,
             KEY_NOT_IN_BACKUP,
+        );
+        // The login's refusal names both epochs.
+        assert_eq!(
+            refusal_values(KEY_NOT_IN_KEY_FILE_NEWER),
+            Some(vec!["3".into(), "0".into()])
         );
         // Security-key files, damaged and newer ones included, on their
         // magic family alone.
@@ -3879,7 +4674,7 @@ mod workflow_tests {
             );
             let mut s = Session::unlock(&v, &k, pass, "").unwrap();
             assert_eq!((s.stale_key_file(), s.max_epoch()), (true, max));
-            assert_eq!(s.take_key_notice(), Some(KeyNotice::StaleKeyFile));
+            assert_eq!(key_notice(&mut s), Some(KeyNotice::StaleKeyFile));
             drop(s);
             assert_eq!(fs::read(&v).unwrap(), ahead);
         }
@@ -3892,11 +4687,13 @@ mod workflow_tests {
         .unwrap();
         let mut s = Session::unlock(&v, &k, pass, "").unwrap();
         assert_eq!((s.stale_key_file(), s.max_epoch()), (false, 5));
-        assert_eq!(s.take_key_notice(), None);
+        assert_eq!(key_notice(&mut s), None);
         drop(s);
         assert_eq!(header_of(&v), current(&id, &dk1, state));
         // A KF2 key file whose current key is the ID key and a 0.8 vault
-        // file under it: current, saved again in the GOYOVA03 format.
+        // file under it: current, saved again in the GOYOVA03 format. Another
+        // state of the vault from scratch, on a PC with no record of it.
+        t.other_anchor("one");
         let (one, one_state) = kf2_key(id, &[dk0], 1, None, [0; 32], pass);
         fs::write(&k, &one).unwrap();
         let legacy = encode_data(
@@ -3911,35 +4708,58 @@ mod workflow_tests {
         assert_eq!(header_of(&v), current(&id, &dk0, one_state));
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
-    /// This build cannot change a KF2 key file yet: nothing is written, and
-    /// no key is derived (spec §7.1, S23-2 #14).
+    /// A KF2 session's password change rotates the data key (spec §5.5):
+    /// the new key file holds the new key first and the old ones after it,
+    /// the vault file moves to the new key, and only the new password opens
+    /// the key file. The OTP backup and the key backup verify against it.
     #[test]
-    fn a_kf2_session_changes_no_password() {
+    fn a_kf2_session_changes_its_password() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let (v, k) = (t.file("vault.goyo"), t.file("vault.goyokey"));
-        let pass = "synthetic unchanged password";
+        let (pass, next) = (
+            "synthetic kf2 change password",
+            "another synthetic password",
+        );
         let (id, dk1, dk0) = ([0x47; 16], [0x51; 32], [0x50; 32]);
         let (key, state) = kf2_key(id, &[dk1, dk0], 2, None, [0; 32], pass);
         fs::write(&k, &key).unwrap();
-        fs::write(&v, kf2_vault(id, &dk1, state, 0, Format::V1, &[])).unwrap();
+        fs::write(
+            &v,
+            kf2_vault(id, &dk1, state, 0, Format::V1, &[entry("kept")]),
+        )
+        .unwrap();
         let mut s = Session::unlock(&v, &k, pass, "").unwrap();
-        let files = (fs::read(&v).unwrap(), fs::read(&k).unwrap());
-        let derived = crypto::derive_count();
-        assert_eq!(s.password_change(), Err(NEWER_KEY_FORMAT));
+        assert_eq!(s.password_change(), Ok(None));
+        assert_eq!(change_password(&mut s, pass, next, ""), Ok(Rekeyed::Done));
+        let h = keyfile::parse(&fs::read(&k).unwrap()).unwrap();
+        assert_eq!((h.epoch, h.kind), (3, keyfile::Kind::Password));
+        assert_eq!(h.key_ids.len(), 3);
         assert_eq!(
-            s.change_password(pass, "another synthetic password", ""),
-            Err(NEWER_KEY_FORMAT)
+            h.key_ids[1..],
+            [keyfile::key_id(&id, &dk1), keyfile::key_id(&id, &dk0)]
         );
-        assert_eq!(crypto::derive_count(), derived);
+        assert_eq!(s.key_state(), h.state());
+        assert_eq!(header_of(&v), current_of(&s));
+        assert!(!opens(&k, pass) && opens(&k, next));
+        assert!(decode_data(&id, &dk1, &dk0, &fs::read(&v).unwrap()).is_err());
+        // The same password again: refused before anything is written.
+        let files = (fs::read(&v).unwrap(), fs::read(&k).unwrap());
+        assert_eq!(change_password(&mut s, next, next, ""), Err(SAMEPASS));
         assert_eq!((fs::read(&v).unwrap(), fs::read(&k).unwrap()), files);
-        // The OTP backup and the key backup still verify against it.
         assert_eq!(
-            s.otp_setup(pass).err(),
+            s.otp_setup(next).err(),
             Some("이 금고는 OTP를 쓰지 않습니다.")
         );
+        assert!(s.key_backup_due());
         s.backup_key(&t.file("key-backup.goyokey")).unwrap();
-        assert_eq!(fs::read(t.file("key-backup.goyokey")).unwrap(), key);
+        assert_eq!(fs::read(t.file("key-backup.goyokey")).unwrap(), files.1);
+        assert!(!s.key_backup_due());
+        drop(s);
+        // The key backup is recorded: no reminder at the next unlock.
+        let mut s = Session::unlock(&v, &k, next, "").unwrap();
+        assert_eq!(s.take_key_notices(), []);
+        assert_eq!(secrets(&s), ["kept"]);
         drop(s);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -3976,12 +4796,13 @@ mod workflow_tests {
             // 0.8's decoder reads it: the ID key is the one key.
             let (_, _, c) = decode_data(&p.id, &p.key, &p.key, &fs::read(&v).unwrap()).unwrap();
             assert_eq!(ids(&c.entries), ids(&s.entries));
+            // Until the first key change: then GOYOKE03 and GOYOVA04 (spec
+            // §1 rule 15).
             s.last = 0; // a later interval, without sleeping
-            s.change_password(pass, "another 0.8 format password", &code)
-                .unwrap();
-            let key = fs::read(&k).unwrap();
-            assert_eq!((&key[..8], key.len()), (&magic[..], size));
-            assert_eq!(s.key_state(), state);
+            change_password(&mut s, pass, "another 0.8 format password", &code).unwrap();
+            assert_eq!(&fs::read(&k).unwrap()[..8], b"GOYOKE03");
+            assert_eq!(&fs::read(&v).unwrap()[..8], DATA_MAGIC_V4);
+            assert_eq!(s.key_state().epoch, state.epoch + 1);
             drop(s);
             let input = if with_otp { "" } else { "123456" };
             assert!(
@@ -4052,10 +4873,13 @@ mod workflow_tests {
         assert_eq!(header_of(&v), current(&id, &dk1, state));
         // The replace fails while another program holds the file open: the
         // session opens and says the save is pending; the next poll saves.
+        // On a PC with no record of the vault yet, so the older file is
+        // asked about again.
+        t.other_anchor("held");
         fs::write(&v, &older).unwrap();
         let held = File::open(&v).unwrap();
         let mut s = yes(&v).unwrap();
-        assert_eq!(s.take_key_notice(), Some(KeyNotice::ResavePending));
+        assert_eq!(key_notice(&mut s), Some(KeyNotice::ResavePending));
         assert!(s.resave_due);
         assert_eq!(fs::read(&v).unwrap(), older);
         drop(held);
@@ -4098,7 +4922,7 @@ mod workflow_tests {
         fs::write(&k, &key).unwrap();
         assert_eq!(prepare(&v, &k).unwrap().check().vault, VaultClass::Resume);
         let mut s = Session::unlock(&v, &k, pass, "").unwrap();
-        assert_eq!(s.take_key_notice(), Some(KeyNotice::ResaveTooLarge));
+        assert_eq!(key_notice(&mut s), Some(KeyNotice::ResaveTooLarge));
         assert!(s.resave_due);
         assert_eq!(fs::read(&v).unwrap(), old);
         assert_eq!(s.poll_sync(), None);
@@ -4119,7 +4943,9 @@ mod workflow_tests {
         );
         assert_eq!(crypto::derive_count(), derived + 1);
         assert!(not_a_failure(RESAVE_TOO_LARGE) && !r.exists());
-        // So does a login of an OTP vault, which saves the code it took.
+        // So does a login of an OTP vault, which saves the code it took (on a
+        // PC with no record of this other key file's state).
+        t.other_anchor("otp");
         let secret = [0x5c; 20];
         let (key, _) = kf2_key(id, &[dk1, dk0], 1, Some(&secret), sha256(&old), pass);
         fs::write(&k, &key).unwrap();
