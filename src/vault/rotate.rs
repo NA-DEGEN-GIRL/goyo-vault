@@ -1,7 +1,8 @@
 //! Key changes (spec v3 §5.5): re-authentication and the crash-safe rotation
-//! of the data key. This build changes the password and adopts another PC's
-//! password-only key file (`adopt`, spec v3 §5.8); the security-key changes
-//! join here in a later stage.
+//! of the data key. Every build changes the password and adopts another
+//! PC's password-only key file (`adopt`, spec v3 §5.8); the security-key
+//! build adds the changes with security keys (`hw`), through the same
+//! steps.
 //!
 //! A rotation writes, in this order: the anchor's pending line (S0), the
 //! vault file as it is under the old key (V_probe, S1), the new key file
@@ -35,11 +36,29 @@ use std::{
 use zeroize::Zeroizing;
 
 mod adopt;
+#[cfg(feature = "security-key")]
+mod hw;
+#[cfg(feature = "security-key")]
+pub use adopt::{ForkOption, KeyGates};
+#[cfg(feature = "security-key")]
+pub use hw::{
+    ANCHOR_FAILED, Exposure, KEYSOFF_SYNCED, LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED,
+    REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, UNION_FULL, UNREACHABLE,
+};
+#[cfg(feature = "security-key")]
+pub(super) use hw::{create_with_keys, probe_anchor};
+/// What S0 records beside the state a write becomes (spec §5.5 S0): the
+/// security-key build's removals, loss and broken pair records; nothing in
+/// the default build.
+#[cfg(not(feature = "security-key"))]
+type Landing = ();
 pub use adopt::{
     ADOPT_CONTAINED, ADOPT_EQUAL, ADOPT_OLDER, ADOPT_REFUSED, ADOPT_ROLLBACK, Acks, AdoptCheck,
     AdoptClass, AdoptPlan, Adopted, GatePass, LostKeyAddOn, NOT_THIS_VAULT, OtherOpened,
     PassInForce, Preview, Source, UnionPassword,
 };
+#[cfg(feature = "security-key")]
+use hw::Landing;
 
 /// How long a Reauth stays usable within its flow (spec §5.3).
 pub const REAUTH_MAX: Duration = Duration::from_secs(30 * 60);
@@ -108,13 +127,48 @@ pub struct Reauth {
     password: Zeroizing<String>,
     /// The OTP step verified and saved; None without an OTP code.
     otp_step: Option<u64>,
+    /// The touched key of a key file with security keys: S, its output and
+    /// what its pair records reach.
+    #[cfg(feature = "security-key")]
+    keys: Option<hw::Authorizer>,
     _lock: FileLock,
 }
-/// What a key change does (spec §5.5). The security-key changes join in a
-/// later stage.
+/// What a key change does (spec §5.5).
 pub enum Change {
     /// A new password: a rotation of the data key.
     Password(Zeroizing<String>),
+    /// Security keys for a key file without them (GOYOKH01): every key
+    /// registered in this flow, paired with every other, and optionally a
+    /// new password (S45-2 #3).
+    #[cfg(feature = "security-key")]
+    KeysOn {
+        pin: bool,
+        keys: Vec<crate::fido::NewKey>,
+        new_password: Option<Zeroizing<String>>,
+    },
+    /// One more key, paired with every key touched in the flow.
+    #[cfg(feature = "security-key")]
+    AddKey(crate::fido::NewKey),
+    /// Removes the keys numbered `remove` with one touch of a staying key
+    /// (a removal for a loss with its `loss` report). `over` names a waiting
+    /// change of another PC it is written on top of (§9.2), which needs the
+    /// key-file sync candidate of a later stage.
+    #[cfg(feature = "security-key")]
+    Remove {
+        remove: Vec<u8>,
+        new_password: Option<Zeroizing<String>>,
+        loss: Option<hw::LossReport>,
+        over: Option<(u64, [u8; 16])>,
+    },
+    /// Pairs the Reauth key with every key in `extra`.
+    #[cfg(feature = "security-key")]
+    Pair,
+    /// New seeds for every live key (`ReSeedPlan`).
+    #[cfg(feature = "security-key")]
+    ReSeed(Vec<hw::ReSeedKey>),
+    /// Back to a password-only key file (GOYOKE03), every key removed.
+    #[cfg(feature = "security-key")]
+    KeysOff,
 }
 /// The keys the user agreed to suspend (S-SUSPEND; security-key build).
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -262,15 +316,17 @@ struct Built {
     probe: Option<Vec<u8>>,
     /// The vault file under the new key file's current key and state.
     vault: Vec<u8>,
+    /// What S0 records beside the new state.
+    landing: Landing,
 }
 
 impl Session {
     /// Re-authenticates for one key change (spec §5.3): takes the key file's
     /// lock, requires the key file on disk to be this session's, and opens
-    /// it with `password` to this session's keys. A key change of an OTP
-    /// vault passes the code and when it was typed: it is checked against
-    /// the watermark and saved at once. No security key exists here, so
-    /// `touch` is always None.
+    /// it with `password` (and for a key file with security keys `touch`) to
+    /// this session's keys. A key change of an OTP vault passes the code and
+    /// when it was typed: it is checked against the watermark and saved at
+    /// once. The default build has no security key, so `touch` is None.
     pub fn reauth(
         &mut self,
         password: &str,
@@ -288,9 +344,14 @@ impl Session {
         if !self.key_on_disk()? {
             return Err(KEY_CHANGED);
         }
-        if !self.key_file.open(password, touch)?.bundle.same(&self.keys) {
+        let opened = self.key_file.open(password, touch)?;
+        if !opened.bundle.same(&self.keys) {
             return Err(AUTH_ERROR);
         }
+        // The touched key's own pair records (spec §5.3 step 3).
+        #[cfg(feature = "security-key")]
+        let keys = self.authorizer(&opened, touch)?;
+        drop(opened);
         let otp_step = match (self.keys.otp(), otp) {
             (Some(secret), Some((code, typed))) => {
                 let now = otp::now()?;
@@ -316,6 +377,8 @@ impl Session {
             created: Instant::now(),
             password: Zeroizing::new(password.to_owned()),
             otp_step,
+            #[cfg(feature = "security-key")]
+            keys,
             _lock: lock,
         })
     }
@@ -323,9 +386,19 @@ impl Session {
     /// be asked first (spec §5.5 R0, §7.5). The UI calls it before any
     /// question.
     pub fn password_change(&self) -> Result<Option<Gate>> {
+        self.change_gate(&Change::Password(Zeroizing::default()))
+    }
+    /// The same for `change`.
+    pub fn change_gate(&self, change: &Change) -> Result<Option<Gate>> {
         self.held()?;
+        // No key change before the key file is confirmed (spec §7.17), nor
+        // in a held session whose confirmed line lacks `t` (§5.2 step 9(a)).
+        #[cfg(feature = "security-key")]
+        if self.unconfirmed() {
+            return Err(super::gate::TOFU_HELD);
+        }
         self.not_rolled_back()?;
-        Ok(self.rekey_gate(&Change::Password(Zeroizing::default())))
+        Ok(self.rekey_gate(change))
     }
     /// What holds every key change and adopt of this session (spec §5.5 R0,
     /// §5.1): a replace gap of the vault file, a new key file whose save is
@@ -358,13 +431,30 @@ impl Session {
         if self.restored {
             return Err(RESTORE_KEYS);
         }
+        // Gate-pending mode writes nothing (spec §5.2, §5.5 R0), nor does
+        // a security-key session whose anchor could not be written
+        // (AnchorFailed, §5.10; no override).
+        #[cfg(feature = "security-key")]
+        if self.gate_login.is_some() {
+            return Err(super::gate::GATE_HELD);
+        }
+        #[cfg(feature = "security-key")]
+        if self.anchor_failed {
+            return Err(ANCHOR_FAILED);
+        }
         Ok(())
     }
     /// The gate a key change meets (spec §7.5): the local rollback first,
     /// which no answer overrides, then the questions, the strongest first: a
     /// halted vault is also unverified.
     pub fn rekey_gate(&self, change: &Change) -> Option<Gate> {
-        let Change::Password(_) = change;
+        // A removal for a loss protects this PC at once: no question holds
+        // it, only a local rollback (spec §7.5; round 2, finding 21).
+        #[cfg(feature = "security-key")]
+        if !self.local_rollback && matches!(change, Change::Remove { loss: Some(_), .. }) {
+            return None;
+        }
+        let _ = change;
         if self.local_rollback {
             Some(Gate::LocalRollback)
         } else if let Some(fork) = self.sync_halt() {
@@ -398,9 +488,14 @@ impl Session {
         {
             return Err(REAUTH_STALE);
         }
-        let gate = self.password_change()?;
+        let gate = self.change_gate(&change)?;
         if let Some(gate) = gate.filter(|_| !override_gate) {
             return Err(gate.question());
+        }
+        // A key file with security keys, or a change of them.
+        #[cfg(feature = "security-key")]
+        if self.key_file.needs_security_key() || !matches!(change, Change::Password(_)) {
+            return self.rekey_keys(r, extra, change, consent);
         }
         // A password change takes no other touch and suspends nothing.
         if !extra.is_empty() || !consent.suspend.is_empty() {
@@ -409,7 +504,12 @@ impl Session {
         if !self.key_on_disk()? {
             return Err(KEY_CHANGED);
         }
+        #[cfg(not(feature = "security-key"))]
         let Change::Password(password) = change;
+        #[cfg(feature = "security-key")]
+        let Change::Password(password) = change else {
+            return Err(AUTH_ERROR);
+        };
         password_policy(&password)?;
         if ct_eq(password.as_bytes(), r.password.as_bytes()) {
             return Err(SAMEPASS);
@@ -487,29 +587,29 @@ impl Session {
         {
             return Err(NOT_VERIFIED);
         }
-        // R3: the vault file under the key the new key file holds.
+        self.with_vault(file, kh, opened.bundle, probe)
+    }
+    /// R3 (spec §5.5): the vault file under the key the verified new key
+    /// file `file` (in the state `kh`, opening to `bundle`) holds, decoded
+    /// back. Anything but this session's contents is NOT_VERIFIED.
+    fn with_vault(
+        &self,
+        file: KeyFile,
+        kh: keyfile::KeyHeader,
+        bundle: Box<Bundle>,
+        probe: Option<Vec<u8>>,
+    ) -> Result<Built> {
         let header = Header::Keyed {
             key_id: kh.current_key_id(),
             state: kh.state(),
-            flags: 0,
+            flags: Header::flags_of(kh.magic),
         };
         let data = self.data();
         #[cfg_attr(not(test), allow(unused_mut))]
-        let mut vault = encode_data(
-            &self.id,
-            opened.bundle.current(),
-            &header,
-            self.format,
-            data,
-        )?;
+        let mut vault = encode_data(&self.id, bundle.current(), &header, self.format, data)?;
         #[cfg(test)]
         corrupt("V", &mut vault);
-        match decode_data(
-            &self.id,
-            opened.bundle.current(),
-            opened.bundle.id_key(),
-            &vault,
-        ) {
+        match decode_data(&self.id, bundle.current(), bundle.id_key(), &vault) {
             Ok((format, read, c))
                 if format == self.format && read == header && same(format, c.view(), data) => {}
             _ => return Err(NOT_VERIFIED),
@@ -517,9 +617,10 @@ impl Session {
         Ok(Built {
             file,
             kh,
-            bundle: opened.bundle,
+            bundle,
             probe,
             vault,
+            landing: Landing::default(),
         })
     }
     /// S0-S5 (spec §5.5) of a key file built and verified in memory: what
@@ -531,15 +632,41 @@ impl Session {
             bundle,
             probe,
             vault: v_new,
+            landing,
         } = b;
         let (state, epoch, resume) = (kh.state(), kh.epoch, kh.resume);
         // S0: the anchor's pending line, the complete line this state
         // becomes, before anything else is written.
         let pending = {
             let _step = Step::enter("S0");
-            self.write_pending(&kh, src, pw)?
+            self.write_pending(&kh, src, pw, &landing)?
         };
         point("S0")?;
+        // S0r: a removal for a loss (this PC's lost-key flow, or an adopt
+        // that removes keys of this PC whose tombstones carry a loss mark)
+        // makes the review due, in the merge log first, before anything is
+        // installed (spec §5.5 S0r, §5.13; S45-2 #11). A failure stops like
+        // S0.
+        #[cfg(feature = "security-key")]
+        let review = match pending.loss.as_deref() {
+            Some(loss) => {
+                let _step = Step::enter("S0r");
+                match self.review_store(loss) {
+                    Ok(date) => Some(date),
+                    Err(e) => {
+                        if !crashed(e) {
+                            self.drop_pending(state);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            None => None,
+        };
+        #[cfg(feature = "security-key")]
+        if review.is_some() {
+            point("review-stored")?;
+        }
         // S1: V_probe, when the data key changes.
         if let Some(probe) = &probe {
             {
@@ -610,6 +737,12 @@ impl Session {
         (self.key_state, self.max_epoch) = (state, epoch);
         (self.stale_key_file, self.resave_due) = (false, true);
         self.local_rollback = false;
+        // The review is due in the session before anything is flushed
+        // (spec §5.5 Commit).
+        #[cfg(feature = "security-key")]
+        if let Some(date) = &review {
+            self.review_now(date);
+        }
         if key_temp.is_some() {
             self.key_notices.push(KeyNotice::KeyTemp);
         }
@@ -685,6 +818,12 @@ impl Session {
                 if lines.pending.as_ref() == Some(&pending) {
                     lines.pending = None;
                 }
+                #[cfg(feature = "security-key")]
+                {
+                    anchor::apply_clears(lines, &pending);
+                    anchor::apply_review(lines, &pending);
+                    anchor::apply_clone(lines, &pending);
+                }
                 true
             })?;
             // A vault file saved later seals the change then.
@@ -704,6 +843,7 @@ impl Session {
         kh: &keyfile::KeyHeader,
         src: anchor::Src,
         pw: Option<anchor::Pw>,
+        landing: &Landing,
     ) -> Result<anchor::PendingLine> {
         let legacy = self.key_file.header().is_none().then(|| {
             let current = key_id(&self.id, self.keys.current());
@@ -711,8 +851,10 @@ impl Session {
         });
         // The key file this write replaces.
         let kpath = anchor::kpath_of(&self.key_path);
+        #[cfg(feature = "security-key")]
+        let own = self.key_file.header().cloned();
         let (mut made, mut behind) = (None, None);
-        self.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
+        let mut change = |lines: &mut anchor::Lines| {
             // Never below the state this PC confirmed, nor beside it at its
             // epoch: a session that took an older key file for current (its
             // precheck could not read the anchor) would take the anchor
@@ -731,10 +873,24 @@ impl Session {
             }
             let mut pending = anchor::pending_of(kh, lines.vault.as_ref(), legacy, kpath.clone());
             (pending.src, pending.pw) = (src, pw);
+            #[cfg(feature = "security-key")]
+            landing.apply(&mut pending, own.as_ref(), kh);
             made = Some(pending.clone());
             lines.pending = Some(pending);
             true
-        })?;
+        };
+        // A security-key state needs its line: no in-memory fallback.
+        #[cfg(feature = "security-key")]
+        if landing.strict {
+            self.anchor_strict(&mut change)?;
+        } else {
+            self.anchor_update(anchor::LOCK_WAIT, &mut change)?;
+        }
+        #[cfg(not(feature = "security-key"))]
+        {
+            let _ = landing;
+            self.anchor_update(anchor::LOCK_WAIT, &mut change)?;
+        }
         if let Some(old) = behind {
             return Err(refuse(
                 LOCAL_ROLLBACK,
@@ -902,6 +1058,12 @@ impl Session {
             true
         })?;
         self.local_rollback = false;
+        // The hold lifted: a line without `t` is a bootstrap's from now on,
+        // with the TOFU banner and pass (spec §5.2 step 9(a)).
+        #[cfg(feature = "security-key")]
+        {
+            self.tofu = std::mem::take(&mut self.held_unconfirmed);
+        }
         self.relink();
         if let Some(link) = self.sync.as_mut() {
             link.mark_due();
@@ -1165,6 +1327,20 @@ mod tests {
         let to = Change::Password(Zeroizing::new(to.to_owned()));
         s.rekey(r, Vec::new(), to, Consent::default(), true)
     }
+    /// The security-key build gates a key file changed elsewhere in a way
+    /// the gate guards (a removal of a key this PC never knew, a silent
+    /// jump; spec §5.10, §7.15a): the user types the code the other PC
+    /// shows, which is the file's own. The default build has no gate.
+    pub(super) fn pass_gate(s: &mut Session) {
+        #[cfg(feature = "security-key")]
+        if s.gate_pending() {
+            let code = keyfile::key_code(&s.id, s.keys.current(), s.key_state());
+            s.pass_login_gate(super::super::GateAnswer::Code(code))
+                .unwrap();
+        }
+        #[cfg(not(feature = "security-key"))]
+        let _ = s;
+    }
     /// What a login says, but for the key backup reminder of a new state.
     pub(super) fn notices(s: &mut Session) -> Vec<KeyNotice> {
         s.take_key_notices()
@@ -1222,7 +1398,7 @@ mod tests {
 
     /// Where a crash leaves the key change landed (spec §5.6: from
     /// S2.renamed on).
-    const LANDED: [&str; 8] = [
+    pub(super) const LANDED: [&str; 8] = [
         "S2.renamed",
         "S2v",
         "S3.tmp_synced",
@@ -1232,7 +1408,7 @@ mod tests {
         "S5",
         "S5.tmp_synced",
     ];
-    const POINTS: [&str; 17] = [
+    pub(super) const POINTS: [&str; 17] = [
         "S0",
         "S0.tmp_synced",
         "S1.tmp_synced",
@@ -1256,7 +1432,7 @@ mod tests {
     /// deleted (S1: E-S1g's "deletion failed"), before the commit of a key
     /// file left as its temp file (S2), before S4 and S5 with V′ left as its
     /// temp file (S3).
-    const GAPS: [(&str, &str); 3] = [
+    pub(super) const GAPS: [(&str, &str); 3] = [
         ("S1.gap", "S1.gapped"),
         ("S2.gap", "S2v"),
         ("S3.gap", "S3.gapped"),
@@ -1313,6 +1489,8 @@ mod tests {
             password_only: false,
             union_password: UnionPassword::Other,
             both_passwords: plan.preview().both_passwords,
+            #[cfg(feature = "security-key")]
+            fork_option: ForkOption::Both,
         }
     }
     /// A key change killed at `point`, then unlocked again (spec §5.6,
@@ -2384,7 +2562,9 @@ mod tests {
         let mut s = login(&pc, NEW, &mut codes).unwrap();
         assert_eq!(notices(&mut s), []);
         // A later file with a removal (a GOYOKE03 after keys off on another
-        // PC): taken silently in this build, and the removal recorded.
+        // PC): taken silently in the default build (the security-key build
+        // asks G1 for a removal of a key this PC never knew), and the
+        // removal recorded.
         let dk3 = [0x63; 32];
         let (k3, state3) = sealed(
             id,
@@ -2397,6 +2577,7 @@ mod tests {
         fs::write(pc.vault(), vault_of(&s, &dk3, state3)).unwrap();
         drop(s);
         let mut s = login(&pc, NEW, &mut codes).unwrap();
+        pass_gate(&mut s);
         assert_eq!(notices(&mut s), []);
         let line = pc.lines(&id).vault.unwrap();
         assert_eq!(line.state.key_state(), state3);

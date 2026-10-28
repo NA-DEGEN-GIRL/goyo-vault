@@ -27,7 +27,12 @@ pub fn tr(ko: &str) -> &str {
     }
     static TABLE: OnceLock<BTreeMap<&'static str, &'static str>> = OnceLock::new();
     TABLE
-        .get_or_init(|| EN.iter().copied().collect())
+        .get_or_init(|| {
+            let table = EN.iter().copied();
+            #[cfg(feature = "security-key")]
+            let table = table.chain(EN_SK.iter().copied());
+            table.collect()
+        })
         .get(ko)
         .copied()
         .unwrap_or(ko)
@@ -1754,4 +1759,173 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("확인", "OK"),
     ("받기", "Accept"),
+];
+/// The English of the security-key build's own texts (spec §9.3): only that
+/// build compiles them, so the default exe holds none of them.
+#[cfg(feature = "security-key")]
+pub const EN_SK: &[(&str, &str)] = &[
+    (
+        "보안 키 확인을 취소했거나 시간이 지났습니다.",
+        "The security key check was cancelled or timed out.",
+    ),
+    (
+        "이 보안 키는 이미 이 금고에 등록되어 있습니다. 다른 키를 연결하세요.",
+        "This security key is already registered for this vault. Connect another key.",
+    ),
+    (
+        "이 보안 키에 등록할 자리가 다 찼을 수 있습니다. 쓰지 않는 등록(뺀 키, 실패한 등록, 쓰지 않는 웹사이트 패스키)을 키 제조사의 관리 도구로 지우거나 다른 키를 쓰세요.",
+        "This security key may have no room left for another registration. Delete the registrations you no longer use (removed keys, failed registrations, unused website passkeys) with the key maker's management tool, or use another key.",
+    ),
+    (
+        "이 보안 키는 hmac-secret(FIDO2 확장)을 지원하지 않습니다.",
+        "This security key does not support hmac-secret (a FIDO2 extension).",
+    ),
+    (
+        "이 보안 키는 PIN 필수 보호(credProtect)를 지원하지 않습니다. 'PIN도 사용'을 끄거나 다른 키를 쓰세요.",
+        "This security key does not support required PIN protection (credProtect). Turn off 'Also use a PIN' or use another key.",
+    ),
+    (
+        "USB·NFC 보안 키만 쓸 수 있습니다(Windows Hello·휴대폰 제외).",
+        "Only USB and NFC security keys can be used (not Windows Hello or a phone).",
+    ),
+    (
+        "클라우드로 동기화되는 패스키는 쓸 수 없습니다. USB·NFC 보안 키만 됩니다.",
+        "Passkeys that sync through a cloud cannot be used. Only USB and NFC security keys work.",
+    ),
+    (
+        "보안 키 응답이 올바르지 않습니다. 다른 키를 쓰거나 키를 확인하세요.",
+        "The security key's answer is not valid. Use another key or check this one.",
+    ),
+    (
+        "보안 키 응답을 확인할 수 없습니다.",
+        "The security key's answer could not be verified.",
+    ),
+    (
+        "이 보안 키는 이 열쇠 파일에 등록되어 있지 않습니다.",
+        "This security key is not registered in this key file.",
+    ),
+    (
+        "이 보안 키의 PIN 확인 여부가 등록 때와 다릅니다(키의 PIN 설정 변경 등). 키 설정을 되돌리거나, 다른 등록 키로 연 뒤 이 키를 빼고 다시 추가하세요.",
+        "This security key's PIN check differs from when it was registered (its PIN setting changed, for example). Restore the key's setting, or open with another registered key, then remove this key and add it again.",
+    ),
+    (
+        "이 보안 키가 같은 값을 다시 돌려주지 않아 저장하지 않았습니다.",
+        "This security key did not return the same value again, so nothing was saved.",
+    ),
+    (
+        "이 Windows에서는 보안 키(WebAuthn API 4 이상)를 쓸 수 없습니다. Windows를 업데이트하세요.",
+        "Security keys (WebAuthn API 4 or later) cannot be used on this Windows. Update Windows.",
+    ),
+    (
+        "보안 키 작업 실패 (코드 0x{hr:08X}).",
+        "Security key operation failed (code 0x{hr:08X}).",
+    ),
+    (
+        "보안 키 자체 시험에 실패했습니다.",
+        "The security key self-test failed.",
+    ),
+    (
+        "이 열쇠 파일은 보안 키가 필요합니다.",
+        "This key file needs a security key.",
+    ),
+    (
+        "보안 키 {N}은(는) 이 열쇠 파일에서 일시 정지되어 있습니다. 다른 보안 키로 연 뒤 '짝 맺기'로 이 키를 다시 쓰게 하세요.",
+        "Security key {N} is suspended in this key file. Open with another security key, then use 'Pair keys' to let this key work again.",
+    ),
+    (
+        "보안 키 {N}은(는) 이 열쇠 파일에서 일시 정지되었고 짝 기록이 없어 다시 쓸 수 없습니다. 다른 보안 키로 연 뒤 이 키를 빼고 다시 등록하세요.",
+        "Security key {N} is suspended in this key file and has no pair record, so it cannot be used again. Open with another security key, then remove this key and register it again.",
+    ),
+    (
+        "비밀번호가 맞다면 이 보안 키가 초기화되었거나 PIN 설정이 바뀌었을 수 있습니다. 다른 등록 키로 열어 보세요.",
+        "If the password is right, this security key may have been reset or its PIN setting changed. Try another registered key.",
+    ),
+    (
+        "보안 키 {list}은(는) 지금 터치한 키와 짝을 맺지 않아 새 열쇠 파일을 받을 수 없습니다. 그 키도 연결해 함께 터치하거나, 모든 키와 짝을 맺은 키로 하세요.",
+        "Security key {list} is not paired with the key you touched, so it cannot get the new key file. Connect that key and touch it too, or use a key paired with every key.",
+    ),
+    (
+        "이 보안 키의 응답이 이 열쇠 파일과 맞지 않습니다. 이 키를 빼고 나중에 다시 등록하세요.",
+        "This security key's answer does not match this key file. Remove this key and register it again later.",
+    ),
+    (
+        "보안 키 {list}에 새 열쇠를 전할 짝 기록이 열리지 않아 저장하지 않았습니다. 아무것도 바뀌지 않았습니다. '열쇠 관리'에서 짝 기록 상태를 확인한 뒤 다시 하세요.",
+        "The pairing records that would give the new key to security key {list} did not open, so nothing was saved. Nothing changed. Check the pairing status in 'Key management', then try again.",
+    ),
+    (
+        "이 변경은 망가진 짝 기록(보안 키 {o} → 보안 키 {t})을 고칩니다. 다른 PC가 이 수리를 받으려면 보안 키 {o}나 {t}가 승인해야 하는데, 두 키 모두 이번에 터치하지 않은 키에 닿지 않습니다. 먼저 보안 키 {o}, {t} 둘만 '짝 맺기'를 하거나, 빠진 키도 함께 터치하세요. 아무것도 바뀌지 않았습니다.",
+        "This change repairs a broken pairing record (security key {o} → security key {t}). Other PCs take that repair only when key {o} or {t} approves it, but neither reaches the keys not touched this time. First pair keys {o} and {t} on their own, or touch the missing keys too. Nothing changed.",
+    ),
+    (
+        "이 PC의 열쇠 기록(goyo-vault.keys)을 읽거나 쓸 수 없습니다. 보안 키 금고는 이 기록 없이 열쇠를 바꾸거나 받거나 서버에 올리지 않습니다. %LOCALAPPDATA%\\GoyoVault 폴더의 쓰기 권한을 확인하세요.",
+        "This PC's key record (goyo-vault.keys) cannot be read or written. A security-key vault does not change, accept or upload keys without it. Check write access to the %LOCALAPPDATA%\\GoyoVault folder.",
+    ),
+    (
+        "이 열쇠 변경은 지금 열쇠 파일과 맞지 않아 쓰지 않았습니다. 아무것도 바뀌지 않았습니다.",
+        "This key change does not fit the key file as it is now, so nothing was written. Nothing changed.",
+    ),
+    (
+        "열쇠 파일 동기화를 쓰는 열쇠 파일에서는 아직 보안 키를 끌 수 없습니다. 아무것도 바뀌지 않았습니다.",
+        "Security keys cannot be turned off yet for a key file that uses key-file sync. Nothing changed.",
+    ),
+    (
+        "뺀 보안 키가 다시 들어 있음",
+        "a removed security key is back",
+    ),
+    (
+        "제거된 보안 키가 승인함",
+        "approved by a removed security key",
+    ),
+    ("보안 키 기록이 바뀜", "a security key's record changed"),
+    ("짝 기록이 바뀜", "a pairing record changed"),
+    ("짝 기록이 손상됨", "a pairing record is damaged"),
+    ("설명되지 않는 변경", "an unexplained change"),
+    (
+        "이 열쇠 파일에는 이 PC에서 이미 뺀 보안 키가 들어 있거나, 그 키가 승인한 변경이 들어 있습니다. 예전 열쇠 파일로 되돌려졌거나 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC, 서버)을 쓰세요. 다른 PC의 열쇠 파일이라면 이 PC의 원래 열쇠 파일로 연 뒤 '새 열쇠 파일 받기'로 받으세요.",
+        "This key file holds a security key that was already removed on this PC, or a change that key approved. It may have been put back from an old key file or forged, so it was not opened. Use the latest key file (a key backup, another PC, the server). If it is another PC's key file, open with this PC's own key file and take it with 'Receive a new key file'.",
+    ),
+    (
+        "이 열쇠 파일의 보안 키 기록이 이 PC가 기록해 둔 것과 다릅니다. 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.",
+        "This key file's security key records differ from what this PC recorded. It may have been forged, so it was not opened. Use the latest key file (a key backup, another PC).",
+    ),
+    (
+        "이 열쇠 파일의 OTP 설정이 이 PC가 기록해 둔 것과 다릅니다(설명되지 않는 변경). 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.",
+        "This key file's OTP setting differs from what this PC recorded (an unexplained change). It may have been forged, so it was not opened. Use the latest key file (a key backup, another PC).",
+    ),
+    (
+        "고른 키가 받은 변경과 맞지 않아 받지 않았습니다. 이 변경은 이제 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력해야만 받을 수 있습니다. 키를 잃어버린 것이 확실하면 코드를 기다리지 말고 이 PC에서 '잃어버린 키 제거'를 하세요.",
+        "The keys you picked do not match the change, so it was not taken. It can now be taken only by entering the key check code shown in 'Key management' on the other PC. If you are sure a key was lost, do not wait for the code: run 'Remove a lost key' on this PC.",
+    ),
+    (
+        "고른 키가 바뀐 열쇠 파일과 맞지 않아 받지 않았습니다. 이 열쇠 파일은 이제 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력해야만 받을 수 있습니다. 그런 변경을 한 적이 없다면 이전 열쇠 파일(열쇠 백업)로 바꿔 놓으세요. 그때까지 이 PC는 항목을 고치거나 저장하거나 올리지 않습니다.",
+        "The keys you picked do not match the changed key file, so it was not taken. It can now be taken only by entering the key check code shown in 'Key management' on the other PC. If no such change was made, put the previous key file (a key backup) back. Until then this PC does not edit, save or upload anything.",
+    ),
+    (
+        "입력한 코드가 이 열쇠 파일과 맞지 않습니다. 다른 PC의 '열쇠 관리'에 지금 보이는 코드를 다시 확인하세요.",
+        "The code you entered does not match this key file. Check the code shown now in 'Key management' on the other PC.",
+    ),
+    (
+        "이 PC는 이 금고의 열쇠 파일을 아직 확인하지 않았습니다. 확인 전에는 다른 PC의 열쇠 확인 코드로 확인하는 새 버전만 받을 수 있습니다. 먼저 이 PC의 열쇠 파일을 코드로 확인하거나, 새 열쇠 파일로 복원하세요.",
+        "This PC has not confirmed this vault's key file yet. Until it does, it takes only a newer version confirmed with the other PC's key check code. First confirm this PC's key file with the code, or restore with the new key file.",
+    ),
+    (
+        "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력하기 전에는 항목을 고치거나 열쇠를 바꾸거나 서버에 올리지 않습니다.",
+        "This PC has not confirmed this key file yet. Until you enter the key check code shown in 'Key management' on another PC, it does not edit entries, change keys or upload anything.",
+    ),
+    (
+        "이 PC의 열쇠 파일이 바뀌었습니다. 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력하기 전에는 항목을 고치거나 저장하거나 올리지 않습니다.",
+        "This PC's key file changed. Until you pick the lost keys or enter the other PC's key check code, nothing is edited, saved or uploaded.",
+    ),
+    (
+        "확인할 열쇠 파일이 없거나 그 사이에 바뀌었습니다. 처음부터 다시 하세요.",
+        "There is no key file to confirm, or it changed meanwhile. Start again.",
+    ),
+    (
+        "지난번 보안 키 {list} 제거가 저장 중에 끊겨 끝나지 않았습니다. 이 PC는 아직 보호되지 않습니다. [다시 하기]로 같은 내용으로 다시 하세요.",
+        "The last removal of security key {list} was cut off while saving and did not finish. This PC is not protected yet. Use [Redo] to do it again with the same answers.",
+    ),
+    (
+        "보안 키는 8개까지 등록할 수 있습니다. 두 열쇠 파일을 합치면 8개를 넘어 받지 않았습니다.",
+        "Up to 8 security keys can be registered. Joining the two key files would give more than 8, so it was not taken.",
+    ),
 ];

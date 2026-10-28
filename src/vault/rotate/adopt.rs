@@ -5,9 +5,15 @@
 //! the checks is joined with this PC's into a union (kind 9) under a fresh
 //! data key, so no data key of the other file's choice ever becomes current.
 //! Both write through the key-change engine (S0-S5), so a crash anywhere
-//! leaves a pair that opens. This build adopts password-only key files: the
-//! gate, the fork options and the security-key rules join with the
-//! security-key build.
+//! leaves a pair that opens. The default build adopts password-only key
+//! files; the security-key build adds files with security keys, the public
+//! checks and the gate before any touch (`gate`), the fork options, and the
+//! union of slots and pair records (`hw`).
+#[cfg(feature = "security-key")]
+use super::{
+    super::gate::{self, Checked, GateKind},
+    hw::{Join, Touched},
+};
 use super::{
     super::{
         ANCHOR_DOWNGRADE, Session, anchor,
@@ -45,7 +51,7 @@ const LACKS_REMOVAL: &str = "제거 기록이 빠짐";
 /// rollback only a file that descends from the confirmed state is taken.
 pub const ADOPT_ROLLBACK: &str = "이 PC는 지금 이 PC가 전에 쓴 것(수정 {old})보다 오래된 열쇠 파일로 열려 있어, 그 최신 열쇠 파일에서 이어지지 않은 열쇠 파일은 받지 않았습니다. 이 PC가 전에 쓴 최신 열쇠 파일(열쇠 백업)로 다시 연 뒤 받으세요. 지금 열쇠 파일이 맞다면 먼저 '열쇠 관리'에서 [이 열쇠 파일이 맞습니다]를 누르세요.";
 /// What was checked and previewed is not what the write found.
-const ADOPT_STALE: &str = "받을 열쇠 파일을 확인한 뒤에 이 PC의 열쇠 파일이나 그 파일이 바뀌었습니다. 처음부터 다시 하세요.";
+pub(super) const ADOPT_STALE: &str = "받을 열쇠 파일을 확인한 뒤에 이 PC의 열쇠 파일이나 그 파일이 바뀌었습니다. 처음부터 다시 하세요.";
 
 /// Where the other key file comes from. The server's file and the login's
 /// join with key-file sync.
@@ -54,11 +60,28 @@ pub enum Source {
     File(PathBuf),
 }
 /// The gate an adopt passed (spec §7.15a), bound to the file it was asked
-/// for: the preview and the write refuse any other file. This build has no
-/// gate.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// for: the preview and the write refuse any other file. The default build
+/// has no gate.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GatePass {
-    NotNeeded { epoch: u64, tag: [u8; 16] },
+    NotNeeded {
+        epoch: u64,
+        tag: [u8; 16],
+    },
+    /// S-LOSTPICK: the credhashes of the picked keys.
+    #[cfg(feature = "security-key")]
+    G2Passed {
+        pick: Vec<[u8; 16]>,
+        epoch: u64,
+        tag: [u8; 16],
+    },
+    /// S-GATE-CODE: the code typed, compared once the file is open.
+    #[cfg(feature = "security-key")]
+    G1Passed {
+        code: Code,
+        epoch: u64,
+        tag: [u8; 16],
+    },
 }
 impl GatePass {
     /// The pass of a file that needs no gate.
@@ -68,6 +91,29 @@ impl GatePass {
             tag: check.other.tag,
         }
     }
+    /// The file it was answered for.
+    fn state(&self) -> KeyState {
+        match self {
+            Self::NotNeeded { epoch, tag } => KeyState {
+                epoch: *epoch,
+                tag: *tag,
+            },
+            #[cfg(feature = "security-key")]
+            Self::G2Passed { epoch, tag, .. } | Self::G1Passed { epoch, tag, .. } => KeyState {
+                epoch: *epoch,
+                tag: *tag,
+            },
+        }
+    }
+}
+/// Which fork option the user chose (spec §5.8 "Forks").
+#[cfg(feature = "security-key")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ForkOption {
+    /// Option 1, "다른 PC 쪽 사용": the other branch's content.
+    TakeOther,
+    /// Option 2, "둘 다 합치기": both, this PC's removals kept.
+    Both,
 }
 /// Which password a union keeps (spec §5.8): the other file's (the default)
 /// or this PC's ("이 PC의 비밀번호 쓰기").
@@ -82,12 +128,16 @@ pub enum LostKeyAddOn {}
 /// What the user answered before [받기] (spec §5.8).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Acks {
-    /// S-ADOPT-PWONLY: a vault with security keys made password-only. Never
-    /// asked here.
+    /// S-ADOPT-PWONLY: a vault with security keys made password-only. The
+    /// default build never asks it (and refuses a yes); the security-key
+    /// build requires it where the preview sets `password_only`.
     pub password_only: bool,
     pub union_password: UnionPassword,
     /// S-ADOPT-BOTHPASS answered yes, where the preview asks it.
     pub both_passwords: bool,
+    /// The fork option the plan was made for.
+    #[cfg(feature = "security-key")]
+    pub fork_option: ForkOption,
 }
 /// How the other file stands against this PC's (spec §5.8). Older and every
 /// refusal are errors of `adopt_check`.
@@ -117,6 +167,29 @@ pub struct AdoptCheck {
     /// The result's epoch: the other file's for a successor, above both
     /// files and this PC's floor for a union.
     pub epoch: u64,
+    /// The public checks, R, M, Δ, T_new, the policy and slot changes, and
+    /// the gate of each way to take the file (security-key build).
+    #[cfg(feature = "security-key")]
+    pub keys: KeyGates,
+}
+/// What the security-key build found before any touch (spec §5.8, §7.15a).
+#[cfg(feature = "security-key")]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct KeyGates {
+    pub checked: Checked,
+    /// The gate of a successor or a union, and for a fork of option 2; None
+    /// needs none.
+    pub gate: Option<GateKind>,
+    /// A fork whose option 2 ("둘 다 합치기") is offered: not when its
+    /// authorizer is a key this PC removed.
+    pub both: bool,
+    /// A fork whose option 1 ("다른 PC 쪽 사용") is offered, and its gate:
+    /// never when it would bring back a key this PC's user removed (`o`).
+    pub take_other_offered: bool,
+    pub take_other: Option<GateKind>,
+    /// The keys option 1 brings back: removals this PC took from another
+    /// file (`t`), by credhash (S-FORK-READMIT).
+    pub readmit: Vec<[u8; 16]>,
 }
 /// The other file, opened (spec §5.8 "Opening the other file"): its keys
 /// and the password that opened it. Built only by `adopt_open`. Zeroized on
@@ -126,6 +199,9 @@ pub struct OtherOpened {
     password: Zeroizing<String>,
     /// SHA-256 of the bytes it opened.
     sha: [u8; 32],
+    /// The key whose touch opened a file with security keys.
+    #[cfg(feature = "security-key")]
+    touched: Option<Touched>,
 }
 /// What the preview shows (spec §9.1).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -144,6 +220,19 @@ pub struct Preview {
     /// [받기] asks S-ADOPT-BOTHPASS first: both sides changed the password
     /// since the shared state, or that state is not in this PC's history.
     pub both_passwords: bool,
+    /// A union's keys (security-key build): renumbered (old, new), dropped
+    /// for want of a PIN, and those it would suspend without a touch.
+    #[cfg(feature = "security-key")]
+    pub renumbered: Vec<(u8, u8)>,
+    #[cfg(feature = "security-key")]
+    pub dropped_uv: Vec<u8>,
+    /// Keys nothing touched reaches: written only with S-SUSPEND's consent.
+    #[cfg(feature = "security-key")]
+    pub suspend: Vec<u8>,
+    /// The result is password-only for a vault with keys: [받기] asks
+    /// S-ADOPT-PWONLY first.
+    #[cfg(feature = "security-key")]
+    pub password_only: bool,
 }
 /// An adopt checked, opened and previewed, for `adopt` to write. Bound to
 /// its session and screen like the Reauth (spec §5.3).
@@ -159,6 +248,9 @@ pub struct AdoptPlan {
     preview: Preview,
     session: u64,
     app_serial: u64,
+    /// The fork option it was made for.
+    #[cfg(feature = "security-key")]
+    option: ForkOption,
 }
 impl AdoptPlan {
     pub fn preview(&self) -> &Preview {
@@ -184,6 +276,14 @@ pub struct Adopted {
     /// S3 ended in a replace gap: the app locks, as after a password change
     /// (S-GAP-CHANGED).
     pub gap_kept: bool,
+    /// Security-key build: this PC's keys renumbered (old, new), keys
+    /// dropped for want of a PIN, and keys left suspended, by number.
+    #[cfg(feature = "security-key")]
+    pub renumbered: Vec<(u8, u8)>,
+    #[cfg(feature = "security-key")]
+    pub dropped_uv: Vec<u8>,
+    #[cfg(feature = "security-key")]
+    pub suspended: Vec<u8>,
 }
 
 /// What a key file states before it opens, for the checks of an adopt: its
@@ -213,16 +313,19 @@ impl Public {
 impl Session {
     /// The public checks of an adopt (spec §5.8), before any password: the
     /// other file's class and the result's epoch, or why it is refused.
-    /// Equal and Contained write nothing; Older is refused.
+    /// Equal and Contained write nothing; Older is refused. The
+    /// security-key build adds P3, P4, slot and pair-record pinning, and
+    /// the gate of each way to take the file, all before any touch.
     pub fn adopt_check(&self, other: &KeyFile, source: Source) -> Result<AdoptCheck> {
         let Source::File(_) = source;
         self.held()?;
         let own = self.own_public();
         let theirs = self.other_public(other)?;
         let line = self.anchor.lines.vault.as_ref();
-        // A vault this PC pins as hardware takes a password-only file only
-        // through the security-key build's gate.
-        if line.is_some_and(|l| l.state.hardware()) {
+        // A vault this PC pins as hardware is open only with a key file
+        // with security keys; a password-only file for it is the
+        // security-key build's policy change, behind G1.
+        if line.is_some_and(|l| l.state.hardware()) && !self.key_file.needs_security_key() {
             return Err(ANCHOR_DOWNGRADE);
         }
         let a = line.map_or(0, |l| l.state.epoch);
@@ -232,23 +335,34 @@ impl Session {
             fork,
             changed_pw,
             epoch,
+            #[cfg(feature = "security-key")]
+            keys: KeyGates::default(),
         };
         if theirs.state == own.state {
             return Ok(check(AdoptClass::Equal, false, None, own.state.epoch));
         }
         let lists = |set: &[Tombstone], c: &[u8; 16]| set.iter().any(|t| t.credhash == *c);
         let removals_known = theirs.tombs.iter().all(|t| lists(&own.tombs, &t.credhash));
+        // Every key of the other file is one this PC has live or removed,
+        // and its records between keys live here are this PC's.
+        #[cfg(feature = "security-key")]
+        let (keys_known, pairs_known) = self.keys_known(other);
+        #[cfg(not(feature = "security-key"))]
+        let (keys_known, pairs_known) = (true, true);
         // A state of this PC's history, with a key this PC still holds.
         if theirs.state.epoch < own.state.epoch
             && line.is_some_and(|l| l.state.had(theirs.state))
             && own.ids[1..].contains(&theirs.ids[0])
             && removals_known
+            && keys_known
         {
             return Err(ADOPT_OLDER);
         }
         if theirs.state.epoch <= own.state.epoch
             && theirs.ids.iter().all(|i| own.ids.contains(i))
             && removals_known
+            && keys_known
+            && pairs_known
         {
             return Ok(check(AdoptClass::Contained, false, None, own.state.epoch));
         }
@@ -276,6 +390,23 @@ impl Session {
         if theirs.state.epoch > self.max_epoch.saturating_add(EPOCH_WINDOW) {
             return Err(refuse(ADOPT_REFUSED, vec![TOO_FAR.to_owned()]));
         }
+        // The public checks of a KF2 file (spec §7.14), also against a 0.8
+        // key file of this PC, whose gate counts every key of the other file
+        // and its policy: their failures, but for a fork's removals made
+        // since it split, are refusals. A 0.8 other file is never more than
+        // Contained (its one key is the ID key), so none run for it.
+        #[cfg(feature = "security-key")]
+        let checked = match other.header() {
+            Some(_) => {
+                let checked =
+                    gate::public_checks(&self.key_file, line, other, fork, chained, self.gated())
+                        .map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?;
+                Some(checked)
+            }
+            None => None,
+        };
+        #[cfg(not(feature = "security-key"))]
+        let checked: Option<()> = None;
         // P3 (b): every removal this PC's key file carries, but in a fork
         // the ones made since it split, which its branch never saw: their
         // recorded key ID is not in its list (spec §5.8 "Forks").
@@ -283,21 +414,60 @@ impl Session {
             line.and_then(|l| l.state.tombs.iter().find(|x| x.credhash == t.credhash))
                 .is_some_and(|x| x.keyid != [0; 4] && !theirs.ids.iter().any(|i| i[..4] == x.keyid))
         };
-        if !own
-            .tombs
-            .iter()
-            .filter(|t| !lists(&theirs.tombs, &t.credhash))
-            .all(|t| fork && since_fork(t))
+        if checked.is_none()
+            && !own
+                .tombs
+                .iter()
+                .filter(|t| !lists(&theirs.tombs, &t.credhash))
+                .all(|t| fork && since_fork(t))
         {
             return Err(refuse(ADOPT_REFUSED, vec![LACKS_REMOVAL.to_owned()]));
         }
+        // A successor carries nothing of this PC's (no carry), passed every
+        // check unrelaxed, and never makes a vault with keys password-only.
+        #[cfg(feature = "security-key")]
+        let successor = successor
+            && checked
+                .as_ref()
+                .is_none_or(|c| c.clean() && c.missing_pairs.is_empty() && c.gates.kept.is_empty())
+            && !(self.key_file.needs_security_key() && !other.needs_security_key());
+        // Before G1 only a successor confirmed by its own code is taken
+        // (round 4, finding 1), also in a held session whose confirmed line
+        // lacks `t` (S45-3 #2).
+        #[cfg(feature = "security-key")]
+        if self.unconfirmed() && !successor {
+            return Err(gate::TOFU_ADOPT);
+        }
+        // A successor that turns key-file sync on needs S-KEYSYNC-ON's
+        // consent and the transport check (spec §5.8, §7.9), which arrive
+        // with key-file sync: until then it is not taken.
+        #[cfg(feature = "security-key")]
+        if successor
+            && other.magic() == Some(keyfile::Magic::Ks01)
+            && self.key_file.magic() != Some(keyfile::Magic::Ks01)
+        {
+            return Err(super::NOT_PLANNED);
+        }
         if successor {
-            return Ok(check(
-                AdoptClass::Successor,
-                false,
-                None,
-                theirs.state.epoch,
-            ));
+            #[allow(unused_mut)]
+            let mut c = check(AdoptClass::Successor, false, None, theirs.state.epoch);
+            // In TOFU a successor is taken only with its own code (G1),
+            // whatever the checks found.
+            #[cfg(feature = "security-key")]
+            {
+                let gate = if self.unconfirmed() {
+                    Some(GateKind::G1)
+                } else {
+                    checked.as_ref().and_then(|c| self.ask(c.gates.needed()))
+                };
+                c.keys = KeyGates {
+                    checked: checked.unwrap_or_default(),
+                    gate,
+                    both: true,
+                    ..KeyGates::default()
+                };
+            }
+            return Ok(c);
         }
         // A union: above both files, this PC's floor and its confirmed
         // state, with every removal of both.
@@ -329,7 +499,13 @@ impl Session {
                 Some((changed(own.pw_id), changed(theirs.pw_id)))
             })
             .flatten();
-        Ok(check(AdoptClass::Union, fork, changed_pw, epoch))
+        #[allow(unused_mut)]
+        let mut c = check(AdoptClass::Union, fork, changed_pw, epoch);
+        #[cfg(feature = "security-key")]
+        if let Some(checked) = checked {
+            c.keys = self.union_gates(checked, fork);
+        }
+        Ok(c)
     }
     /// Opens the other file (spec §5.8): with this PC's password from the
     /// Reauth (`password` None), else with the one the user typed for it
@@ -341,6 +517,30 @@ impl Session {
         other: &KeyFile,
         password: Option<&str>,
     ) -> Result<OtherOpened> {
+        self.open_other(r, other, password, None)
+    }
+    /// The same for a file with security keys, with `touch`: the Reauth's
+    /// own touch when its key is live and not suspended in the other file
+    /// (2-salt when the two files' seeds for it differ), else a touch of a
+    /// key the other file registers. The touched key's pair records there
+    /// must open, but one this PC has byte for byte (spec §5.8).
+    #[cfg(feature = "security-key")]
+    pub fn adopt_open_with(
+        &self,
+        r: &Reauth,
+        other: &KeyFile,
+        password: Option<&str>,
+        touch: Option<&Touch>,
+    ) -> Result<OtherOpened> {
+        self.open_other(r, other, password, touch)
+    }
+    fn open_other(
+        &self,
+        r: &Reauth,
+        other: &KeyFile,
+        password: Option<&str>,
+        touch: Option<&Touch>,
+    ) -> Result<OtherOpened> {
         if r.session != self.serial || r.created.elapsed() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
@@ -348,7 +548,7 @@ impl Session {
         if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
-        let opened = other.open(password, None)?;
+        let opened = other.open(password, touch)?;
         let otp = match (opened.bundle.otp(), self.keys.otp()) {
             (Some(a), Some(b)) => ct_eq(a, b),
             (a, b) => a.is_none() && b.is_none(),
@@ -356,15 +556,23 @@ impl Session {
         if !ct_eq(opened.bundle.id_key(), self.keys.id_key()) || !otp {
             return Err(NOT_THIS_VAULT);
         }
+        #[cfg(feature = "security-key")]
+        let touched = match touch {
+            Some(t) if other.needs_security_key() => Some(self.touched_in(other, &opened, t)?),
+            _ => None,
+        };
         Ok(OtherOpened {
             opened,
             password: Zeroizing::new(password.to_owned()),
             sha: sha256(other.bytes()),
+            #[cfg(feature = "security-key")]
+            touched,
         })
     }
     /// The preview of an adopt (spec §5.8): the checks again for exactly the
     /// file `gate` names and `opened` opened, the successor's key code, and
-    /// which password a union offers. Nothing is written.
+    /// which password a union offers. Nothing is written. A fork's option
+    /// is option 2 here; see `adopt_preview_with`.
     pub fn adopt_preview(
         &self,
         r: &Reauth,
@@ -375,20 +583,66 @@ impl Session {
         lost: Option<LostKeyAddOn>,
     ) -> Result<AdoptPlan> {
         if let Some(lost) = lost {
+            #[cfg(not(feature = "security-key"))]
             match lost {}
+            #[cfg(feature = "security-key")]
+            let _ = lost;
+            #[cfg(feature = "security-key")]
+            return Err(super::NOT_PLANNED);
         }
+        #[cfg(feature = "security-key")]
+        return self.preview_of(r, other, opened, check, gate, ForkOption::Both);
+        #[cfg(not(feature = "security-key"))]
+        self.preview_of(r, other, opened, check, gate)
+    }
+    /// The preview of a fork's chosen option (spec §5.8 "Forks"), once its
+    /// gate was answered: the gate judged against exactly this file (a
+    /// wrong pick turns G2 off for this vault, S-GATE-G2FAIL; a wrong code
+    /// may be typed again), E5 for a file whose password a successor or a
+    /// chained union takes, and a union's keys planned.
+    #[cfg(feature = "security-key")]
+    pub fn adopt_preview_with(
+        &self,
+        r: &Reauth,
+        other: &KeyFile,
+        opened: OtherOpened,
+        check: &AdoptCheck,
+        gate: GatePass,
+        option: ForkOption,
+    ) -> Result<AdoptPlan> {
+        self.preview_of(r, other, opened, check, gate, option)
+    }
+    fn preview_of(
+        &self,
+        r: &Reauth,
+        other: &KeyFile,
+        opened: OtherOpened,
+        check: &AdoptCheck,
+        gate: GatePass,
+        #[cfg(feature = "security-key")] option: ForkOption,
+    ) -> Result<AdoptPlan> {
         if r.session != self.serial || r.created.elapsed() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
-        let GatePass::NotNeeded { epoch, tag } = gate;
         let now = self.adopt_check(other, Source::File(other.path().to_owned()))?;
-        if (KeyState { epoch, tag }) != now.other
-            || now != *check
-            || opened.sha != sha256(other.bytes())
-        {
+        if gate.state() != now.other || now != *check || opened.sha != sha256(other.bytes()) {
             return Err(ADOPT_STALE);
         }
+        #[cfg(not(feature = "security-key"))]
+        let GatePass::NotNeeded { .. } = gate;
+        #[cfg(feature = "security-key")]
+        self.judge_gate(check, &gate, option, &opened)?;
         let equal = ct_eq(r.password.as_bytes(), opened.password.as_bytes());
+        // E5 (spec §5.8): a successor, or a union that takes the other
+        // file's password as it is, must not claim a password change that
+        // keeps this PC's password.
+        #[cfg(feature = "security-key")]
+        if let (Some(own), Some(theirs)) = (self.key_file.header(), other.header())
+            && (check.class == AdoptClass::Successor || !check.fork)
+        {
+            gate::e5(own, theirs, equal)
+                .map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?;
+        }
         let (code, own_pass, both_passwords) = match check.class {
             AdoptClass::Equal => return Err(ADOPT_EQUAL),
             AdoptClass::Contained => return Err(ADOPT_CONTAINED),
@@ -404,6 +658,9 @@ impl Session {
             // The same password, or a file that descends from this PC's: the
             // other file's password (spec §5.8 rule (2)).
             AdoptClass::Union if equal || !check.fork => (None, None, false),
+            // Option 1 takes the other branch's password with its content.
+            #[cfg(feature = "security-key")]
+            AdoptClass::Union if option == ForkOption::TakeOther => (None, None, false),
             // A fork: the password of the side that changed it since the
             // shared state (rule (3)), else the other file's (rule (4)).
             AdoptClass::Union => match check.changed_pw {
@@ -412,6 +669,43 @@ impl Session {
                 _ => (None, Some(false), true),
             },
         };
+        #[allow(unused_mut)]
+        let mut preview = Preview {
+            class: check.class,
+            epoch: check.epoch,
+            code,
+            own_pass,
+            both_passwords,
+            #[cfg(feature = "security-key")]
+            renumbered: Vec::new(),
+            #[cfg(feature = "security-key")]
+            dropped_uv: Vec::new(),
+            #[cfg(feature = "security-key")]
+            suspend: Vec::new(),
+            #[cfg(feature = "security-key")]
+            password_only: false,
+        };
+        // A union with security keys, planned now with the touches so far:
+        // what it renumbers, drops and would suspend.
+        #[cfg(feature = "security-key")]
+        if check.class == AdoptClass::Union
+            && (self.key_file.needs_security_key() || other.needs_security_key())
+        {
+            let join = self.join_of(check, option);
+            let readmit = self.readmit_of(check, join);
+            let plan = self.plan_union(
+                r.keys.as_ref(),
+                other,
+                opened.touched.as_ref(),
+                &[],
+                join,
+                &readmit,
+            )?;
+            preview.renumbered = plan.renumbered.clone();
+            preview.dropped_uv = plan.dropped_uv.clone();
+            preview.suspend = plan.unreached.clone();
+            preview.password_only = self.key_file.needs_security_key() && plan.password_only();
+        }
         Ok(AdoptPlan {
             check: now,
             gate,
@@ -419,22 +713,19 @@ impl Session {
             bytes: other.bytes().to_vec(),
             other: opened,
             equal,
-            preview: Preview {
-                class: check.class,
-                epoch: check.epoch,
-                code,
-                own_pass,
-                both_passwords,
-            },
+            preview,
             session: self.serial,
             app_serial: r.app_serial,
+            #[cfg(feature = "security-key")]
+            option,
         })
     }
     /// Writes the adopt `plan` (spec §5.8) through the key-change engine:
     /// the successor re-sealed with this PC's seal block, or the union. The
     /// checks run again first; anything changed since the preview writes
-    /// nothing. `extra` and `consent` belong to the security-key build, and
-    /// no gate holds an adopt here.
+    /// nothing. With security keys, `extra` are touches offered so that no
+    /// key is suspended, and `consent` the keys S-SUSPEND named; the
+    /// default build has neither, and no gate holds an adopt there.
     pub fn adopt(
         &mut self,
         r: Reauth,
@@ -453,46 +744,150 @@ impl Session {
         {
             return Err(REAUTH_STALE);
         }
+        #[cfg(not(feature = "security-key"))]
         if !extra.is_empty() || !consent.suspend.is_empty() || acks.password_only {
             return Err(AUTH_ERROR);
         }
         let other = KeyFile::from_bytes(&plan.path, plan.bytes.clone())?;
-        let GatePass::NotNeeded { epoch, tag } = plan.gate;
         if self.adopt_check(&other, Source::File(plan.path.clone()))? != plan.check
-            || (KeyState { epoch, tag }) != plan.check.other
+            || plan.gate.state() != plan.check.other
         {
             return Err(ADOPT_STALE);
         }
         if !self.key_on_disk()? {
             return Err(KEY_CHANGED);
         }
-        // Where the preview asked S-ADOPT-BOTHPASS, only a yes writes.
+        // Where the preview asked S-ADOPT-BOTHPASS, only a yes writes; so
+        // with S-ADOPT-PWONLY, and with the fork option it was made for.
         if plan.preview.both_passwords && !acks.both_passwords {
             return Err(ADOPT_STALE);
         }
-        let keep_own = plan.preview.own_pass.is_some() && acks.union_password == UnionPassword::Own;
+        #[cfg(feature = "security-key")]
+        if (plan.preview.password_only && !acks.password_only)
+            || (plan.check.fork && acks.fork_option != plan.option)
+        {
+            return Err(ADOPT_STALE);
+        }
+        #[cfg(feature = "security-key")]
+        let take_other = plan.check.fork && plan.option == ForkOption::TakeOther;
+        #[cfg(not(feature = "security-key"))]
+        let take_other = false;
+        let keep_own = plan.preview.own_pass.is_some()
+            && acks.union_password == UnionPassword::Own
+            && !take_other;
         let same = plan.equal || keep_own;
-        let built = match plan.check.class {
-            AdoptClass::Successor => self.successor_of(&other, &plan.other)?,
+        #[cfg(feature = "security-key")]
+        let mut report = (Vec::new(), Vec::new(), Vec::new());
+        let rekeyed = match plan.check.class {
+            #[cfg(feature = "security-key")]
+            AdoptClass::Successor if other.needs_security_key() => {
+                let touched = plan.other.touched.as_ref();
+                let built =
+                    self.reseal_keys(&other, &plan.other.opened, &plan.other.password, touched)?;
+                self.land(
+                    built,
+                    anchor::Src::Adopt,
+                    (!same).then_some(anchor::Pw::Other),
+                )?
+            }
+            AdoptClass::Successor => {
+                let built = self.successor_of(&other, &plan.other)?;
+                self.land(
+                    built,
+                    anchor::Src::Adopt,
+                    (!same).then_some(anchor::Pw::Other),
+                )?
+            }
+            #[cfg(feature = "security-key")]
+            AdoptClass::Union
+                if self.key_file.needs_security_key() || other.needs_security_key() =>
+            {
+                let join = self.join_of(&plan.check, plan.option);
+                let readmit = self.readmit_of(&plan.check, join);
+                let extra = self.extra_outputs(&r, &extra)?;
+                let union = self.plan_union(
+                    r.keys.as_ref(),
+                    &other,
+                    plan.other.touched.as_ref(),
+                    &extra,
+                    join,
+                    &readmit,
+                )?;
+                report = (
+                    union.renumbered.clone(),
+                    union.dropped_uv.clone(),
+                    union.suspended(),
+                );
+                let keys = self.union_ring(&other, &plan.other, take_other)?;
+                let password: Zeroizing<String> = if keep_own {
+                    r.password.clone()
+                } else {
+                    plan.other.password.clone()
+                };
+                let theirs = other.header().map(|h| h.pw_id);
+                let mine = self.key_file.header().map(|h| h.pw_id);
+                let pw_id = match (plan.equal, keep_own) {
+                    (true, _) => theirs.or(mine),
+                    (false, true) => mine,
+                    (false, false) => theirs,
+                };
+                let pw_id = match pw_id {
+                    Some(pw_id) => pw_id,
+                    None => fresh_pw_id()?,
+                };
+                let pw = (!same).then_some(anchor::Pw::Other);
+                let epoch = plan.check.epoch;
+                return self
+                    .write_union(r, union, keys, &password, pw_id, epoch, &consent, pw)
+                    .map(|rekeyed| self.adopted(rekeyed, same, report));
+            }
             AdoptClass::Union => {
+                #[cfg(feature = "security-key")]
+                if !extra.is_empty() || !consent.suspend.is_empty() || acks.password_only {
+                    return Err(AUTH_ERROR);
+                }
                 let password: &str = if keep_own {
                     &r.password
                 } else {
                     &plan.other.password
                 };
                 let keep = (keep_own, plan.equal);
-                self.union_with(&other, &plan.other, plan.check.epoch, password, keep)?
+                let built =
+                    self.union_with(&other, &plan.other, plan.check.epoch, password, keep)?;
+                self.land(
+                    built,
+                    anchor::Src::Adopt,
+                    (!same).then_some(anchor::Pw::Other),
+                )?
             }
             AdoptClass::Equal => return Err(ADOPT_EQUAL),
             AdoptClass::Contained => return Err(ADOPT_CONTAINED),
         };
-        let rekeyed = self.land(
-            built,
-            anchor::Src::Adopt,
-            (!same).then_some(anchor::Pw::Other),
-        )?;
         drop(r);
-        Ok(Adopted {
+        // A successor taken with its own code ends a bootstrap (spec §7.17):
+        // its S0 entry wrote `t` for it. A gate passed allows G2 again.
+        #[cfg(feature = "security-key")]
+        {
+            (self.tofu, self.held_unconfirmed) = (false, false);
+            self.g2_spent.set(false);
+        }
+        Ok(self.adopted(
+            rekeyed,
+            same,
+            #[cfg(feature = "security-key")]
+            report,
+        ))
+    }
+    /// What an adopt wrote, for the status (spec §5.8).
+    fn adopted(
+        &self,
+        rekeyed: Rekeyed,
+        same: bool,
+        #[cfg(feature = "security-key")] report: (Vec<(u8, u8)>, Vec<u8>, Vec<u8>),
+    ) -> Adopted {
+        #[cfg(feature = "security-key")]
+        let (renumbered, dropped_uv, suspended) = report;
+        Adopted {
             state: self.key_state,
             code: key_code(&self.id, self.keys.current(), self.key_state),
             password: if same {
@@ -502,7 +897,13 @@ impl Session {
             },
             vault_pending: rekeyed == Rekeyed::VaultPending,
             gap_kept: rekeyed == Rekeyed::GapKept,
-        })
+            #[cfg(feature = "security-key")]
+            renumbered,
+            #[cfg(feature = "security-key")]
+            dropped_uv,
+            #[cfg(feature = "security-key")]
+            suspended,
+        }
     }
     /// The successor re-seal (spec §5.8): the other file's `[0, W)` byte for
     /// byte, so its state and key code stay; this PC's seal block, which
@@ -530,11 +931,63 @@ impl Session {
         }
         Ok(built)
     }
-    /// The union (kind 9, spec §5.8): a fresh data key first, then this
+    /// A union's keyring (spec §5.8): a fresh data key first, then this
     /// PC's keys, then the other file's that this PC lacks, and the ID key
-    /// last; every removal of both files; sealed with `password`, the other
-    /// file's or this PC's (`keep_own`), with the other file's `pw_id` when
-    /// the two passwords are the same (`equal`).
+    /// last (fork option 1: the other file's keys first, then this PC's);
+    /// past MAX_KEYS the middle part's last entry goes first, never the
+    /// fresh key, either current key or the ID key. The fresh key is one
+    /// neither file ever held.
+    fn union_ring(
+        &self,
+        other: &KeyFile,
+        opened: &OtherOpened,
+        take_other: bool,
+    ) -> Result<Zeroizing<Vec<[u8; 32]>>> {
+        let own = self.own_public();
+        let theirs = self.other_public(other)?;
+        let id = &self.id;
+        let ours = self.keys.keys();
+        let others = opened.opened.bundle.keys();
+        let known: Vec<[u8; 16]> = ours.iter().chain(others).map(|k| key_id(id, k)).collect();
+        let mut dk: Box<Key> = Box::default();
+        loop {
+            crypto::random_into(dk.as_mut_slice())?;
+            if !known.contains(&key_id(id, &dk)) {
+                break;
+            }
+        }
+        let (first, second) = if take_other {
+            (others, ours)
+        } else {
+            (ours, others)
+        };
+        // Sized up front: a growing Vec would free unwiped copies.
+        let mut keys = Zeroizing::new(Vec::with_capacity(ours.len() + others.len() + 1));
+        keys.push(**dk);
+        keys.extend_from_slice(&first[..first.len() - 1]);
+        let taken: Vec<[u8; 16]> = first.iter().map(|k| key_id(id, k)).collect();
+        for key in &second[..second.len() - 1] {
+            if !taken.contains(&key_id(id, key)) {
+                keys.push(*key);
+            }
+        }
+        keys.push(*self.keys.id_key());
+        let mut ids: Vec<[u8; 16]> = keys.iter().map(|k| key_id(id, k)).collect();
+        let kept = [ids[0], own.ids[0], theirs.ids[0], ids[ids.len() - 1]];
+        while keys.len() > MAX_KEYS {
+            let at = (1..keys.len() - 1)
+                .rev()
+                .find(|i| !kept.contains(&ids[*i]))
+                .ok_or(AUTH_ERROR)?;
+            keys.remove(at);
+            ids.remove(at);
+        }
+        Ok(keys)
+    }
+    /// The union (kind 9, spec §5.8) of two password-only key files under a
+    /// fresh data key, with every removal of both; sealed with `password`,
+    /// the other file's or this PC's (`keep_own`), with the other file's
+    /// `pw_id` when the two passwords are the same (`equal`).
     fn union_with(
         &self,
         other: &KeyFile,
@@ -547,42 +1000,7 @@ impl Session {
         let theirs = self.other_public(other)?;
         let probe = self.encode()?;
         let resume = sha256(&probe);
-        let id = &self.id;
-        let ours = self.keys.keys();
-        let others = opened.opened.bundle.keys();
-        let known: Vec<[u8; 16]> = ours.iter().chain(others).map(|k| key_id(id, k)).collect();
-        // Never a data key either file ever held.
-        let mut dk: Box<Key> = Box::default();
-        loop {
-            crypto::random_into(dk.as_mut_slice())?;
-            if !known.contains(&key_id(id, &dk)) {
-                break;
-            }
-        }
-        // Sized up front: a growing Vec would free unwiped copies.
-        let mut keys = Zeroizing::new(Vec::with_capacity(ours.len() + others.len() + 1));
-        keys.push(**dk);
-        keys.extend_from_slice(&ours[..ours.len() - 1]);
-        let mine = &known[..ours.len()];
-        for key in &others[..others.len() - 1] {
-            if !mine.contains(&key_id(id, key)) {
-                keys.push(*key);
-            }
-        }
-        keys.push(*self.keys.id_key());
-        // At most MAX_KEYS: the middle part's last entry goes first (the
-        // other file's oldest, then this PC's), never the fresh key, either
-        // current key or the ID key.
-        let mut ids: Vec<[u8; 16]> = keys.iter().map(|k| key_id(id, k)).collect();
-        let kept = [ids[0], own.ids[0], theirs.ids[0], ids[ids.len() - 1]];
-        while keys.len() > MAX_KEYS {
-            let at = (1..keys.len() - 1)
-                .rev()
-                .find(|i| !kept.contains(&ids[*i]))
-                .ok_or(AUTH_ERROR)?;
-            keys.remove(at);
-            ids.remove(at);
-        }
+        let keys = self.union_ring(other, opened, false)?;
         let bundle = Bundle::new(&keys, self.keys.otp()).ok_or(AUTH_ERROR)?;
         // The same password takes the other file's `pw_id`, so neither PC
         // sees a password change; a 0.8 file has none to keep.
@@ -592,7 +1010,7 @@ impl Session {
             (false, false) => theirs.pw_id,
         };
         let spec = Spec {
-            vault_id: *id,
+            vault_id: self.id,
             epoch,
             kind: Kind::Union,
             next: own.next.max(theirs.next),
@@ -646,10 +1064,190 @@ impl Session {
         })
     }
 }
+
+/// The security-key parts of an adopt (spec §5.8, §7.15a).
+#[cfg(feature = "security-key")]
+impl Session {
+    /// The `gated` epoch an adopt's silent jump counts from (round 3,
+    /// finding 16): the confirmed line's, unless that line is a security-key
+    /// state this PC never confirmed, or there is none in a TOFU session.
+    fn gated(&self) -> Option<u64> {
+        match self.anchor.lines.vault.as_ref() {
+            Some(l) if l.state.flags.t || !l.state.hardware() => Some(l.state.gated),
+            Some(_) => None,
+            None if self.unconfirmed() || self.key_file.needs_security_key() => None,
+            None => Some(self.max_epoch),
+        }
+    }
+    /// G2 while it is allowed on this PC for this vault, else G1 (spec
+    /// §7.15a: one wrong pick turns it off until a gate passes).
+    fn ask(&self, kind: Option<GateKind>) -> Option<GateKind> {
+        match kind {
+            Some(GateKind::G2) if !self.g2_allowed() => Some(GateKind::G1),
+            kind => kind,
+        }
+    }
+    /// Whether G2 is still allowed: no pick failed in this session, and
+    /// none in the anchor as it is now.
+    fn g2_allowed(&self) -> bool {
+        if self.g2_spent.get() {
+            return false;
+        }
+        let lines = match self.anchor.dir.as_deref().map(anchor::read) {
+            Some(Ok(anchor::Parsed::Doc(doc))) => doc.lines(&self.id),
+            _ => self.anchor.lines.clone(),
+        };
+        gate::g2_allowed(&lines)
+    }
+    /// Whether every key of `other` is live or removed here, and every pair
+    /// record of `other` between two keys live here is one this PC has (spec
+    /// §5.8 Older and Contained).
+    fn keys_known(&self, other: &KeyFile) -> (bool, bool) {
+        let (Some(o), Some(t)) = (self.key_file.header(), other.header()) else {
+            return (other.header().is_none_or(|t| t.slots.is_empty()), true);
+        };
+        let known = |c: &[u8; 16]| {
+            o.slots.iter().any(|s| s.credhash == *c)
+                || o.tombstones.iter().any(|x| x.credhash == *c)
+        };
+        let live = |c: &[u8; 16]| o.slots.iter().any(|s| s.credhash == *c);
+        let mine = self.key_file.carried_pairs();
+        let pairs = other.carried_pairs().iter().all(|p| match p {
+            keyfile::PairPlan::Copy { owner, target, .. } if live(owner) && live(target) => {
+                mine.contains(p)
+            }
+            _ => true,
+        });
+        (t.slots.iter().all(|s| known(&s.credhash)), pairs)
+    }
+    /// The gates of a union (spec §5.8): G1 for an addition, a removal of a
+    /// key this PC never knew, a policy or slot change (and for a file that
+    /// descends from this PC's state, a silent jump); G2 for removals of
+    /// this PC's keys; none otherwise. For a fork, also option 1: offered
+    /// only when every key it brings back was removed by another file
+    /// (`t`), behind G1 when it brings any back, else as option 2 but G1
+    /// also for no removal at all.
+    fn union_gates(&self, checked: Checked, fork: bool) -> KeyGates {
+        let g = &checked.gates;
+        let g1 = !g.added.is_empty() || !g.unknown.is_empty() || g.policy || g.slot;
+        let gate = self.ask(if g1 || (!fork && g.jump) {
+            Some(GateKind::G1)
+        } else if !g.removed.is_empty() {
+            Some(GateKind::G2)
+        } else {
+            None
+        });
+        if !fork {
+            return KeyGates {
+                checked,
+                gate,
+                both: true,
+                ..KeyGates::default()
+            };
+        }
+        let line = self.anchor.lines.vault.as_ref();
+        let origin = |c: &[u8; 16]| {
+            line.and_then(|l| l.state.tombs.iter().find(|t| t.credhash == *c))
+                .map(|t| t.origin)
+        };
+        let mut readmit: Vec<[u8; 16]> = checked.relisted.clone();
+        readmit.extend(checked.removed_authorizer);
+        readmit.dedup();
+        let take_other_offered = readmit
+            .iter()
+            .all(|c| origin(c) == Some(anchor::Origin::Taken));
+        let take_other = if !readmit.is_empty() || g1 || g.removed.is_empty() {
+            GateKind::G1
+        } else {
+            self.ask(Some(GateKind::G2)).unwrap_or(GateKind::G1)
+        };
+        KeyGates {
+            both: checked.removed_authorizer.is_none(),
+            gate,
+            take_other_offered,
+            take_other: Some(take_other),
+            readmit,
+            checked,
+        }
+    }
+    /// The way a union joins the files.
+    fn join_of(&self, check: &AdoptCheck, option: ForkOption) -> Join {
+        match (check.fork, option) {
+            (false, _) => Join::Chained,
+            (true, ForkOption::TakeOther) => Join::TakeOther,
+            (true, ForkOption::Both) => Join::Both,
+        }
+    }
+    /// The removals option 1 drops.
+    fn readmit_of(&self, check: &AdoptCheck, join: Join) -> Vec<[u8; 16]> {
+        if join == Join::TakeOther {
+            check.keys.readmit.clone()
+        } else {
+            Vec::new()
+        }
+    }
+    /// Judges the gate answered for `check` and the way chosen (spec §5.8
+    /// "Binding"): exactly the file it was asked for; a pick equal to R; a
+    /// code equal to the opened file's own key code. A wrong pick turns G2
+    /// off for this vault (S-GATE-G2FAIL); in TOFU only G1 takes anything.
+    fn judge_gate(
+        &self,
+        check: &AdoptCheck,
+        answer: &GatePass,
+        option: ForkOption,
+        opened: &OtherOpened,
+    ) -> Result<()> {
+        let keys = &check.keys;
+        let needed = match (check.class, check.fork, option) {
+            (AdoptClass::Union, true, ForkOption::TakeOther) if !keys.take_other_offered => {
+                return Err(super::NOT_PLANNED);
+            }
+            (AdoptClass::Union, true, ForkOption::TakeOther) => keys.take_other,
+            (AdoptClass::Union, true, ForkOption::Both) if !keys.both => {
+                return Err(super::NOT_PLANNED);
+            }
+            _ => keys.gate,
+        };
+        match (answer, needed) {
+            (GatePass::NotNeeded { .. }, None) => Ok(()),
+            (GatePass::G2Passed { pick, .. }, Some(GateKind::G2)) => {
+                if keys.checked.gates.pick_matches(pick) {
+                    return Ok(());
+                }
+                // Turned off for this vault until a gate passes or the user
+                // starts a key change (S45-2 #8): for this session at once,
+                // and in the anchor. An anchor that cannot be written says
+                // so; G2 stays off for the session.
+                self.g2_spent.set(true);
+                let dir = self.anchor.dir.as_deref().ok_or(super::ANCHOR_FAILED)?;
+                let (state, now) = (check.other, crate::otp::now()?);
+                match anchor::update(dir, &self.id, anchor::LOCK_WAIT, &mut |lines| {
+                    gate::g2_failed(lines, state, now);
+                    true
+                }) {
+                    Ok(_) => Err(gate::GATE_G2FAIL),
+                    #[cfg(test)]
+                    Err(anchor::Failure::Crash) => Err(super::super::SIMULATED_CRASH),
+                    Err(anchor::Failure::Newer) => Err(anchor::ANCHOR_NEWER),
+                    Err(_) => Err(super::ANCHOR_FAILED),
+                }
+            }
+            (GatePass::G1Passed { code, .. }, Some(_)) => {
+                let dk = opened.opened.bundle.current();
+                if gate::code_matches(code, &self.id, dk, check.other) {
+                    Ok(())
+                } else {
+                    Err(gate::GATE_CODE_WRONG)
+                }
+            }
+            _ => Err(ADOPT_STALE),
+        }
+    }
+}
 /// The removals of two key files, one per credential (spec §5.8): the
 /// earliest epoch, and the loss mark of either, the earlier date when both
 /// have one (1, a loss on an unknown date, counts as the earliest).
-fn joined_tombs(a: &[Tombstone], b: &[Tombstone]) -> Vec<Tombstone> {
+pub(super) fn joined_tombs(a: &[Tombstone], b: &[Tombstone]) -> Vec<Tombstone> {
     let mut out = a.to_vec();
     for t in b {
         match out.iter_mut().find(|x| x.credhash == t.credhash) {
@@ -672,13 +1270,12 @@ fn joined_tombs(a: &[Tombstone], b: &[Tombstone]) -> Vec<Tombstone> {
 mod tests {
     use super::super::super::{
         CRASH, GAP_KEPT, GAP_NOT_CHANGED, KeyNotice, PENDING_ELSEWHERE, RESTORE_OLDKEY,
-        RESTORE_PENDING, SIMULATED_CRASH, encode_key, keyfile::NO_SECURITY_KEY_SUPPORT,
-        read_header, refusal_values,
+        RESTORE_PENDING, SIMULATED_CRASH, encode_key, read_header, refusal_values,
     };
     use super::super::CORRUPT;
     use super::super::tests::{
-        Codes, NEW, OLD, Pc, THIRD, What, change, entry, keys_of, login, notices, other_of, sealed,
-        sealed_with, secrets, set_before, setup, vault_of,
+        Codes, NEW, OLD, Pc, THIRD, What, change, entry, keys_of, login, notices, other_of,
+        pass_gate, sealed, sealed_with, secrets, set_before, setup, vault_of,
     };
     use super::*;
     use crate::otp;
@@ -698,6 +1295,8 @@ mod tests {
             password_only: false,
             union_password: UnionPassword::Other,
             both_passwords: p.both_passwords,
+            #[cfg(feature = "security-key")]
+            fork_option: ForkOption::Both,
         }
     }
     /// The whole adopt of `other` as the flow runs it (spec §9.2): the
@@ -712,6 +1311,18 @@ mod tests {
         theirs: &str,
         answer: impl FnOnce(&Preview) -> Acks,
     ) -> Result<Adopted> {
+        take_with(s, codes, mine, other, theirs, GatePass::none, answer)
+    }
+    /// The same with the gate answered by `gate`.
+    fn take_with(
+        s: &mut Session,
+        codes: &mut Codes,
+        mine: &str,
+        other: &[u8],
+        theirs: &str,
+        gate: impl FnOnce(&AdoptCheck) -> GatePass,
+        answer: impl FnOnce(&Preview) -> Acks,
+    ) -> Result<Adopted> {
         let f = file(other);
         let check = s.adopt_check(&f, Source::File(f.path().to_owned()))?;
         let (code, typed) = codes.next();
@@ -720,7 +1331,7 @@ mod tests {
             Err(e) if e == AUTH_ERROR => s.adopt_open(&r, &f, Some(theirs))?,
             opened => opened?,
         };
-        let plan = s.adopt_preview(&r, &f, opened, &check, GatePass::none(&check), None)?;
+        let plan = s.adopt_preview(&r, &f, opened, &check, gate(&check), None)?;
         let acks = answer(plan.preview());
         s.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
     }
@@ -760,7 +1371,12 @@ mod tests {
         let derived = crypto::derive_count();
         assert_eq!(classify(&s, &another).err(), Some(NOT_THIS_VAULT));
         assert_eq!(classify(&s, &no_otp).err(), Some(NOT_THIS_VAULT));
-        assert_eq!(classify(&s, &hardware).err(), Some(NO_SECURITY_KEY_SUPPORT));
+        // The security-key build reads it, and it is another vault's.
+        #[cfg(not(feature = "security-key"))]
+        let refusal = keyfile::NO_SECURITY_KEY_SUPPORT;
+        #[cfg(feature = "security-key")]
+        let refusal = NOT_THIS_VAULT;
+        assert_eq!(classify(&s, &hardware).err(), Some(refusal));
         assert_eq!(crypto::derive_count(), derived);
         let (other_id_key, _) =
             sealed_with(id, &[[0x54; 32], [0x55; 32]], Some(&secret), 2, &[], NEW);
@@ -861,6 +1477,12 @@ mod tests {
                 password: PassInForce::Other,
                 vault_pending: false,
                 gap_kept: false,
+                #[cfg(feature = "security-key")]
+                renumbered: Vec::new(),
+                #[cfg(feature = "security-key")]
+                dropped_uv: Vec::new(),
+                #[cfg(feature = "security-key")]
+                suspended: Vec::new(),
             }
         );
         // The same state, and so the same key code; this PC's seal block.
@@ -1340,6 +1962,36 @@ mod tests {
         assert_eq!(key_and_anchor(&pc), before);
         let silent = 1 + keyfile::EPOCH_SILENT + 44;
         let (ahead, state) = later(0xfb, silent);
+        // More than EPOCH_SILENT above the last state this PC wrote: the
+        // security-key build takes it only with its code (G1; round 3,
+        // finding 16), the default build silently.
+        #[cfg(feature = "security-key")]
+        {
+            let check = classify(&s, &ahead).unwrap();
+            assert_eq!(check.keys.gate, Some(GateKind::G1));
+            assert!(check.keys.checked.gates.jump);
+            let f = file(&ahead);
+            let (code, typed) = codes.next();
+            let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+            let opened = s.adopt_open(&r, &f, Some(NEW)).unwrap();
+            let none = GatePass::none(&check);
+            assert_eq!(
+                s.adopt_preview(&r, &f, opened, &check, none, None).err(),
+                Some(ADOPT_STALE)
+            );
+        }
+        #[cfg(feature = "security-key")]
+        let adopted = {
+            let dk = keys_of(&ahead, NEW)[0];
+            let code = key_code(&id, &dk, state);
+            let gate = |c: &AdoptCheck| GatePass::G1Passed {
+                code,
+                epoch: c.other.epoch,
+                tag: c.other.tag,
+            };
+            take_with(&mut s, &mut codes, OLD, &ahead, NEW, gate, defaults).unwrap()
+        };
+        #[cfg(not(feature = "security-key"))]
         let adopted = take(&mut s, &mut codes, OLD, &ahead, NEW, defaults).unwrap();
         assert_eq!(adopted.state, state);
         assert_eq!(s.max_epoch(), silent);
@@ -1365,6 +2017,7 @@ mod tests {
         fs::write(pc.vault(), vault_of(&s, &dk2, state2)).unwrap();
         drop(s);
         let mut s = login(&pc, NEW, &mut codes).unwrap();
+        pass_gate(&mut s);
         assert_eq!(notices(&mut s), []);
         let lacking = |n: u8, keys: &[[u8; 32]], epoch| {
             sealed(id, &[&[[n; 32]][..], keys].concat(), epoch, &[], THIRD).0
@@ -1466,20 +2119,23 @@ mod tests {
             tag: [0x5a; 16],
         };
         let opened = s.adopt_open(&r, &f, Some(NEW)).unwrap();
-        let preview = s.adopt_preview(&r, &f, opened, &check, another, None);
+        let preview = s.adopt_preview(&r, &f, opened, &check, another.clone(), None);
         assert_eq!(preview.err(), Some(ADOPT_STALE));
         let opened = s.adopt_open(&r, &g, Some(NEW)).unwrap();
         let pass = GatePass::none(&check);
-        let preview = s.adopt_preview(&r, &f, opened, &check, pass, None);
+        let preview = s.adopt_preview(&r, &f, opened, &check, pass.clone(), None);
         assert_eq!(preview.err(), Some(ADOPT_STALE));
         let plan = |s: &Session, r: &Reauth| {
             let opened = s.adopt_open(r, &f, Some(NEW)).unwrap();
-            s.adopt_preview(r, &f, opened, &check, pass, None).unwrap()
+            s.adopt_preview(r, &f, opened, &check, pass.clone(), None)
+                .unwrap()
         };
         let acks = Acks {
             password_only: false,
             union_password: UnionPassword::Other,
             both_passwords: false,
+            #[cfg(feature = "security-key")]
+            fork_option: ForkOption::Both,
         };
         let mut changed = plan(&s, &r);
         changed.gate = another;

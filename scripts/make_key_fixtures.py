@@ -166,9 +166,10 @@ def pair_seal(vault_id, slot, h):
 
 
 def inbox(vault_id, target, h_target, writer):
-    """IK(target <- writer): a function of the target's hardware output."""
+    """IK(target <- writer): a function of the target's hardware output that
+    binds both keys' seeds, so a re-seed of either retires it (S45-2 #1)."""
     return expand(key_root(h_target), 32, b'inbox\0', vault_id, credhash(target['cred_id']),
-                  target['seed'], credhash(writer['cred_id']))
+                  target['seed'], credhash(writer['cred_id']), writer['seed'])
 
 
 def pair_ctx(vault_id, owner, target):

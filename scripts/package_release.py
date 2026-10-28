@@ -17,6 +17,13 @@ for name in os.environ:
 inputs = ['src', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo', 'assets', 'server', 'goyo-sync.conf.example']
 if subprocess.check_output(['git', 'status', '--porcelain', '--', *inputs], cwd=root).strip():
     sys.exit('Refusing to package: commit the source changes first (git status).')
+# The release is always the default build: no feature may be on by default
+# (spec §12), and the build below passes none.
+manifest = json.loads(subprocess.check_output(
+    ['cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1'], cwd=root))
+own = next(p for p in manifest['packages'] if p['name'] == 'goyo-vault')
+if own['features'].get('default'):
+    sys.exit(f"Refusing to package: the release is the default build, but default features are {own['features']['default']}.")
 # Panic locations embed source paths, e.g. C:\Users\<name>\.cargo\registry\...
 # Remap the machine-specific prefixes so the published exe names no user or folder.
 cargo_home = pathlib.Path(os.environ.get('CARGO_HOME') or pathlib.Path.home()/'.cargo')
@@ -30,15 +37,29 @@ for program in ('goyo-vault.exe', 'goyo-sync.exe'):
         for form in (private, private.replace('\\', '/')):
             if form.lower().encode() in binary.lower() or form.lower().encode('utf-16-le') in binary.lower():
                 sys.exit(f'Refusing to package: {program} contains a local path or user name ({form!r}).')
-    # The cheap test KDF and the anchor folder a test sets exist only in
-    # builds with debug assertions (src/crypto.rs, src/vault/anchor.rs);
-    # either marker in a release exe means they were on.
-    for marker, hook in (('goyo-test-kdf', 'test KDF'), ('goyo-test-anchor', 'test anchor folder')):
+    # The cheap test KDF, the anchor folder and the clock a test sets and
+    # the fake authenticator exist only in builds with debug assertions
+    # (src/crypto.rs, src/vault/anchor.rs, src/fido/fake.rs); any marker in a
+    # release exe means they were on. WebAuthn and the key-file sync channel
+    # exist only in the security-key build (spec §12): the key channel's
+    # magics, and `webauthn` in any case, mean the release is not the
+    # default build.
+    hooks = (('goyo-test-kdf', 'test KDF'), ('goyo-test-anchor', 'test anchor folder'),
+             ('goyo-test-clock', 'test clock'), ('goyo-fake-authenticator', 'fake authenticator'),
+             ('webauthn', 'security-key build'), ('goyoskO2', 'key-file sync channel'),
+             ('goyoskI2', 'key-file sync channel'), ('goyoskR1', 'key-file sync channel'))
+    for marker, hook in hooks:
+        marker = marker.lower()
         if marker.encode() in binary.lower() or marker.encode('utf-16-le') in binary.lower():
-            sys.exit(f'Refusing to package: {program} contains the {hook} hook ({marker}).')
+            sys.exit(f'Refusing to package: {program} contains the {hook} ({marker}).')
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe', 'target/release/goyo-sync.exe'], cwd=root)
+# Both programs check their own cryptography (and goyo-sync its windows).
+for program in ('goyo-vault.exe', 'goyo-sync.exe'):
+    check = subprocess.run([str(release/program), '--self-check'], cwd=root, capture_output=True, text=True)
+    if check.returncode != 0 or 'HKDF self-test: PASS' not in check.stdout:
+        sys.exit(f'Refusing to package: {program} --self-check failed: {check.stdout.strip()} {check.stderr.strip()}')
 # The server script runs on the user's server, so check the shipped copy here:
 # it must compile and pass its own selftest (CAS, history, key-file refusal).
 server = 'server/goyo-sync-server.py'
@@ -84,10 +105,12 @@ def pack(folder, staged, sums, archive, programs, exact=None):
     # Explicit lists already keep these out; a slip in a list must not ship
     # the private server settings, logs, vault data, local paths, server data,
     # this PC's key records (the anchor and the merge log, with their temp
-    # and lock files) or Python caches.
+    # and lock files), the key-file sync files of a sync folder, or Python
+    # caches.
     for name in names:
         lower = name.lower()
-        if lower.endswith(('goyo-sync.conf', '.log', '.log.1', '.pyc', '.goyo', '.goyokey', '.goyosync', '.goyolock', '.goyotmp', 'goyo-vault.paths')) \
+        if lower.endswith(('goyo-sync.conf', '.log', '.log.1', '.pyc', '.goyo', '.goyokey', '.goyosync', '.goyolock', '.goyotmp', 'goyo-vault.paths',
+                           '.goyokeysync', 'prune.request', 'helper.keystate', 'keysync.off')) \
                 or '/data/' in lower or '__pycache__' in lower or '.goyo.sync/' in lower \
                 or 'goyo-vault.keys' in lower or 'goyo-vault.merges' in lower:
             sys.exit(f'Refusing to package: {name} must never be in a release.')

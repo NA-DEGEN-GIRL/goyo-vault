@@ -21,8 +21,8 @@ poly1305 = { version = "=0.8.0", default-features = false, features = ["zeroize"
 
 [features]
 default = []
-# Experimental FIDO2 security-key support; turns on no dependency. Nothing is
-# behind it yet: the default build and this one are the same so far.
+# Experimental FIDO2 security-key support; turns on no dependency. The
+# release is always the default build (scripts/package_release.py).
 security-key = []
 
 [profile.release]

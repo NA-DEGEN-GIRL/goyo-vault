@@ -92,6 +92,66 @@ pub(crate) fn test_now() -> Option<u64> {
     TEST_NOW.with(std::cell::Cell::get)
 }
 
+/// What an open did, in order, for the tests that prove a wrong password
+/// and a wrong security key fail the same way (spec §14.1-4).
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Event {
+    Argon2,
+    /// The commitment of a pair record or S-wrap was compared.
+    #[cfg(feature = "security-key")]
+    WrapCommit,
+    /// The AEAD of a pair record or S-wrap ran.
+    #[cfg(feature = "security-key")]
+    WrapAead,
+    /// `C_body` was compared.
+    BodyCommit,
+    BodyAead,
+}
+#[cfg(test)]
+thread_local! {
+    static EVENTS: std::cell::RefCell<Vec<Event>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+pub(crate) fn note(event: Event) {
+    EVENTS.with(|e| e.borrow_mut().push(event));
+}
+/// The events this thread noted since the last call.
+#[cfg(test)]
+pub(crate) fn take_events() -> Vec<Event> {
+    EVENTS.with(|e| e.take())
+}
+
+/// Marks the test clock: package_release.py refuses an exe holding it.
+#[cfg(debug_assertions)]
+const TEST_CLOCK_MARKER: &str = "goyo-test-clock";
+#[cfg(debug_assertions)]
+thread_local! {
+    /// A clock in milliseconds that a test moves itself (spec §8.5). The
+    /// fake authenticator gets the same one, so both threads read it.
+    static TEST_CLOCK: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicU64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Sets (or with None clears) this thread's test clock.
+#[cfg(debug_assertions)]
+pub fn set_test_clock(clock: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>) {
+    TEST_CLOCK.with(|c| *c.borrow_mut() = clock);
+}
+/// Milliseconds on a monotonic clock, for every age and limit counted in
+/// time (spec §8.5): the ceremony's cap, the Reauth's age, a typed code's.
+/// Only its differences mean anything. A build with debug assertions reads
+/// a test clock instead while one is set on this thread.
+pub fn now_ms() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Some(clock) = TEST_CLOCK.with(|c| c.borrow().clone()) {
+        std::hint::black_box(TEST_CLOCK_MARKER);
+        return clock.load(std::sync::atomic::Ordering::SeqCst);
+    }
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
     let mut out = Zeroizing::new([0; N]);
     random_into(out.as_mut_slice())?;
@@ -157,6 +217,8 @@ fn rdseed() -> Result<u64> {
 pub fn derive(password: &[u8], salt: &[u8; 32]) -> Result<Key> {
     #[cfg(debug_assertions)]
     DERIVES.with(|n| n.set(n.get() + 1));
+    #[cfg(test)]
+    note(Event::Argon2);
     let (memory, passes) = kdf_params();
     let params = Params::new(memory, passes, 1, Some(32)).map_err(|_| "KDF 설정 오류")?;
     let blocks = params.block_count();
@@ -435,6 +497,32 @@ mod tests {
         assert_eq!(test_now(), Some(7));
         set_test_now(None);
         assert_eq!(test_now(), None);
+    }
+    #[test]
+    fn a_test_clock_replaces_the_monotonic_clock_on_its_thread() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        let before = now_ms();
+        let clock = Arc::new(AtomicU64::new(7_000_000_000));
+        set_test_clock(Some(clock.clone()));
+        assert_eq!(now_ms(), 7_000_000_000);
+        clock.fetch_add(150_000, Ordering::SeqCst);
+        assert_eq!(now_ms(), 7_000_150_000);
+        // Another thread keeps the real clock unless it is handed the same
+        // one.
+        let shared = clock.clone();
+        std::thread::spawn(move || {
+            assert!(now_ms() < 7_000_000_000);
+            set_test_clock(Some(shared));
+            assert_eq!(now_ms(), 7_000_150_000);
+        })
+        .join()
+        .unwrap();
+        set_test_clock(None);
+        let after = now_ms();
+        assert!(before <= after && after < 7_000_000_000);
     }
     #[test]
     #[should_panic(expected = "recorded random value of the wrong length")]

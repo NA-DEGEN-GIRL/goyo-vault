@@ -14,8 +14,12 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 mod anchor;
+#[cfg(feature = "security-key")]
+mod gate;
 pub mod keyfile;
 mod recover;
+#[cfg(feature = "security-key")]
+mod review;
 mod rotate;
 mod sync;
 #[cfg(debug_assertions)]
@@ -25,9 +29,15 @@ pub use anchor::{
     AnchorClass, SIDECAR_FAILED,
 };
 use anchor::{Decision, Refusal, Seen};
+#[cfg(feature = "security-key")]
+pub use gate::{
+    ANCHOR_OTP, ANCHOR_PINNED, ANCHOR_RELIST_KEYS, Checked, GATE_CODE_WRONG, GATE_G2FAIL,
+    GATE_G2FAIL_DISK, GATE_HELD, GATE_NOT_PENDING, GateAnswer, GateChoice, GateKind, Gates,
+    TOFU_ADOPT, TOFU_HELD, parse_code,
+};
 use keyfile::{
     Bundle, EPOCH_LIMIT, EPOCH_MAX, EPOCH_SILENT, KEY_FILE_LIMIT, KeyFile, KeyState, Magic,
-    NEWER_KEY_FORMAT, NO_SECURITY_KEY_SUPPORT, NO_SECURITY_KEY_SUPPORT_DAMAGED, encode_key,
+    NEWER_KEY_FORMAT, NO_SECURITY_KEY_SUPPORT, NO_SECURITY_KEY_SUPPORT_DAMAGED, Touch, encode_key,
 };
 pub use keyfile::{KeyInfo, key_info};
 pub use recover::Recovery;
@@ -37,6 +47,12 @@ pub use rotate::{
     KEY_DAMAGED_LOCKED, KEY_NOT_SAVED, KEYTEMP, KEYTEMP_GONE, LostKeyAddOn, NOT_THIS_VAULT,
     NOTHING_HELD, OVERRIDE_HEAD, OtherOpened, PassInForce, Preview, REAUTH_MAX, Reauth, Rekeyed,
     SAMEPASS, Source, UnionPassword, VPENDING,
+};
+#[cfg(feature = "security-key")]
+pub use rotate::{
+    ANCHOR_FAILED, Exposure, ForkOption, KEYSOFF_SYNCED, KeyGates, LossReport, NOT_PLANNED,
+    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, UNION_FULL,
+    UNREACHABLE,
 };
 pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
@@ -577,6 +593,45 @@ impl Provision {
         session.entries.shrink_to_fit();
         Ok(session)
     }
+    /// The new vault's ID, which every registration's salt binds (spec
+    /// §3.2, §8.3).
+    #[cfg(feature = "security-key")]
+    pub fn vault_id(&self) -> [u8; 16] {
+        self.id
+    }
+    /// The code from the phone that scanned the QR, checked as of `otp_time`
+    /// before any registration (spec §5.9): its time step.
+    #[cfg(feature = "security-key")]
+    pub fn check_otp(&self, input: &str, otp_time: u64) -> Result<u64> {
+        let now = otp::now()?;
+        if now.saturating_sub(otp_time) > OTP_TYPED_MAX || otp_time > now.saturating_add(5) {
+            return Err(AUTH_ERROR);
+        }
+        otp::verify(self.otp.as_slice(), input, otp_time, None)
+    }
+    /// The anchor this vault's line goes to can be written: a locked read
+    /// and a rewrite of the file as it is, before any registration (spec
+    /// §5.9, S45-2 #7).
+    #[cfg(feature = "security-key")]
+    pub fn check_anchor(&self) -> Result<()> {
+        rotate::probe_anchor(&self.id)
+    }
+    /// Writes the new vault with security keys (spec §5.9): the key file
+    /// GOYOKH01 with every key registered here paired with every other, and
+    /// the vault file under its key. `otp_step` is what `check_otp` gave; None
+    /// makes a vault without an OTP.
+    #[cfg(feature = "security-key")]
+    pub fn finish_with_keys(
+        &self,
+        vault: &Path,
+        key_path: &Path,
+        password: &str,
+        otp_step: Option<u64>,
+        pin: bool,
+        keys: Vec<crate::fido::NewKey>,
+    ) -> Result<Session> {
+        rotate::create_with_keys(self, (vault, key_path), password, otp_step, pin, keys)
+    }
 }
 pub const MIN_PASSWORD: usize = 12;
 /// Common words, keyboard walks, runs and repeats are what guessing tools try
@@ -709,7 +764,7 @@ pub struct Precheck {
 /// failed attempt. `restore`: the vault file is a backup the user picked,
 /// which opens under any key of the key file and is never taken from a temp
 /// file.
-fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<(Precheck, Seen)> {
+fn precheck(vault: &Path, key: &KeyFile, restore: bool, forget: bool) -> Result<(Precheck, Seen)> {
     // Step 1: a security-key file, decided on its magic alone. Step 2 for
     // the key file: a newer magic never became a KeyFile.
     if let Some(refusal) = key.refusal() {
@@ -736,6 +791,15 @@ fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<(Precheck, See
     // Step 9 runs here, before every step that depends on the vault file
     // (S23-3 #16): this PC's anchor against the key file alone.
     let mut seen = anchor::look(&id, key, key.path(), restore);
+    // The per-vault forget (security-key build, spec §5.10): this vault's
+    // lines are ignored in memory, and every key file is a bootstrap.
+    #[cfg(feature = "security-key")]
+    if forget {
+        (seen.lines, seen.pending, seen.forgotten) =
+            (anchor::Lines::default(), Decision::None, true);
+    }
+    #[cfg(not(feature = "security-key"))]
+    let _ = forget;
     let confirmed = seen.confirmed();
     let kf2 = key.header();
     let class = match kf2 {
@@ -743,6 +807,15 @@ fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<(Precheck, See
         None => anchor::compare_legacy(confirmed.as_ref()),
     };
     seen.class = match class {
+        #[cfg(feature = "security-key")]
+        _ if forget => AnchorClass::Bootstrap,
+        // A password-only key file with no record of this vault, where
+        // anything shows that security keys were once on: a bootstrap too
+        // (spec §5.1 step 9, round 2, finding 10).
+        #[cfg(feature = "security-key")]
+        Ok(AnchorClass::New) if signs_of_keys(vault, data.as_deref(), key) => {
+            AnchorClass::Bootstrap
+        }
         Ok(class) => class,
         // A Restore reads a backup with the key file of its time: it runs
         // held instead (spec §5.1, S23-1 #17).
@@ -783,7 +856,10 @@ fn precheck(vault: &Path, key: &KeyFile, restore: bool) -> Result<(Precheck, See
     let epoch = kf2.map_or(0, |h| h.epoch);
     let Some(index) = key_index(kf2.map(|h| h.key_ids.as_slice()), &header) else {
         return Err(match header {
-            _ if header.hardware() => NO_SECURITY_KEY_SUPPORT_VAULT,
+            // Only a build without security-key support says why here.
+            _ if !cfg!(feature = "security-key") && header.hardware() => {
+                NO_SECURITY_KEY_SUPPORT_VAULT
+            }
             _ if restore => KEY_NOT_IN_BACKUP,
             // Another PC changed the key of a vault file both PCs open, each
             // with its own key-file copy (S23-3 #8). The epoch is only words.
@@ -832,6 +908,34 @@ fn header_key_id(kf2: Option<&keyfile::KeyHeader>, header: &Header) -> Option<[u
         Header::Legacy => kf2.and_then(|h| h.key_ids.last().copied()),
     }
 }
+/// Whether a vault this PC has no record of shows that it used security
+/// keys (spec §5.1 step 9, round 2, finding 10): a vault file, a temp copy
+/// of it or a synced copy with the hardware flag, or a password-only key
+/// file whose removals or key numbers show that keys were on.
+#[cfg(feature = "security-key")]
+fn signs_of_keys(vault: &Path, data: Option<&[u8]>, key: &KeyFile) -> bool {
+    let hardware = |bytes: &[u8]| read_header(bytes).is_ok_and(|(_, h)| h.hardware());
+    if key
+        .header()
+        .is_some_and(|h| !h.tombstones.is_empty() || h.next > 1)
+        || data.is_some_and(hardware)
+    {
+        return true;
+    }
+    if recover::candidates(vault, MAX_FILE)
+        .iter()
+        .any(|c| hardware(&c.bytes))
+    {
+        return true;
+    }
+    use crate::syncfile::{INCOMING, MAX_WRAPPED, OUTGOING, parse_incoming, parse_outgoing};
+    let Some(dir) = crate::syncfile::sync_dir(vault) else {
+        return false;
+    };
+    let wrapped = |name: &str| crate::syncfile::read_bounded(&dir.join(name), MAX_WRAPPED).ok();
+    wrapped(INCOMING).is_some_and(|b| parse_incoming(&b).is_some_and(|(_, v)| hardware(v)))
+        || wrapped(OUTGOING).is_some_and(|b| parse_outgoing(&b).is_some_and(|(_, v)| hardware(v)))
+}
 /// The text of an anchor refusal (spec §5.10).
 fn refused(refusal: Refusal) -> &'static str {
     match refusal {
@@ -841,12 +945,29 @@ fn refused(refusal: Refusal) -> &'static str {
         Refusal::TooFar { old, new } => {
             refuse(ANCHOR_EPOCH, vec![new.to_string(), old.to_string()])
         }
+        #[cfg(feature = "security-key")]
+        Refusal::RelistKeys => gate::ANCHOR_RELIST_KEYS,
+        #[cfg(feature = "security-key")]
+        Refusal::Pinned => gate::ANCHOR_PINNED,
+        #[cfg(feature = "security-key")]
+        Refusal::Otp => gate::ANCHOR_OTP,
     }
 }
 /// Whether an unlock or Restore error came with no wrong password or OTP
 /// code: a refusal of the files themselves (spec §4.7, §5.1), or an
 /// older-key vault file not agreed to. The app starts no retry delay.
 pub fn not_a_failure(e: &str) -> bool {
+    #[cfg(feature = "security-key")]
+    if keyfile::inbox::not_a_failure(e)
+        || [
+            gate::ANCHOR_RELIST_KEYS,
+            gate::ANCHOR_PINNED,
+            gate::ANCHOR_OTP,
+        ]
+        .contains(&e)
+    {
+        return true;
+    }
     [
         NO_SECURITY_KEY_SUPPORT,
         NO_SECURITY_KEY_SUPPORT_DAMAGED,
@@ -891,6 +1012,25 @@ impl Prepared {
     /// authentication may mean that copy needs other factors.
     pub fn key_temp(&self) -> bool {
         self.key_temp.is_some()
+    }
+    /// The allow list of the unlock's ceremony (spec §5.2 step 4): every
+    /// live key of the key file, suspended ones included, each with its
+    /// salt. None for a key file without security keys.
+    #[cfg(feature = "security-key")]
+    pub fn unlock_request(&self, owner: isize) -> Option<crate::fido::AssertRequest> {
+        let h = self.key.header().filter(|h| !h.slots.is_empty())?;
+        let allow = h
+            .slots
+            .iter()
+            .map(|s| {
+                (
+                    s.cred_id.clone(),
+                    crate::fido::salt(&h.vault_id, &s.seed),
+                    None,
+                )
+            })
+            .collect();
+        crate::fido::AssertRequest::new(owner, allow, h.pin()).ok()
     }
     /// What a failed authentication of these files says instead of
     /// AUTH_ERROR (spec §5.12): rule (i)'s text for a key file that is only
@@ -957,13 +1097,21 @@ impl Prepared {
 }
 /// Phase 1 of a login: reads the key file and prechecks the vault file.
 pub fn prepare(vault: &Path, key_path: &Path) -> Result<Prepared> {
-    prepared(vault, key_path, false)
+    prepared(vault, key_path, false, false)
+}
+/// Phase 1 of a login after S-ANCHOR-FORGET's yes (spec §5.10, round 4,
+/// finding 13): this PC's record of the vault is ignored, and the key
+/// file, whatever it is, opens as a bootstrap; the record is removed only
+/// by the TOFU pass, so a lock or crash before it leaves it as it was.
+#[cfg(feature = "security-key")]
+pub fn prepare_forgotten(vault: &Path, key_path: &Path) -> Result<Prepared> {
+    prepared(vault, key_path, false, true)
 }
 /// Phase 1 of a Restore of `backup`.
 pub fn prepare_restore(backup: &Path, key_path: &Path) -> Result<Prepared> {
-    prepared(backup, key_path, true)
+    prepared(backup, key_path, true, false)
 }
-fn prepared(source: &Path, key_path: &Path, restore: bool) -> Result<Prepared> {
+fn prepared(source: &Path, key_path: &Path, restore: bool, forget: bool) -> Result<Prepared> {
     let source = normalized(source)?;
     let key_path = normalized(key_path)?;
     distinct(&source, &key_path)?;
@@ -979,7 +1127,7 @@ fn prepared(source: &Path, key_path: &Path, restore: bool) -> Result<Prepared> {
         }
     };
     let key = KeyFile::from_bytes(&key_path, bytes)?;
-    let (check, seen) = precheck(&source, &key, restore)?;
+    let (check, seen) = precheck(&source, &key, restore, forget)?;
     Ok(Prepared {
         source,
         key_path,
@@ -1049,6 +1197,14 @@ pub enum KeyNotice {
     /// That temp file and the key file are both gone: back up the key file
     /// from memory now (S-KEYTEMP-GONE).
     KeyTempGone,
+    /// A removal of the keys with these numbers never landed: this PC is
+    /// not protected yet (S-REMOVE-UNDONE, in place of S-NOTFINISHED).
+    #[cfg(feature = "security-key")]
+    RemoveUndone(Vec<u8>),
+    /// The anchor could not be written for a security-key session: key
+    /// changes, adopts and uploads wait until it can (S-ANCHOR-FAILED).
+    #[cfg(feature = "security-key")]
+    AnchorFailed,
 }
 
 pub struct Session {
@@ -1136,6 +1292,44 @@ pub struct Session {
     /// A key change whose vault file could only be saved later: the save
     /// that does it seals the change in the anchor (spec §5.5 S3).
     seal_due: bool,
+    /// The number of the security key this session was unlocked with.
+    #[cfg(feature = "security-key")]
+    unlocked_with: Option<u8>,
+    /// Trust on first use (spec §7.17): this PC has not confirmed the key
+    /// file's state, so no edit, key change or upload before G1.
+    #[cfg(feature = "security-key")]
+    tofu: bool,
+    /// A changed key file at login waits for its gate (gate-pending mode,
+    /// spec §5.2): no edit, no write, no merge and no upload until it passes.
+    #[cfg(feature = "security-key")]
+    gate_login: Option<gate::GateLogin>,
+    /// What the unlock left for the gate or TOFU pass (spec §5.2 steps 8-9).
+    #[cfg(feature = "security-key")]
+    deferred: gate::Deferred,
+    /// This vault's anchor lines are ignored until the TOFU pass removes
+    /// them (the per-vault forget, spec §5.10).
+    #[cfg(feature = "security-key")]
+    forgotten: bool,
+    /// A held session (`local_rollback`) whose confirmed line lacks `t`, or
+    /// that has none: TOFU's refusals apply on top of the hold (no edit, no
+    /// key change, no outgoing write), with no TOFU pass, until the hold
+    /// lifts (spec §5.2 step 9(a), S45-3 #2).
+    #[cfg(feature = "security-key")]
+    held_unconfirmed: bool,
+    /// The post-removal review due on this PC (spec §5.13), with its loss
+    /// date: the vault outgoing waits until it is done.
+    #[cfg(feature = "security-key")]
+    review_due: Option<String>,
+    /// The anchor could not be written for a security-key session
+    /// (AnchorFailed, spec §5.10): key changes, adopts and every outgoing
+    /// write wait until a write succeeds, retried at every save and poll.
+    #[cfg(feature = "security-key")]
+    anchor_failed: bool,
+    /// A pick failed in this session since a gate last passed: G2 is off
+    /// for it whether or not `g2=off` reached the anchor (spec §7.15a), so
+    /// an anchor that cannot be written never allows a second pick.
+    #[cfg(feature = "security-key")]
+    g2_spent: std::cell::Cell<bool>,
     _locks: Vec<FileLock>,
 }
 /// A session's view of the anchor (spec §5.10).
@@ -1197,6 +1391,24 @@ impl Session {
             pending_elsewhere: None,
             anchor: AnchorView::default(),
             seal_due: false,
+            #[cfg(feature = "security-key")]
+            unlocked_with: None,
+            #[cfg(feature = "security-key")]
+            tofu: false,
+            #[cfg(feature = "security-key")]
+            gate_login: None,
+            #[cfg(feature = "security-key")]
+            deferred: gate::Deferred::default(),
+            #[cfg(feature = "security-key")]
+            forgotten: false,
+            #[cfg(feature = "security-key")]
+            held_unconfirmed: false,
+            #[cfg(feature = "security-key")]
+            review_due: None,
+            #[cfg(feature = "security-key")]
+            anchor_failed: false,
+            #[cfg(feature = "security-key")]
+            g2_spent: std::cell::Cell::new(false),
             _locks: Vec::new(),
         }
     }
@@ -1235,7 +1447,8 @@ impl Session {
         otp_time: u64,
         confirmed_older: Option<[u8; 32]>,
     ) -> Result<Self> {
-        Self::load(prepared, password, input, otp_time, confirmed_older, None)
+        let factors = (password, input, otp_time);
+        Self::load(prepared, factors, None, confirmed_older, None)
     }
     /// Phase 3 of a Restore into the new file `destination`.
     pub fn restore_from(
@@ -1245,16 +1458,45 @@ impl Session {
         input: &str,
         otp_time: u64,
     ) -> Result<Self> {
-        Self::load(prepared, password, input, otp_time, None, Some(destination))
+        let factors = (password, input, otp_time);
+        Self::load(prepared, factors, None, None, Some(destination))
     }
-    fn load(
+    /// Phase 3 of a login with a key file that needs a security key: the
+    /// same with the touch of the unlock's ceremony (spec §5.2 step 3).
+    #[cfg(feature = "security-key")]
+    pub fn login_with(
         prepared: Prepared,
         password: &str,
         input: &str,
         otp_time: u64,
         confirmed_older: Option<[u8; 32]>,
+        touch: &Touch,
+    ) -> Result<Self> {
+        let factors = (password, input, otp_time);
+        Self::load(prepared, factors, Some(touch), confirmed_older, None)
+    }
+    /// Phase 3 of a Restore with such a key file.
+    #[cfg(feature = "security-key")]
+    pub fn restore_with(
+        prepared: Prepared,
+        destination: &Path,
+        password: &str,
+        input: &str,
+        otp_time: u64,
+        touch: &Touch,
+    ) -> Result<Self> {
+        let factors = (password, input, otp_time);
+        Self::load(prepared, factors, Some(touch), None, Some(destination))
+    }
+    /// `factors`: the password, the OTP code as typed and when it was typed.
+    fn load(
+        prepared: Prepared,
+        factors: (&str, &str, u64),
+        touch: Option<&Touch>,
+        confirmed_older: Option<[u8; 32]>,
         destination: Option<&Path>,
     ) -> Result<Self> {
+        let (password, input, otp_time) = factors;
         if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
@@ -1282,7 +1524,12 @@ impl Session {
         if key.uses_otp() && !otp_format(input) {
             return Err(AUTH_ERROR);
         }
-        let opened = key.open(password, None)?;
+        let opened = key.open(password, touch)?;
+        #[cfg(feature = "security-key")]
+        let unlocked_with = opened
+            .slot
+            .and_then(|j| key.header()?.slots.get(usize::from(j)))
+            .map(|slot| slot.number);
         let id = key.vault_id().ok_or(AUTH_ERROR)?;
         let kf2 = key.header();
         let kf2_ids = kf2.map(|h| h.key_ids.as_slice());
@@ -1301,12 +1548,22 @@ impl Session {
                 Err(refusal) => return Err(refused(refusal)),
             };
         }
+        // A changed key file whose gate has not passed: gate-pending mode
+        // for a login; a Restore runs held instead (spec §5.1, S45-3 #3).
+        #[cfg(feature = "security-key")]
+        let gated = match class {
+            AnchorClass::Gated(kind) if login => Some(kind),
+            _ => None,
+        };
+        #[cfg(not(feature = "security-key"))]
+        let gated: Option<()> = None;
         let consumed = confirmed.as_ref().and_then(|l| l.state.consumed);
         let (format, header, mut contents, index, vault_temp, resumed) =
             match read_bounded(&source, MAX_FILE) {
                 Ok(data) => {
                     let (_, header) = read_header(&data)?;
-                    let index = key_index(kf2_ids, &header).ok_or(if header.hardware() {
+                    let hardware = !cfg!(feature = "security-key") && header.hardware();
+                    let index = key_index(kf2_ids, &header).ok_or(if hardware {
                         NO_SECURITY_KEY_SUPPORT_VAULT
                     } else if login {
                         KEY_NOT_IN_KEY_FILE
@@ -1388,7 +1645,7 @@ impl Session {
             keys: &keys,
             ids: kf2_ids,
             state: key_state,
-            hold: class == AnchorClass::Rollback,
+            hold: class == AnchorClass::Rollback || gated.is_some(),
         };
         let pending = sync::Pending::find(login, &source, &key_path, format, own, contents.view());
         let Contents {
@@ -1429,6 +1686,10 @@ impl Session {
         (s.last, s.format, s.generation, s.seen) = (step, format, generation, seen_generation);
         (s.entries, s.tombstones) = (entries, tombstones);
         (s.max_epoch, s.stale_key_file) = (max_epoch, stale_key_file);
+        #[cfg(feature = "security-key")]
+        {
+            s.unlocked_with = unlocked_with;
+        }
         s._locks = locks;
         s.anchor = AnchorView {
             dir: seen.dir.clone(),
@@ -1440,11 +1701,40 @@ impl Session {
         // Restore with a key file other than the confirmed one, or while a
         // key change of this PC waits for a login, runs held too and takes
         // no key file (spec §5.1).
+        #[cfg(feature = "security-key")]
+        let would_gate = matches!(class, AnchorClass::Gated(_));
+        #[cfg(not(feature = "security-key"))]
+        let would_gate = false;
         let restore_held = !login
             && (matches!(class, AnchorClass::Fork | AnchorClass::Rollback)
+                || would_gate
                 || seen.lines.pending.is_some());
         s.local_rollback = class == AnchorClass::Rollback || restore_held;
         (s.restore_held, s.restored) = (restore_held, !login);
+        // Trust on first use (spec §5.2 step 9(a), §7.17), judged by the
+        // confirmed line: a key file with security keys, or a bootstrap,
+        // with no line or a line without `t`. Never a held session, nor one
+        // waiting for its login gate; a held session keeps TOFU's refusals
+        // on top of the hold instead (S45-3 #2). A Restore of a key file
+        // with security keys this PC has no record of writes nothing until
+        // G1, nor does a held one (no `vault` line, only a pending one).
+        #[cfg(feature = "security-key")]
+        let bootstrap_restore = {
+            s.forgotten = seen.forgotten;
+            let hardware = s.key_file.needs_security_key();
+            s.gate_login = gated.map(|kind| gate::GateLogin {
+                state: key_state,
+                kind,
+            });
+            let unconfirmed = (hardware || class == AnchorClass::Bootstrap)
+                && gated.is_none()
+                && confirmed.as_ref().is_none_or(|l| !l.state.flags.t);
+            s.tofu = unconfirmed && !s.local_rollback;
+            s.held_unconfirmed = unconfirmed && s.local_rollback;
+            !login && unconfirmed && confirmed.is_none()
+        };
+        #[cfg(not(feature = "security-key"))]
+        let bootstrap_restore = false;
         // The vault file's name back first, without replacing a file that
         // appeared meanwhile; if the rename fails, the contents are saved
         // under it instead.
@@ -1472,7 +1762,14 @@ impl Session {
         // not yet under the current key with this key file's header.
         let otp = s.uses_otp();
         let mut too_large = false;
-        if !merged && (!login || otp || rekeyed) {
+        // Gate-pending mode and a bootstrap Restore write no vault file
+        // before the gate: the pass does it (spec §5.2 step 8, §7.17).
+        let deferred = gated.is_some() || bootstrap_restore;
+        #[cfg(feature = "security-key")]
+        {
+            s.deferred.resave = deferred && !merged && (!login || otp || rekeyed);
+        }
+        if !merged && !deferred && (!login || otp || rekeyed) {
             let written = match s.encode() {
                 Ok(data) => s.write_with(&data, login),
                 // A 0.8 file within 44 bytes of the limit: the longer
@@ -1494,6 +1791,17 @@ impl Session {
                 s.resave_due = true;
             }
         }
+        // An OTP vault in gate-pending mode still persists the consumed step
+        // before any secret is exposed (spec §5.2 step 8, stage 4): the vault
+        // file is written again under exactly the key and header it was read
+        // with, so nothing goes under the changed key file's data key before
+        // its gate; the re-save under it waits for the pass.
+        #[cfg(feature = "security-key")]
+        if !merged && gated.is_some() && otp {
+            let key = s.keys.keys().get(index).ok_or(AUTH_ERROR)?;
+            let data = encode_data(&s.id, key, &header, s.format, s.data())?;
+            s.write_with(&data, true)?;
+        }
         if login {
             // The anchor (spec §5.2 step 7, step 9): this PC's pending change
             // promoted or dropped, the confirmed line of a new or later key
@@ -1513,7 +1821,35 @@ impl Session {
                 None
             };
             s.key_notices.extend(first.clone());
-            let not_finished = s.anchor_at_unlock(&seen, class, index == 0, rekeyed)?;
+            let dropped = s.anchor_at_unlock(&seen, class, index == 0, rekeyed)?;
+            // A removal that never landed names its keys (S-REMOVE-UNDONE,
+            // spec §5.2 step 7): this PC is not protected yet.
+            #[cfg(feature = "security-key")]
+            let undone = dropped
+                .as_ref()
+                .filter(|p| {
+                    matches!(
+                        p.src,
+                        anchor::Src::Lost
+                            | anchor::Src::Retire
+                            | anchor::Src::Adopt
+                            | anchor::Src::Accept
+                    ) && !p.rm.is_empty()
+                })
+                .map(|p| p.rm.iter().map(|(n, _)| *n).collect::<Vec<u8>>());
+            let not_finished = dropped.is_some();
+            // The post-removal review due from the anchor or the merge log
+            // (spec §5.13 "Due is durable").
+            #[cfg(feature = "security-key")]
+            s.review_load();
+            // The unlock key's own pair records that do not open (spec §5.2
+            // step 9(c)).
+            #[cfg(feature = "security-key")]
+            if let Some(touch) = touch
+                && !s.forgotten
+            {
+                s.check_own_pairs(touch);
+            }
             if class == AnchorClass::Rollback {
                 let old = confirmed.as_ref().map_or(0, |l| l.state.epoch);
                 s.key_notices.push(KeyNotice::LocalRollback {
@@ -1538,8 +1874,14 @@ impl Session {
             // A key file's temp of a later epoch is a change that never
             // landed: told once, with a pending entry dropped above.
             if recover::clean(&s, &key_path) || not_finished {
-                s.key_notices
-                    .insert(usize::from(first.is_some()), KeyNotice::NotFinished);
+                #[cfg(feature = "security-key")]
+                let notice = match undone {
+                    Some(numbers) => KeyNotice::RemoveUndone(numbers),
+                    None => KeyNotice::NotFinished,
+                };
+                #[cfg(not(feature = "security-key"))]
+                let notice = KeyNotice::NotFinished;
+                s.key_notices.insert(usize::from(first.is_some()), notice);
             }
             s.key_backup_due = s.key_file.header().is_some()
                 && !s
@@ -1586,17 +1928,24 @@ impl Session {
     /// again. A 0.8 session writes nothing of its own. Every change of these
     /// lines is one locked write, made only while they are still what the
     /// precheck read; when it cannot be written, a password-only session
-    /// keeps it in memory. Returns whether a pending entry was dropped.
+    /// keeps it in memory. Returns the pending entry of this PC's own that
+    /// was dropped, if any.
     fn anchor_at_unlock(
         &mut self,
         seen: &Seen,
         class: AnchorClass,
         current_at_read: bool,
         rekeyed: bool,
-    ) -> Result<bool> {
+    ) -> Result<Option<anchor::PendingLine>> {
+        // A forgotten record is written by the TOFU pass alone.
+        #[cfg(feature = "security-key")]
+        if seen.forgotten {
+            self.deferred.seal = current_at_read || (rekeyed && self.current());
+            return Ok(None);
+        }
         let snapshot = seen.lines.clone();
         let mut wanted = snapshot.clone();
-        let mut dropped = false;
+        let mut dropped = None;
         match &seen.pending {
             Decision::Promote { .. } => {
                 if let Some(p) = wanted.pending.take() {
@@ -1607,8 +1956,8 @@ impl Session {
                 // A dropped TOFU entry is no change of this PC's own.
                 dropped = snapshot
                     .pending
-                    .as_ref()
-                    .is_some_and(|p| p.src != anchor::Src::Tofu);
+                    .clone()
+                    .filter(|p| p.src != anchor::Src::Tofu);
                 wanted.pending = None;
             }
             Decision::Leave(path) => self.pending_elsewhere = Some(path.clone()),
@@ -1623,11 +1972,19 @@ impl Session {
                 }
                 _ => {}
             }
-            let seal =
+            #[cfg_attr(not(feature = "security-key"), allow(unused_mut))]
+            let mut seal =
                 class != AnchorClass::Rollback && (current_at_read || (rekeyed && self.current()));
             // The vault file could not be saved under the current key yet:
             // the save that does it seals the change.
             self.seal_due = !seal && class != AnchorClass::Rollback && rekeyed;
+            // In gate-pending mode or TOFU, K's state is not confirmed yet:
+            // its seal waits for the pass (spec §5.2 step 7).
+            #[cfg(feature = "security-key")]
+            if self.tofu || self.gate_login.is_some() {
+                self.deferred.seal = seal;
+                (seal, self.seal_due) = (false, false);
+            }
             if let Some(v) = wanted.vault.as_mut().filter(|_| seal)
                 && v.state.key_state() == self.key_state
             {
@@ -1642,11 +1999,22 @@ impl Session {
         let moved = kf2.is_some() && wanted.vault.is_some() && !snapshot.first;
         let mut differed = false;
         if changed || moved {
+            let promoted = matches!(seen.pending, Decision::Promote { .. });
             self.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
                 if (&lines.vault, &lines.pending) != (&snapshot.vault, &snapshot.pending) {
                     differed = true;
                     return false;
                 }
+                // The gate effects of this PC's own landed change (spec
+                // §7.15a).
+                #[cfg(feature = "security-key")]
+                if let Some(p) = snapshot.pending.as_ref().filter(|_| promoted) {
+                    anchor::apply_clears(lines, p);
+                    anchor::apply_review(lines, p);
+                    anchor::apply_clone(lines, p);
+                }
+                #[cfg(not(feature = "security-key"))]
+                let _ = promoted;
                 lines.vault = wanted.vault.clone();
                 lines.pending = wanted.pending.clone();
                 true
@@ -1679,7 +2047,9 @@ impl Session {
     /// cannot be written, a password-only session keeps the lines in memory
     /// and says so once (S-SIDECAR-FAILED, or S-ANCHOR-NEWER for a later
     /// version's file, which is never written); every save and poll tries
-    /// again. Ok(false) then; Err only for a test's simulated crash.
+    /// again. A security-key session keeps them the same way, held by
+    /// AnchorFailed meanwhile (S-ANCHOR-FAILED). Ok(false) then; Err only
+    /// for a test's simulated crash.
     fn anchor_update(
         &mut self,
         wait: std::time::Duration,
@@ -1699,6 +2069,10 @@ impl Session {
                     Ok(lines) => {
                         self.anchor.lines = lines;
                         self.anchor.unsaved = false;
+                        #[cfg(feature = "security-key")]
+                        {
+                            self.anchor_failed = false;
+                        }
                         return Ok(true);
                     }
                     #[cfg(test)]
@@ -1717,11 +2091,24 @@ impl Session {
         if failure == anchor::Failure::Newer {
             self.anchor.frozen = true;
         }
+        // A security-key session is held meanwhile (AnchorFailed).
+        #[cfg(feature = "security-key")]
+        let failed = {
+            let hardware = self.hardware_anchor();
+            self.anchor_failed |= hardware && self.anchor.unsaved;
+            if hardware {
+                KeyNotice::AnchorFailed
+            } else {
+                KeyNotice::SidecarFailed
+            }
+        };
+        #[cfg(not(feature = "security-key"))]
+        let failed = KeyNotice::SidecarFailed;
         if self.anchor.unsaved && !std::mem::replace(&mut self.anchor.told, true) {
             self.key_notices.push(if self.anchor.frozen {
                 KeyNotice::AnchorNewer
             } else {
-                KeyNotice::SidecarFailed
+                failed
             });
         }
         Ok(false)
@@ -1786,8 +2173,20 @@ impl Session {
     /// which has none.
     pub fn key_code(&self) -> Option<String> {
         self.key_file.header()?;
+        // Not before the key file is confirmed: gate-pending mode shows only
+        // the anchor, and TOFU asks for the code instead (spec §5.10,
+        // §7.17).
+        #[cfg(feature = "security-key")]
+        if self.tofu || self.gate_login.is_some() {
+            return None;
+        }
         let code = keyfile::key_code(&self.id, self.keys.current(), self.key_state);
         Some(code.show(self.key_state.epoch))
+    }
+    /// The number of the security key this session was unlocked with.
+    #[cfg(feature = "security-key")]
+    pub fn unlocked_with(&self) -> Option<u8> {
+        self.unlocked_with
     }
     /// The key file a key change of this PC may have landed in, which could
     /// not be read: no key change until an unlock with it, or the user's
@@ -1894,6 +2293,9 @@ impl Session {
     /// copy synced from another PC can then neither bring the old text back
     /// nor hide this edit. Saving unchanged text changes nothing.
     pub fn put(&mut self, index: Option<usize>, mut entry: Entry) -> Result<()> {
+        // No edit before the key file is confirmed (spec §5.2, §7.17).
+        #[cfg(feature = "security-key")]
+        self.edit_held()?;
         entry.validate()?;
         let previous = self.generation;
         if let Some(i) = index {
@@ -1938,6 +2340,8 @@ impl Session {
     /// Removes entry `i` and keeps its ID as a tombstone, so the deletion
     /// reaches the other PCs instead of their copies bringing it back.
     pub fn delete(&mut self, i: usize) -> Result<()> {
+        #[cfg(feature = "security-key")]
+        self.edit_held()?;
         if i >= self.entries.len() {
             return Err("항목 선택 오류");
         }
@@ -1996,6 +2400,8 @@ impl Session {
     /// Then the session links to the sync folder and offers its state for
     /// the first upload; read `badge()` again afterwards.
     pub fn enable_sync(&mut self) -> Result<()> {
+        #[cfg(feature = "security-key")]
+        self.edit_held()?;
         let converting = self.format == Format::V1;
         if converting {
             let ids: Vec<(EntryId, EntryId)> =
@@ -4389,13 +4795,15 @@ mod workflow_tests {
             KEY_NOT_IN_KEY_FILE,
             KEY_NOT_IN_BACKUP,
         );
+        // The security-key build has the keys, so the bit says nothing more.
+        let hardware = if cfg!(feature = "security-key") {
+            (KEY_NOT_IN_KEY_FILE, KEY_NOT_IN_BACKUP)
+        } else {
+            (NO_SECURITY_KEY_SUPPORT_VAULT, NO_SECURITY_KEY_SUPPORT_VAULT)
+        };
         for flags in [1, 3] {
-            let hardware = kf2_vault(id, &unknown, state, flags, Format::V2, &[]);
-            refused(
-                &hardware,
-                NO_SECURITY_KEY_SUPPORT_VAULT,
-                NO_SECURITY_KEY_SUPPORT_VAULT,
-            );
+            let vault = kf2_vault(id, &unknown, state, flags, Format::V2, &[]);
+            refused(&vault, hardware.0, hardware.1);
         }
         // A flipped key ID names a key the key file does not list.
         let mut flipped = good.clone();
@@ -4449,22 +4857,25 @@ mod workflow_tests {
             Some(vec!["3".into(), "0".into()])
         );
         // Security-key files, damaged and newer ones included, on their
-        // magic family alone.
+        // magic family alone (the default build; S45-1 #16).
         fs::write(&v, &good).unwrap();
-        let draft = keyfile::hardware_draft(false);
-        for (bytes, refusal) in [
-            (draft.clone(), NO_SECURITY_KEY_SUPPORT),
-            (keyfile::hardware_draft(true), NO_SECURITY_KEY_SUPPORT),
-            (draft[..100].to_vec(), NO_SECURITY_KEY_SUPPORT_DAMAGED),
-            ([&draft[..], &[0]].concat(), NO_SECURITY_KEY_SUPPORT_DAMAGED),
-            (
-                [&b"GOYOKS02"[..], &draft[8..]].concat(),
-                NO_SECURITY_KEY_SUPPORT_DAMAGED,
-            ),
-        ] {
-            fs::write(&k, &bytes).unwrap();
-            assert_eq!(key_info(&k).unwrap().refusal(), Some(refusal));
-            refused(&good, refusal, refusal);
+        #[cfg(not(feature = "security-key"))]
+        {
+            let draft = keyfile::hardware_draft(false);
+            for (bytes, refusal) in [
+                (draft.clone(), NO_SECURITY_KEY_SUPPORT),
+                (keyfile::hardware_draft(true), NO_SECURITY_KEY_SUPPORT),
+                (draft[..100].to_vec(), NO_SECURITY_KEY_SUPPORT_DAMAGED),
+                ([&draft[..], &[0]].concat(), NO_SECURITY_KEY_SUPPORT_DAMAGED),
+                (
+                    [&b"GOYOKS02"[..], &draft[8..]].concat(),
+                    NO_SECURITY_KEY_SUPPORT_DAMAGED,
+                ),
+            ] {
+                fs::write(&k, &bytes).unwrap();
+                assert_eq!(key_info(&k).unwrap().refusal(), Some(refusal));
+                refused(&good, refusal, refusal);
+            }
         }
         // Flips the header grammar allows fail the AEAD after one key
         // derivation: the epoch, the tag, a flag.
@@ -4487,7 +4898,9 @@ mod workflow_tests {
     /// file is chosen, and by the precheck, the unlock and a Restore, none
     /// of which counts as a failed attempt. Damaged copies and newer magics
     /// of the family get the damaged wording; nothing is ever the AUTH text
-    /// and nothing is written (spec §4.7, §14.2-7).
+    /// and nothing is written (spec §4.7, §14.2-7). Default build only
+    /// (S45-1 #16); the next test is the security-key build's.
+    #[cfg(not(feature = "security-key"))]
     #[test]
     fn pinned_security_key_files_are_refused_before_any_key_derivation() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
@@ -4550,12 +4963,133 @@ mod workflow_tests {
         }
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
+    /// The security-key build parses the pinned files in full: the screens
+    /// show what they state, the precheck takes them, and an unlock or a
+    /// Restore without a touch stops at SECURITY_KEY_NEEDED before any key
+    /// derivation, which is no failed attempt. A damaged copy is AUTH_ERROR
+    /// as any damaged key file, a newer magic of the family
+    /// NEWER_KEY_FORMAT, which no temp file replaces (spec §4.6, §4.7,
+    /// §5.12 rule i, §14.2-4).
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn pinned_security_key_files_need_a_touch() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let (v, k, r) = (
+            t.file("vault.goyo"),
+            t.file("vault.goyokey"),
+            t.file("restored.goyo"),
+        );
+        let seq = |start: u8| -> [u8; 32] { std::array::from_fn(|i| start.wrapping_add(i as u8)) };
+        for (i, dk, flags, format) in [(0, 0xa1, 1, Format::V1), (1, 0x0b, 3, Format::V2)] {
+            let (name, key, _) = keyfile::SECURITY_KEY_FIXTURES[i];
+            let h = keyfile::parse(key).unwrap();
+            let vault = kf2_vault(h.vault_id, &seq(dk), h.state(), flags, format, &[]);
+            fs::write(&k, key).unwrap();
+            fs::write(&v, &vault).unwrap();
+            let info = key_info(&k).unwrap();
+            assert!(info.needs_security_key && info.well_formed, "{name}");
+            assert_eq!(
+                (info.refusal(), info.slots, info.key_sync),
+                (None, h.slots.len() as u8, i == 1),
+                "{name}"
+            );
+            assert!(prepare(&v, &k).is_ok(), "{name}");
+            // A well-formed code, so the OTP vault gets as far as the key.
+            let code = if h.otp() { "123456" } else { "" };
+            let derived = crypto::derive_count();
+            assert_eq!(
+                Session::unlock(&v, &k, "any password", code).err(),
+                Some(keyfile::SECURITY_KEY_NEEDED),
+                "{name}"
+            );
+            assert_eq!(
+                Session::restore(&v, &k, &r, "any password", code).err(),
+                Some(keyfile::SECURITY_KEY_NEEDED),
+                "{name}"
+            );
+            assert_eq!(crypto::derive_count(), derived, "{name}");
+            assert!(not_a_failure(keyfile::SECURITY_KEY_NEEDED));
+            assert!(!r.exists());
+            assert_eq!(fs::read(&k).unwrap(), key, "{name}");
+            assert_eq!(fs::read(&v).unwrap(), vault, "{name}");
+        }
+        for (name, key, well_formed) in keyfile::SECURITY_KEY_FIXTURES {
+            if well_formed {
+                continue;
+            }
+            fs::write(&k, key).unwrap();
+            let newer = name.ends_with("02");
+            let error = if newer { NEWER_KEY_FORMAT } else { AUTH_ERROR };
+            assert_eq!(prepare(&v, &k).err(), Some(error), "{name}");
+            assert!(!key_info(&k).unwrap().well_formed, "{name}");
+            assert_eq!(keyfile::never_replaced(key), newer, "{name}");
+        }
+        // The cross-check of S23-1 #25 at the vault level: the fake holds
+        // the recorded credentials, and each key with an S-wrap unlocks the
+        // pinned file and its vault file, first as a bootstrap that the
+        // recorded key code confirms; the suspended key stops before Argon2.
+        let recorded = [
+            keyfile::inbox::tests::recorded_kh(),
+            keyfile::inbox::tests::recorded_ks(),
+        ];
+        for (i, (r, dk, flags, format)) in [(0xa1, 1, Format::V1), (0x0b, 3, Format::V2)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (dk, flags, format))| (i, (&recorded[i], dk, flags, format)))
+        {
+            let _ = t.other_anchor(&format!("fixture-{i}"));
+            let h = keyfile::parse(r.bytes).unwrap();
+            fs::write(&k, r.bytes).unwrap();
+            fs::write(
+                &v,
+                kf2_vault(h.vault_id, &seq(dk), h.state(), flags, format, &[]),
+            )
+            .unwrap();
+            let fake = r.fake(false);
+            let now = otp::now().unwrap();
+            for j in 0..r.key_count() {
+                let prepared = prepare(&v, &k).unwrap();
+                let req = prepared.unlock_request(0).unwrap();
+                fake.touch(Some(j));
+                let raw = crate::fido::Authenticator::get_assertion(
+                    &fake,
+                    &req,
+                    &crate::fido::Authenticator::new_cancel(&fake).unwrap(),
+                );
+                let touch = crate::fido::check_assertion(raw.unwrap(), &req, false).unwrap();
+                let step = now / 30 - (r.key_count() - j) as u64;
+                let code = r
+                    .otp
+                    .map(|secret| format!("{:06}", otp::code(&secret, step, 6)))
+                    .unwrap_or_default();
+                let derived = crypto::derive_count();
+                let login =
+                    Session::login_with(prepared, r.password, &code, step * 30, None, &touch);
+                if r.suspended(j) {
+                    assert_eq!(login.err(), Some(keyfile::SUSPENDED_KEY), "{i} {j}");
+                    assert_eq!(crypto::derive_count(), derived);
+                    continue;
+                }
+                let mut s = login.unwrap();
+                assert_eq!(s.unlocked_with(), Some(h.slots[j].number), "{i} {j}");
+                assert!(s.entries.is_empty());
+                let code = parse_code(r.code).unwrap();
+                if s.tofu() {
+                    s.tofu_confirm(Some(&code)).unwrap();
+                }
+                assert_eq!(s.key_code(), Some(code.show(h.epoch)), "{i} {j}");
+            }
+        }
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
     /// This build can tell neither a damaged security-key file nor one over
     /// 32 KiB from a later build's, so it decides every one on its magic:
     /// SUBMIT refuses it as the file dialog did, and no temp file stands in
     /// for it or replaces it, not even a password-only key file of the same
     /// vault that the password opens (spec §4.6, §4.7, §5.12 rule i,
-    /// §14.2-7).
+    /// §14.2-7). Default build only (S45-1 #16).
+    #[cfg(not(feature = "security-key"))]
     #[test]
     fn security_key_files_are_never_replaced_by_a_temp_file() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);

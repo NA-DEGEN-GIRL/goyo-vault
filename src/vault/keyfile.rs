@@ -2,15 +2,23 @@
 //! key. The KF2 layout holds a bundle of data keys behind the password alone
 //! (GOYOKE03) or behind security keys as well (GOYOKH01, and GOYOKS01 with
 //! key-file sync). One strict parser reads every KF2 magic and is the same in
-//! every build. This build has no security-key code: it refuses those files
-//! on their magic alone, before any key derivation, and never as a wrong
-//! password.
+//! every build. The default build has no security-key code: it refuses those
+//! files on their magic alone, before any key derivation, and never as a
+//! wrong password. The security-key build opens and seals them through
+//! `inbox`.
 use super::{TOO_LARGE, boxed};
+#[cfg(feature = "security-key")]
+pub(crate) mod inbox;
 use crate::{
     crypto::{self, AUTH_ERROR, Key, Result, ct_eq, hkdf_expand, hkdf_extract},
     otp,
 };
 use hmac::{Hmac, Mac};
+#[cfg(feature = "security-key")]
+pub use inbox::{
+    AUTH_KEYS, BodySecret, KeysPlan, PairPlan, SECURITY_KEY_NEEDED, SUSPENDED_KEY,
+    SUSPENDED_ORPHAN, Secret,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -105,14 +113,17 @@ impl Magic {
 /// grammar check (spec §4.6).
 enum Family {
     Legacy(Magic),
-    PasswordOnly,
-    /// `GOYOKH` or `GOYOKS` and any two more bytes: this build decides on
-    /// the family alone, a newer magic of it included.
+    /// A KF2 file this build opens: GOYOKE03, and with security-key support
+    /// GOYOKH01 and GOYOKS01.
+    Kf2,
+    /// `GOYOKH` or `GOYOKS` and any two more bytes: the default build
+    /// decides on the family alone, a newer magic of it included.
+    #[cfg(not(feature = "security-key"))]
     SecurityKey,
     /// Any other `GOYOK` + `A`-`Z` + two digits numbered above the magics
-    /// of that letter this build knows (above 03 for `E`, above 00 for a
-    /// letter it does not know): a later build's. `GOYOKE00` is no such
-    /// file, only a damaged one.
+    /// of that letter this build knows (above 03 for `E`, above 01 for `H`
+    /// and `S`, above 00 for a letter it does not know): a later build's.
+    /// `GOYOKE00` is no such file, only a damaged one.
     Newer,
     Unknown,
 }
@@ -120,17 +131,22 @@ fn family(bytes: &[u8]) -> Family {
     let Some(magic) = bytes.get(..8) else {
         return Family::Unknown;
     };
+    #[cfg(not(feature = "security-key"))]
     if magic.starts_with(b"GOYOKH") || magic.starts_with(b"GOYOKS") {
         return Family::SecurityKey;
     }
     match Magic::of(magic) {
-        Some(Magic::Ke03) => Family::PasswordOnly,
-        Some(m) => Family::Legacy(m),
+        Some(m @ (Magic::Ke01 | Magic::Ke02)) => Family::Legacy(m),
+        Some(_) => Family::Kf2,
         None if magic.starts_with(b"GOYOK")
             && magic[5].is_ascii_uppercase()
             && magic[6..].iter().all(u8::is_ascii_digit)
             && (magic[6] - b'0') * 10 + (magic[7] - b'0')
-                > if magic[5] == b'E' { 3 } else { 0 } =>
+                > match magic[5] {
+                    b'E' => 3,
+                    b'H' | b'S' => 1,
+                    _ => 0,
+                } =>
         {
             Family::Newer
         }
@@ -138,12 +154,17 @@ fn family(bytes: &[u8]) -> Family {
     }
 }
 /// How an unlock treats a key file it finds, by its first 8 bytes (spec
-/// §4.6, §5.12 rule i): a security-key file (`GOYOKH*`/`GOYOKS*`, which this
-/// build can neither open nor tell a damaged copy of from a later build's)
-/// or a newer build's file is never damaged here, so no temp file ever
-/// takes its place, at any size.
+/// §4.6, §5.12 rule i): a newer build's file, and in the default build a
+/// security-key file (`GOYOKH*`/`GOYOKS*`, which it can neither open nor
+/// tell a damaged copy of from a later build's), is never damaged here, so
+/// no temp file ever takes its place, at any size.
 pub(super) fn never_replaced(bytes: &[u8]) -> bool {
-    matches!(family(bytes), Family::SecurityKey | Family::Newer)
+    match family(bytes) {
+        Family::Newer => true,
+        #[cfg(not(feature = "security-key"))]
+        Family::SecurityKey => true,
+        _ => false,
+    }
 }
 /// The vault ID and epoch of a key file that parses as a known format: a
 /// 0.8 file of its exact length (epoch 0), or a KF2 file of any magic by
@@ -250,6 +271,27 @@ pub struct SlotPublic {
     pub credhash: [u8; 16],
 }
 impl SlotPublic {
+    /// A slot record, with the credhash of its credential ID.
+    pub fn new(
+        flags: u8,
+        number: u8,
+        registered: u64,
+        added_epoch: u64,
+        added_by: [u8; 16],
+        seed: [u8; 32],
+        cred_id: Vec<u8>,
+    ) -> Self {
+        Self {
+            flags,
+            number,
+            registered,
+            added_epoch,
+            added_by,
+            seed,
+            credhash: credhash(&cred_id),
+            cred_id,
+        }
+    }
     pub fn pin(&self) -> bool {
         self.flags == 3
     }
@@ -668,9 +710,12 @@ impl Bundle {
     }
 }
 
-/// A security-key touch (spec §8.3). This build has no security-key code,
-/// so none exists and every `open` gets None.
+/// A security-key touch (spec §8.3). The default build has no
+/// security-key code, so none exists and every `open` gets None.
+#[cfg(not(feature = "security-key"))]
 pub enum Touch {}
+#[cfg(feature = "security-key")]
+pub use crate::fido::Touch;
 
 /// What `open` returns. The bundle is zeroized on drop.
 pub struct Opened {
@@ -704,14 +749,25 @@ thread_local! {
     static BODY_AEADS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static FAILED_AT: std::cell::Cell<Option<Step>> = const { std::cell::Cell::new(None) };
 }
+/// Every failure from the body on is AUTH_ERROR at the body step (spec
+/// §3.4); a test reads where an open stopped.
+fn failed_at_body<T>(result: Result<T>) -> Result<T> {
+    #[cfg(test)]
+    if result.is_err() {
+        FAILED_AT.with(|s| s.set(Some(Step::Body)));
+    }
+    result
+}
 
 enum Form {
     /// GOYOKE01 or GOYOKE02, of the exact length.
     Legacy(Magic),
-    /// A KF2 file this build opens: GOYOKE03.
+    /// A KF2 file this build opens: GOYOKE03, and with security-key support
+    /// GOYOKH01 and GOYOKS01.
     Kf2(Box<KeyHeader>),
-    /// A GOYOKH*/GOYOKS* file, which this build does not open. The header
-    /// when it is a well-formed GOYOKH01/GOYOKS01, only ever shown.
+    /// A GOYOKH*/GOYOKS* file, which the default build does not open. The
+    /// header when it is a well-formed GOYOKH01/GOYOKS01, only ever shown.
+    #[cfg(not(feature = "security-key"))]
     SecurityKey(Option<Box<KeyHeader>>),
 }
 /// A key file as read (spec §4.6, §4.7): its bytes and what they state
@@ -727,14 +783,17 @@ impl KeyFile {
         Self::from_bytes(path, read_head(path, KEY_FILE_LIMIT)?)
     }
     /// Classifies key file bytes by their magic family first (spec §4.6):
-    /// any GOYOKH*/GOYOKS* is a security-key file, decided on the magic
-    /// alone, with no length or grammar check, so a damaged or later copy
-    /// is never taken for a wrong password; any other newer magic is
-    /// NEWER_KEY_FORMAT; then the 0.8 formats by their exact length and
-    /// GOYOKE03 by the strict parse. Anything else is AUTH_ERROR. The
-    /// security-key build (stage 4) decides those files by the full grammar.
+    /// in the default build any GOYOKH*/GOYOKS* is a security-key file,
+    /// decided on the magic alone, with no length or grammar check, so a
+    /// damaged or later copy is never taken for a wrong password; any other
+    /// newer magic is NEWER_KEY_FORMAT; then the 0.8 formats by their exact
+    /// length and the KF2 magics this build opens by the strict parse (the
+    /// security-key build's GOYOKH01 and GOYOKS01 among them, so a damaged
+    /// one there is AUTH_ERROR as for any damaged file). Anything else is
+    /// AUTH_ERROR.
     pub fn from_bytes(path: &Path, bytes: Vec<u8>) -> Result<Self> {
         let form = match family(&bytes) {
+            #[cfg(not(feature = "security-key"))]
             Family::SecurityKey => {
                 let header = bytes
                     .get(..8)
@@ -750,7 +809,7 @@ impl KeyFile {
                 need(bytes.len() == length)?;
                 Form::Legacy(magic)
             }
-            Family::PasswordOnly => Form::Kf2(Box::new(parse(&bytes)?)),
+            Family::Kf2 => Form::Kf2(Box::new(parse(&bytes)?)),
             Family::Unknown => return Err(AUTH_ERROR),
         };
         Ok(Self {
@@ -766,30 +825,43 @@ impl KeyFile {
         &self.bytes
     }
     /// The parsed header of a KF2 file this build opens; None for a 0.8
-    /// file and for a security-key file.
+    /// file and for a security-key file of the default build.
     pub fn header(&self) -> Option<&KeyHeader> {
         match &self.form {
             Form::Kf2(h) => Some(h),
             _ => None,
         }
     }
-    /// Whether the file needs a security key, from its magic family alone.
+    /// Whether the file needs a security key: in the default build from its
+    /// magic family alone, else from its slots.
     pub fn needs_security_key(&self) -> bool {
-        matches!(self.form, Form::SecurityKey(_))
-    }
-    /// What this build says instead of opening the file: no derive, no
-    /// failure count, no retry delay, never the AUTH text (spec §4.7).
-    pub fn refusal(&self) -> Option<&'static str> {
         match &self.form {
-            Form::SecurityKey(Some(_)) => Some(NO_SECURITY_KEY_SUPPORT),
-            Form::SecurityKey(None) => Some(NO_SECURITY_KEY_SUPPORT_DAMAGED),
-            _ => None,
+            #[cfg(not(feature = "security-key"))]
+            Form::SecurityKey(_) => true,
+            Form::Kf2(h) => !h.slots.is_empty(),
+            Form::Legacy(_) => false,
         }
+    }
+    /// What the default build says instead of opening a security-key file:
+    /// no derive, no failure count, no retry delay, never the AUTH text
+    /// (spec §4.7). None for every other file, and in the security-key
+    /// build.
+    pub fn refusal(&self) -> Option<&'static str> {
+        #[cfg(not(feature = "security-key"))]
+        if let Form::SecurityKey(header) = &self.form {
+            return Some(if header.is_some() {
+                NO_SECURITY_KEY_SUPPORT
+            } else {
+                NO_SECURITY_KEY_SUPPORT_DAMAGED
+            });
+        }
+        None
     }
     pub fn magic(&self) -> Option<Magic> {
         match &self.form {
             Form::Legacy(magic) => Some(*magic),
             Form::Kf2(h) => Some(h.magic),
+            #[cfg(not(feature = "security-key"))]
             Form::SecurityKey(h) => h.as_ref().map(|h| h.magic),
         }
     }
@@ -799,6 +871,7 @@ impl KeyFile {
         match &self.form {
             Form::Legacy(_) => self.bytes[8..24].try_into().ok(),
             Form::Kf2(h) => Some(h.vault_id),
+            #[cfg(not(feature = "security-key"))]
             Form::SecurityKey(_) => None,
         }
     }
@@ -808,6 +881,7 @@ impl KeyFile {
         match &self.form {
             Form::Legacy(magic) => *magic == Magic::Ke01,
             Form::Kf2(h) => h.otp(),
+            #[cfg(not(feature = "security-key"))]
             Form::SecurityKey(h) => h.as_ref().is_some_and(|h| h.otp()),
         }
     }
@@ -824,12 +898,16 @@ impl KeyFile {
     }
     /// Opens the file (spec §3.4). The order is fixed: the public checks,
     /// one Argon2 always, then the body, whose every failure is the same
-    /// AUTH_ERROR. A security-key file never gets that far here.
+    /// AUTH_ERROR. A security-key file never gets that far in the default
+    /// build; the security-key build opens it with the touch (`inbox`), and
+    /// its S stays in `Opened`, zeroized on drop.
     pub fn open(&self, password: &str, touch: Option<&Touch>) -> Result<Opened> {
+        #[cfg(not(feature = "security-key"))]
         if let Some(touch) = touch {
             match *touch {}
         }
         match &self.form {
+            #[cfg(not(feature = "security-key"))]
             Form::SecurityKey(_) => Err(self.refusal().unwrap_or(NO_SECURITY_KEY_SUPPORT)),
             Form::Legacy(magic) => {
                 let (id, key, otp) = decode_key(&self.bytes, password)?;
@@ -846,12 +924,14 @@ impl KeyFile {
                     file: sha256(&[&self.bytes[..]]),
                 })
             }
+            #[cfg(feature = "security-key")]
+            Form::Kf2(h) if !h.slots.is_empty() => inbox::open(self, h, password, touch),
             Form::Kf2(h) => {
                 let salt: &[u8; 32] = self.bytes[h.w + 32..h.w + 64]
                     .try_into()
                     .map_err(|_| AUTH_ERROR)?;
                 let pw_key = crypto::derive(password.as_bytes(), salt)?;
-                self.open_body(h, &pw_key)
+                failed_at_body(self.body(h, &pw_key, &[0; 32]))
             }
         }
     }
@@ -859,28 +939,27 @@ impl KeyFile {
     /// second Argon2: the read-back check of a key change (spec §5.5 W10).
     pub fn open_written(&self, w: &WriterSecrets) -> Result<Opened> {
         match &self.form {
-            Form::Kf2(h) => self.open_body(h, &w.pw_key),
+            #[cfg(feature = "security-key")]
+            Form::Kf2(h) if !h.slots.is_empty() => inbox::open_written(self, h, w),
+            Form::Kf2(h) => failed_at_body(self.body(h, &w.pw_key, &[0; 32])),
             _ => Err(AUTH_ERROR),
         }
     }
-    /// Steps 4-6 of spec §3.4 for a password-only file: S' is all zero.
-    /// Every failure is AUTH_ERROR at the body step: a wrong password ends
-    /// at the commitment, with no body AEAD.
-    fn open_body(&self, h: &KeyHeader, pw_key: &[u8; 32]) -> Result<Opened> {
-        let result = self.body(h, pw_key);
-        #[cfg(test)]
-        if result.is_err() {
-            FAILED_AT.with(|s| s.set(Some(Step::Body)));
-        }
-        result
-    }
-    fn body(&self, h: &KeyHeader, pw_key: &[u8; 32]) -> Result<Opened> {
+    /// Steps 5-6 of spec §3.4 under `s`, the keyset secret (all zero for a
+    /// password-only file): a wrong password ends at the commitment, with no
+    /// body AEAD.
+    fn body(&self, h: &KeyHeader, pw_key: &[u8; 32], s: &[u8; 32]) -> Result<Opened> {
         let bytes = &self.bytes;
-        let (k_body, c_body) = body_keys(pw_key, &[0; 32], &sha256(&[&bytes[..h.b]]));
+        let (k_body, c_body) = body_keys(pw_key, s, &sha256(&[&bytes[..h.b]]));
+        #[cfg(test)]
+        crypto::note(crypto::Event::BodyCommit);
         need(ct_eq(&c_body, &bytes[h.b..h.b + 32]))?;
         let nonce: &[u8; 24] = bytes[h.w + 64..h.b].try_into().map_err(|_| AUTH_ERROR)?;
         #[cfg(test)]
-        BODY_AEADS.with(|n| n.set(n.get() + 1));
+        {
+            BODY_AEADS.with(|n| n.set(n.get() + 1));
+            crypto::note(crypto::Event::BodyAead);
+        }
         let plain = crypto::open(&k_body, nonce, &bytes[..h.b + 32], &bytes[h.b + 32..h.e])?;
         let bundle = Bundle::from_plain(&plain, h.key_ids.len(), h.otp()).ok_or(AUTH_ERROR)?;
         // Every listed key ID belongs to a key of the body, and every
@@ -949,21 +1028,29 @@ pub enum Plan<'a> {
     /// `source` gave, and the bundle must be the one it holds, TOTP secret
     /// included. The password is the one that opened it: comparing it with
     /// the source's would cost a second Argon2. A security-key file also
-    /// needs its S from `opened` (stage 4).
+    /// takes its S from `opened`.
     Reseal {
         source: &'a KeyFile,
         opened: &'a Opened,
     },
+    /// GOYOKH01 or GOYOKS01 under a fresh S, with its slots, pair records
+    /// and the factors of every S-wrap.
+    #[cfg(feature = "security-key")]
+    Keys(&'a KeysPlan<'a>),
 }
 /// The writer's factors of a sealed file, for its read-back check. Zeroized
-/// on drop. A security-key result adds S and the S-wrap bases (stage 4).
+/// on drop.
 pub struct WriterSecrets {
     pw_key: Box<Key>,
+    /// S and the S-wrap bases of a file with security keys.
+    #[cfg(feature = "security-key")]
+    keys: Option<inbox::Written>,
 }
 /// Seals `bundle` under `password` as a KF2 key file (spec §3.3). The
-/// random draws come in a fixed order, the salt, then the body nonce, so a
-/// test can reproduce a file byte for byte. The result is strict-parsed
-/// before it is returned.
+/// random draws come in a fixed order, the salt, the body nonce, then for a
+/// file with keys the nonce of every new pair record in file order and of
+/// every S-wrap in slot order, so a test can reproduce a file byte for
+/// byte. The result is strict-parsed before it is returned.
 pub fn seal(
     spec: &Spec,
     bundle: &Bundle,
@@ -997,11 +1084,20 @@ pub fn seal(
         // Two states never differ in a secret: same keys, same TOTP secret
         // (constant time), as `opened` read them from exactly these bytes.
         let opened_here = opened.file == sha256(&[source.bytes()]) && bundle.same(&opened.bundle);
-        // Only a password-only state so far: one with security keys also
-        // needs its S (stage 4).
-        if sorted != same || !keys_match || !opened_here || !h.slots.is_empty() {
+        // A state with security keys also needs the S that opening it
+        // gave; a password-only one has none.
+        let keyset = match (&opened.s, h.slots.is_empty()) {
+            (None, true) => true,
+            (Some(s), false) => ct_eq(&ks_id(&h.vault_id, s), &h.ks_id),
+            _ => false,
+        };
+        if sorted != same || !keys_match || !opened_here || !keyset {
             return Err(NOT_SEALED);
         }
+    }
+    #[cfg(feature = "security-key")]
+    if let Plan::Keys(keys) = plan {
+        inbox::check(keys)?;
     }
     let size = 96 + 16 * k + 24 * spec.tombstones.len() + SEAL_BLOCK + 32 + body_size(k, otp);
     let size = size + 32 * k;
@@ -1009,8 +1105,11 @@ pub fn seal(
     let salt = crypto::random::<32>()?;
     let pw_key = crypto::derive(password.as_bytes(), &salt)?;
     let nonce = crypto::random::<24>()?;
-    // Step 2: [0, H), which for a password-only file is also [0, W).
-    let mut out = match plan {
+    // Step 2: [0, H), which for a password-only file is also [0, W); with
+    // keys, step 3 too.
+    #[cfg(feature = "security-key")]
+    let mut written = None;
+    let (mut out, s) = match plan {
         Plan::PasswordOnly => {
             let mut tombstones = spec.tombstones.clone();
             tombstones.sort_unstable_by_key(Tombstone::order);
@@ -1032,20 +1131,34 @@ pub fn seal(
                 out.extend_from_slice(&t.credhash);
                 out.extend_from_slice(&t.removed.to_le_bytes());
             }
-            out
+            (out, boxed(&[0; 32]))
         }
-        Plan::Reseal { source, .. } => {
+        Plan::Reseal { source, opened } => {
             let h = source.header().ok_or(NOT_SEALED)?;
             let mut out = Vec::with_capacity(size);
             out.extend_from_slice(&source.bytes[..h.w]);
-            out
+            let s = opened
+                .s
+                .as_deref()
+                .map_or_else(|| boxed(&[0; 32]), |s| boxed(s));
+            #[cfg(feature = "security-key")]
+            if !h.slots.is_empty() {
+                written = Some(inbox::Written::copied(&s));
+            }
+            (out, s)
+        }
+        #[cfg(feature = "security-key")]
+        Plan::Keys(keys) => {
+            let (out, keys_written) = inbox::head(spec, bundle, keys, now()?)?;
+            written = Some(keys_written);
+            (out, boxed(BodySecret::Keyset(keys.s).bytes()))
         }
     };
     // Step 4: the seal block. Step 5: the commitment and the body.
     out.extend_from_slice(&spec.resume);
     out.extend_from_slice(salt.as_slice());
     out.extend_from_slice(nonce.as_slice());
-    let (k_body, c_body) = body_keys(&pw_key, &[0; 32], &sha256(&[&out]));
+    let (k_body, c_body) = body_keys(&pw_key, &s, &sha256(&[&out]));
     out.extend_from_slice(&c_body);
     let body = crypto::seal(&k_body, &nonce, &out, &bundle.plain())?;
     out.extend_from_slice(&body);
@@ -1061,6 +1174,8 @@ pub fn seal(
         out,
         WriterSecrets {
             pw_key: boxed(&pw_key),
+            #[cfg(feature = "security-key")]
+            keys: written,
         },
     ))
 }
@@ -1127,10 +1242,12 @@ pub struct KeyInfo {
     pub epoch: u64,
 }
 impl KeyInfo {
-    /// What this build says about the file instead of opening it, as soon
-    /// as it is chosen (spec §4.7).
+    /// What the default build says about the file instead of opening it,
+    /// as soon as it is chosen (spec §4.7); never in the security-key
+    /// build.
     pub fn refusal(&self) -> Option<&'static str> {
-        self.needs_security_key.then_some(if self.well_formed {
+        let refused = self.needs_security_key && !cfg!(feature = "security-key");
+        refused.then_some(if self.well_formed {
             NO_SECURITY_KEY_SUPPORT
         } else {
             NO_SECURITY_KEY_SUPPORT_DAMAGED
@@ -1144,27 +1261,40 @@ pub fn key_info(path: &Path) -> Option<KeyInfo> {
     if !magic.starts_with(b"GOYOK") {
         return None;
     }
+    // The default build decides on the magic family alone; the
+    // security-key build opens GOYOKH01 and GOYOKS01 and nothing else of
+    // the family (a later one is NEWER_KEY_FORMAT there).
+    #[cfg(not(feature = "security-key"))]
+    let needs_security_key = matches!(family(&bytes), Family::SecurityKey);
+    #[cfg(feature = "security-key")]
+    let needs_security_key = Magic::of(&magic).is_some_and(Magic::hardware);
     let mut info = KeyInfo {
         magic,
         otp: &magic == KEY_MAGIC,
-        needs_security_key: matches!(family(&bytes), Family::SecurityKey),
+        needs_security_key,
         well_formed: false,
         slots: 0,
         pin: false,
         key_sync: false,
         epoch: 0,
     };
-    match KeyFile::from_bytes(path, bytes).map(|f| f.form) {
-        Ok(Form::Legacy(_)) => info.well_formed = true,
-        Ok(Form::Kf2(h) | Form::SecurityKey(Some(h))) => {
+    let header = match KeyFile::from_bytes(path, bytes).map(|f| f.form) {
+        Ok(Form::Legacy(_)) => {
             info.well_formed = true;
-            info.otp = h.otp();
-            info.slots = h.slots.len() as u8;
-            info.pin = h.pin();
-            info.key_sync = h.magic == Magic::Ks01;
-            info.epoch = h.epoch;
+            None
         }
-        _ => {}
+        Ok(Form::Kf2(h)) => Some(h),
+        #[cfg(not(feature = "security-key"))]
+        Ok(Form::SecurityKey(h)) => h,
+        Err(_) => None,
+    };
+    if let Some(h) = header {
+        info.well_formed = true;
+        info.otp = h.otp();
+        info.slots = h.slots.len() as u8;
+        info.pin = h.pin();
+        info.key_sync = h.magic == Magic::Ks01;
+        info.epoch = h.epoch;
     }
     Some(info)
 }
@@ -1214,13 +1344,17 @@ pub fn key_id(vault_id: &[u8; 16], dk: &[u8; 32]) -> [u8; 16] {
     hkdf_expand(&prk, &[vault_id], &mut id);
     id
 }
-/// The `ks_id` a security-key file would carry if its S were all zero.
-/// Computable from public bytes, so every parser refuses it.
-pub fn ks_id_zero(vault_id: &[u8; 16]) -> [u8; 16] {
-    let prk = hkdf_extract(b"goyo-vault/v2/ks-id", &[&[0; 32]]);
+/// The keyset ID of S (spec §3.2): its public commitment.
+fn ks_id(vault_id: &[u8; 16], s: &[u8; 32]) -> [u8; 16] {
+    let prk = hkdf_extract(b"goyo-vault/v2/ks-id", &[s]);
     let mut id = [0; 16];
     hkdf_expand(&prk, &[vault_id], &mut id);
     id
+}
+/// The `ks_id` a security-key file would carry if its S were all zero.
+/// Computable from public bytes, so every parser refuses it.
+pub fn ks_id_zero(vault_id: &[u8; 16]) -> [u8; 16] {
+    ks_id(vault_id, &[0; 32])
 }
 /// The public hash of a credential ID.
 pub fn credhash(cred_id: &[u8]) -> [u8; 16] {
@@ -1438,7 +1572,8 @@ pub(crate) const SECURITY_KEY_FIXTURES: [(&str, &[u8], bool); 10] = [
 mod tests {
     use super::*;
     use crate::crypto::{
-        KdfProfile, derive_count, queue_random, queued_random, set_kdf_profile, set_test_now,
+        Event, KdfProfile, derive_count, queue_random, queued_random, set_kdf_profile,
+        set_test_now, take_events,
     };
 
     fn seq<const N: usize>(start: u8) -> [u8; N] {
@@ -1700,8 +1835,8 @@ mod tests {
             keys: vec![seq(0xa1), seq(0xc1)],
             otp: Some(seq(0x91)),
             s: mixed(0x3d),
-            tag: "506757c8238d41012b6f1972c4ee7987",
-            code: "7f9163db126f5fe9",
+            tag: "19494017d49db47de81486e542944ce6",
+            code: "e21eb8b5a94673fe",
         }
     }
     fn fixture_ks() -> HwFixture {
@@ -1712,8 +1847,8 @@ mod tests {
             keys: vec![seq(0x0b), seq(0x2b), seq(0x4b)],
             otp: None,
             s: mixed(0x6d),
-            tag: "4cc404ad040270f44a7cc6f227bafcde",
-            code: "cd3f27d44e6cf236",
+            tag: "cbff366c4a88b06a41f3a56507400e22",
+            code: "0698b8e1319a8a3e",
         }
     }
     fn slot_view(h: &KeyHeader) -> Vec<(u8, u8, usize, u64)> {
@@ -1734,8 +1869,10 @@ mod tests {
     /// recorded S and password through this build's own primitives: no
     /// security-key code is needed to agree with the independent encoder on
     /// the layout, `ks_id`, the body keys, the chain, the state tag and the
-    /// key code. Opening them as key files is refused on the magic, with no
-    /// key derivation (spec §4.6, §4.7, §14.1-3, §14.2-7).
+    /// key code. Opening them as key files is each build's own: the default
+    /// build refuses them on the magic (the next test), the security-key
+    /// build opens and reproduces them with the fake (`inbox`'s tests; spec
+    /// §4.6, §4.7, §11.4, §14.1-3, §14.2-7).
     #[test]
     fn security_key_fixtures_match_the_independent_encoder() {
         set_kdf_profile(KdfProfile::Test);
@@ -1828,9 +1965,16 @@ mod tests {
         assert_eq!(syntax.tombstones, b.tombstones);
         assert!(is_sync_key_file(ks.bytes, &kh.vault_id).is_none());
         assert!(is_sync_key_file(kh.bytes, &kh.vault_id).is_none());
-        // This build refuses each of them on the magic family alone, the
-        // damaged and newer copies with the damaged wording, never as a
-        // wrong password and with no key derivation.
+    }
+    /// The default build refuses each pinned security-key file on the magic
+    /// family alone, the damaged and newer copies with the damaged wording,
+    /// never as a wrong password and with no key derivation (spec §4.7,
+    /// §14.2-7). Default build only (S45-1 #16).
+    #[cfg(not(feature = "security-key"))]
+    #[test]
+    fn security_key_fixtures_are_refused_on_their_magic() {
+        set_kdf_profile(KdfProfile::Test);
+        let (kh, ks) = (fixture_kh(), fixture_ks());
         let derives = derive_count();
         for (name, bytes, well_formed) in SECURITY_KEY_FIXTURES {
             assert_eq!(parse(bytes).is_ok(), well_formed, "{name}");
@@ -2034,25 +2178,33 @@ mod tests {
             let f = file(bytes).unwrap();
             let (derives, before) = (derive_count(), body_aeads());
             take_failed_at();
+            take_events();
             assert_eq!(f.open(password, None).err(), Some(AUTH_ERROR));
             assert_eq!(derive_count(), derives + 1, "one Argon2, always");
             assert_eq!(body_aeads(), before + aeads);
             assert_eq!(take_failed_at(), Some(Step::Body));
+            // In this order: Argon2, the commitment, the AEAD if it holds.
+            let events = [Event::Argon2, Event::BodyCommit, Event::BodyAead];
+            assert_eq!(take_events(), events[..2 + aeads as usize]);
         }
         assert!(good.open(fixture.password, None).is_ok());
         assert_eq!(take_failed_at(), None);
         // A security-key file stops before all of it, and never with the
-        // AUTH text: no Argon2, no body step.
-        let derives = derive_count();
-        for bytes in [kh().bytes(), ks().bytes(), kh().bytes()[..300].to_vec()] {
-            let refusal = file(&bytes).unwrap().open("any password", None).err();
-            assert!(matches!(
-                refusal,
-                Some(NO_SECURITY_KEY_SUPPORT | NO_SECURITY_KEY_SUPPORT_DAMAGED)
-            ));
+        // AUTH text: no Argon2, no body step. The security-key build's
+        // counterpart is in `inbox`'s tests.
+        #[cfg(not(feature = "security-key"))]
+        {
+            let derives = derive_count();
+            for bytes in [kh().bytes(), ks().bytes(), kh().bytes()[..300].to_vec()] {
+                let refusal = file(&bytes).unwrap().open("any password", None).err();
+                assert!(matches!(
+                    refusal,
+                    Some(NO_SECURITY_KEY_SUPPORT | NO_SECURITY_KEY_SUPPORT_DAMAGED)
+                ));
+            }
+            assert_eq!(derive_count(), derives);
+            assert_eq!(take_failed_at(), None);
         }
-        assert_eq!(derive_count(), derives);
-        assert_eq!(take_failed_at(), None);
     }
 
     #[test]
@@ -2155,8 +2307,9 @@ mod tests {
             }
         }
         // A password-only file cut short or grown is refused before any
-        // Argon2; a security-key one still gets this build's refusal and never
-        // the AUTH text.
+        // Argon2; a security-key one still gets the default build's refusal
+        // and never the AUTH text, and in the security-key build it is
+        // damaged like any other.
         let derives = derive_count();
         let bytes = fixture.bytes;
         for n in 0..bytes.len() {
@@ -2164,12 +2317,16 @@ mod tests {
         }
         assert_eq!(file(&[bytes, &[0][..]].concat()).err(), Some(AUTH_ERROR));
         let bytes = kh().bytes();
-        for n in 8..bytes.len() {
-            let f = file(&bytes[..n]).unwrap();
-            assert_eq!(f.refusal(), Some(NO_SECURITY_KEY_SUPPORT_DAMAGED));
+        let longer = [&bytes[..], &[0][..]].concat();
+        for cut in (8..bytes.len()).map(|n| &bytes[..n]).chain([&longer[..]]) {
+            #[cfg(not(feature = "security-key"))]
+            assert_eq!(
+                file(cut).unwrap().refusal(),
+                Some(NO_SECURITY_KEY_SUPPORT_DAMAGED)
+            );
+            #[cfg(feature = "security-key")]
+            assert_eq!(file(cut).err(), Some(AUTH_ERROR));
         }
-        let f = file(&[&bytes[..], &[0][..]].concat()).unwrap();
-        assert_eq!(f.refusal(), Some(NO_SECURITY_KEY_SUPPORT_DAMAGED));
         assert_eq!(derive_count(), derives);
     }
 
@@ -2389,10 +2546,13 @@ mod tests {
         assert_eq!(file(&over).err(), Some(TOO_LARGE));
         let mut over = largest;
         over.resize(KEY_FILE_LIMIT + 1, 0);
+        #[cfg(not(feature = "security-key"))]
         assert_eq!(
             file(&over).unwrap().refusal(),
             Some(NO_SECURITY_KEY_SUPPORT_DAMAGED)
         );
+        #[cfg(feature = "security-key")]
+        assert_eq!(file(&over).err(), Some(TOO_LARGE));
         over[..8].copy_from_slice(b"GOYOKE04");
         assert_eq!(file(&over).err(), Some(NEWER_KEY_FORMAT));
     }
@@ -2688,6 +2848,9 @@ mod tests {
         }
     }
 
+    /// Default build only (S45-1 #16); `inbox`'s tests hold the
+    /// security-key build's counterpart.
+    #[cfg(not(feature = "security-key"))]
     #[test]
     fn the_magic_family_decides_first() {
         set_kdf_profile(KdfProfile::Test);
@@ -2958,7 +3121,10 @@ mod tests {
         let head = kh().bytes();
         for bytes in [&head[..50], &b"GOYOKH02"[..], &big[..]] {
             let i = info(bytes).unwrap();
-            assert!(i.needs_security_key && !i.well_formed && !i.otp);
+            assert!(!i.well_formed && !i.otp);
+            // The security-key build opens GOYOKH01 and GOYOKS01 only.
+            let newer = cfg!(feature = "security-key") && bytes == b"GOYOKH02";
+            assert_eq!(i.needs_security_key, !newer);
         }
         let i = info(b"GOYOKE04").unwrap();
         assert!(!i.needs_security_key && !i.well_formed);
@@ -2985,9 +3151,14 @@ mod tests {
         let mut big = kh().bytes();
         big.resize(1 << 20, 0);
         std::fs::write(&path, &big).unwrap();
-        let f = KeyFile::read(&path).unwrap();
-        assert_eq!(f.bytes().len(), KEY_FILE_LIMIT + 1);
-        assert_eq!(f.refusal(), Some(NO_SECURITY_KEY_SUPPORT_DAMAGED));
+        #[cfg(not(feature = "security-key"))]
+        {
+            let f = KeyFile::read(&path).unwrap();
+            assert_eq!(f.bytes().len(), KEY_FILE_LIMIT + 1);
+            assert_eq!(f.refusal(), Some(NO_SECURITY_KEY_SUPPORT_DAMAGED));
+        }
+        #[cfg(feature = "security-key")]
+        assert_eq!(KeyFile::read(&path).err(), Some(TOO_LARGE));
         assert_eq!(
             KeyFile::read(&dir.join("missing")).err(),
             Some("파일을 열 수 없습니다.")

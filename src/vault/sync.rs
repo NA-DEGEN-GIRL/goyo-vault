@@ -803,9 +803,19 @@ impl Session {
             keys: &self.keys,
             ids: self.key_file.header().map(|h| h.key_ids.as_slice()),
             state: self.key_state,
-            hold: self.local_rollback,
+            hold: self.merges_held(),
         }
     }
+    /// Whether no incoming copy is merged: a local rollback, and a changed
+    /// key file waiting for its login gate (spec §5.10, §7.15a).
+    fn merges_held(&self) -> bool {
+        #[cfg(feature = "security-key")]
+        if self.gate_login.is_some() {
+            return true;
+        }
+        self.local_rollback
+    }
+
     /// Call every 2 s while the vault list is shown and no dialog is open: it
     /// merges a new server copy (changing `entries`), retries the upload and
     /// reads the helper's status. None when there is nothing to show.
@@ -1111,6 +1121,32 @@ impl Session {
     /// that is gone (deleting it turns sync off) or was replaced by a link is
     /// not written to at all.
     fn write_outgoing(&self, link: &mut SyncLink) {
+        // Nothing goes up before the key file is confirmed, nor while a
+        // security-key session's anchor cannot be written, nor while the
+        // review after a removal for a loss is due: it stays due (spec
+        // §5.2, §7.17, §5.10, §5.13).
+        #[cfg(feature = "security-key")]
+        if self.unconfirmed() || self.gate_login.is_some() || self.anchor_failed {
+            return;
+        }
+        // The review's hold also takes back a copy written before the
+        // removal, under a data key the removed key's holder knows: no
+        // outgoing under an older key stays (spec §5.13, §14.5 I5).
+        #[cfg(feature = "security-key")]
+        if self.review_due.is_some() {
+            let path = link.dir.join(OUTGOING);
+            let current = syncfile::read_bounded(&path, syncfile::MAX_WRAPPED)
+                .ok()
+                .and_then(|bytes| {
+                    let (_, blob) = syncfile::parse_outgoing(&bytes)?;
+                    decode_data(&self.id, self.keys.current(), self.keys.id_key(), blob).ok()
+                })
+                .is_some();
+            if !current && syncfile::usable_dir(&link.dir) {
+                let _ = fs::remove_file(path);
+            }
+            return;
+        }
         if !syncfile::usable_dir(&link.dir) {
             return;
         }
@@ -2647,6 +2683,8 @@ mod tests {
             password_only: false,
             union_password: UnionPassword::Other,
             both_passwords: plan.preview().both_passwords,
+            #[cfg(feature = "security-key")]
+            fork_option: crate::vault::ForkOption::Both,
         };
         s.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
             .unwrap()
@@ -2774,6 +2812,26 @@ mod tests {
             let mine = s.entries.clone();
             // A legacy session's check code is 0.8's (§14.6-15).
             assert_eq!(s.check_code() == content(&s), !kf2);
+            // A synced copy with the hardware flag makes a 0.8 key file of a
+            // vault this PC has no record of a bootstrap in the security-key
+            // build (spec §5.1 step 9): this PC confirmed its 0.8 state.
+            #[cfg(feature = "security-key")]
+            if !kf2 {
+                let id_key = key_id(&s.id, s.keys.id_key());
+                let mut line = anchor::legacy_line(
+                    own,
+                    crate::vault::keyfile::Magic::Ke02,
+                    false,
+                    &id_key,
+                    None,
+                );
+                line.state.flags.t = true;
+                s.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
+                    lines.vault = Some(line.clone());
+                    true
+                })
+                .unwrap();
+            }
             drop(s);
             let vault = fs::read(a.vault()).unwrap();
             let _ = fs::remove_file(a.dir().join(OUTGOING));
@@ -3633,6 +3691,14 @@ mod tests {
         let other = sc.reauth(PASS, None, None).unwrap();
         assert!(sb.override_head(other, &head).is_err());
         assert!(b.outgoing().is_none());
+        // The same bytes as a later version: not the version shown, so not
+        // pushed over.
+        let shown = server.versions[1].clone();
+        b.incoming(3, &shown);
+        let r = sb.reauth(PASS, None, None).unwrap();
+        assert!(sb.override_head(r, &head).is_err());
+        assert!(b.outgoing().is_none());
+        b.incoming(2, &shown);
         // A forged head lands meanwhile: the named one is not pushed over.
         let id = sb.id;
         let random = [0x6d; 32];
@@ -3836,7 +3902,14 @@ mod tests {
             assert_eq!(sa.badge(), Some(SyncBadge::Warning));
             // A copy at this state lands over it: the halt lifts.
             let mut lifts = entry(&format!("{notice:?}"), "lifts");
-            lifts.set_ids([state.tag[0].wrapping_add(16); 16], NO_ID);
+            // One ID per round, never the planted one's (an ID from the
+            // random tag collided once in 128 runs).
+            let round = if notice == SyncNotice::NewerKeyFile {
+                0x21
+            } else {
+                0x22
+            };
+            lifts.set_ids([round; 16], NO_ID);
             let mut entries = sa.entries.clone();
             entries.push(lifts);
             let blob = copy_of(

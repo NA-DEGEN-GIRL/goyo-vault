@@ -1,4 +1,6 @@
 pub mod crypto;
+#[cfg(feature = "security-key")]
+pub mod fido;
 mod merge;
 pub mod otp;
 pub mod qr;

@@ -7,7 +7,11 @@
 //! derivation (§5.1 step 9). A key file put back from an older state of this
 //! PC is a local rollback; one that forked from this PC's, one far ahead,
 //! one that lacks a removal this PC recorded, and a password-only key file
-//! for a vault this PC opened with security keys are refused. A key change
+//! for a vault this PC opened with security keys are refused. The
+//! security-key build also refuses a key file that lists, or was authorized
+//! by, a key this PC removed, or lacks a key it added; a later one that
+//! changes the keys or the policy waits for its gate (`gate`), and a key
+//! file with security keys and no record is a bootstrap. A key change
 //! writes its pending line first (S0) and promotes it last (S5), so the next
 //! unlock recognizes this PC's own write that landed before a crash.
 //!
@@ -376,6 +380,174 @@ pub(super) struct Lines {
     pub pending: Option<PendingLine>,
     /// These lines lead the file (spec §5.10: line order is recency).
     pub first: bool,
+    /// The security-key build's `gate` line (spec §7.15a); this build keeps
+    /// it as it was read.
+    #[cfg(feature = "security-key")]
+    pub gate: Option<GateLine>,
+    /// The vault's `gate` and `clone` lines go with this write: the TOFU
+    /// pass after a forget (spec §5.10, §7.17).
+    #[cfg(feature = "security-key")]
+    pub forget: bool,
+    /// The security-key build's `review` line (spec §5.13); this build
+    /// keeps it as it was read. A forget keeps it: a due review is never
+    /// released by forgetting the record.
+    #[cfg(feature = "security-key")]
+    pub review: Option<ReviewLine>,
+    /// The security-key build's `clone` lines (spec §5.10): keys flagged
+    /// "possibly cloned" by the lost-key flow, each with the `seedhash` of
+    /// the seed it had then. Every write of the confirmed line drops a flag
+    /// whose key is no longer live there or whose seed changed.
+    #[cfg(feature = "security-key")]
+    pub clones: Vec<([u8; 16], [u8; 4])>,
+}
+/// A vault's `review` line (spec §5.13): the post-removal review a removal
+/// for a loss made due on this PC, with its loss date (`yyyymmdd`, or
+/// `unknown`, the earliest), the epoch of the state that made it due, and
+/// whether it is still due or done.
+#[cfg(feature = "security-key")]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct ReviewLine {
+    pub loss: String,
+    pub epoch: u64,
+    pub due: bool,
+}
+#[cfg(feature = "security-key")]
+impl ReviewLine {
+    fn parse(text: &str) -> Option<Self> {
+        let mut words = text.split(' ');
+        (words.next()? == "review").then_some(())?;
+        unhex::<16>(words.next()?)?;
+        let mut f = Fields(words.peekable());
+        let loss = f.get("loss")?;
+        (loss == "unknown" || date(loss).is_some()).then_some(())?;
+        let epoch = epoch_num(f.get("epoch")?)?;
+        let due = match f.get("state")? {
+            "due" => true,
+            "done" => false,
+            _ => return None,
+        };
+        f.end()?;
+        Some(Self {
+            loss: loss.to_owned(),
+            epoch,
+            due,
+        })
+    }
+    fn render(&self, id: &[u8; 16]) -> String {
+        format!(
+            "review {} loss={} epoch={} state={}",
+            hex(id),
+            self.loss,
+            self.epoch,
+            if self.due { "due" } else { "done" }
+        )
+    }
+}
+/// The keys a landed pending entry flags "possibly cloned" (spec §5.5 S5):
+/// its `clone` numbers, with their credhash and current `seedhash` in the
+/// state it becomes.
+#[cfg(feature = "security-key")]
+pub(super) fn apply_clone(lines: &mut Lines, p: &PendingLine) {
+    for n in &p.clone {
+        if let Some(s) = p.state.slots.iter().find(|s| s.number == *n)
+            && !lines.clones.iter().any(|(c, _)| *c == s.credhash)
+        {
+            lines.clones.push((s.credhash, s.seedhash));
+        }
+    }
+}
+/// The review a landed pending entry makes due (spec §5.13, §5.5 S0): its
+/// `loss`, a removal for a loss, lands with the confirmed line as the
+/// vault's `review` line; a review already due keeps the earlier date.
+#[cfg(feature = "security-key")]
+pub(super) fn apply_review(lines: &mut Lines, p: &PendingLine) {
+    if let Some(loss) = &p.loss {
+        review_due(lines, loss, p.state.epoch);
+    }
+}
+/// The vault's `review` line due from `loss`, or the earlier date of the
+/// one already due (the window only grows, spec §5.13).
+#[cfg(feature = "security-key")]
+pub(super) fn review_due(lines: &mut Lines, loss: &str, epoch: u64) {
+    let loss = match lines.review.as_ref().filter(|r| r.due) {
+        Some(r) => super::review::earlier(&r.loss, loss).to_owned(),
+        None => loss.to_owned(),
+    };
+    lines.review = Some(ReviewLine {
+        loss,
+        epoch,
+        due: true,
+    });
+}
+/// What became of the change a `gate` line names (spec §7.15a).
+#[cfg(feature = "security-key")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum GateState {
+    /// A server candidate waits for its gate.
+    Pending,
+    Dropped,
+    Superseded,
+    /// Holds nothing: only keeps G2 off after a failed pick (S45-2 #8).
+    None,
+}
+#[cfg(feature = "security-key")]
+const GATE_STATES: [(GateState, &str); 4] = [
+    (GateState::Pending, "pending"),
+    (GateState::Dropped, "dropped"),
+    (GateState::Superseded, "superseded"),
+    (GateState::None, "none"),
+];
+/// A vault's `gate` line: the change it names, what became of it, whether
+/// G2 is still allowed on this PC, and since when.
+#[cfg(feature = "security-key")]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct GateLine {
+    pub epoch: u64,
+    pub tag: [u8; 16],
+    pub state: GateState,
+    pub g2: bool,
+    pub since: u64,
+}
+#[cfg(feature = "security-key")]
+impl GateLine {
+    fn parse(text: &str) -> Option<Self> {
+        let mut words = text.split(' ');
+        (words.next()? == "gate").then_some(())?;
+        unhex::<16>(words.next()?)?;
+        let mut f = Fields(words.peekable());
+        let epoch = epoch_num(f.get("epoch")?)?;
+        let tag = unhex(f.get("tag")?)?;
+        let state = f.get("state")?;
+        let state = GATE_STATES.iter().find(|(_, s)| *s == state)?.0;
+        let g2 = match f.get("g2")? {
+            "on" => true,
+            "off" => false,
+            _ => return None,
+        };
+        let since = num(f.get("since")?)?;
+        f.end()?;
+        Some(Self {
+            epoch,
+            tag,
+            state,
+            g2,
+            since,
+        })
+    }
+    fn render(&self, id: &[u8; 16]) -> String {
+        let state = GATE_STATES
+            .iter()
+            .find(|(s, _)| *s == self.state)
+            .map_or("none", |s| s.1);
+        format!(
+            "gate {} epoch={} tag={} state={state} g2={} since={}",
+            hex(id),
+            self.epoch,
+            hex(&self.tag),
+            if self.g2 { "on" } else { "off" },
+            self.since
+        )
+    }
 }
 impl Anchor {
     /// Every line was read: none is kept only verbatim.
@@ -393,6 +565,22 @@ impl Anchor {
             match line {
                 Line::Vault(i, v) if i == id => out.vault = Some((**v).clone()),
                 Line::Pending(i, p) if i == id => out.pending = Some((**p).clone()),
+                #[cfg(feature = "security-key")]
+                Line::Kept(Kind::Gate, i, text) if i == id => out.gate = GateLine::parse(text),
+                #[cfg(feature = "security-key")]
+                Line::Kept(Kind::Review, i, text) if i == id => {
+                    out.review = ReviewLine::parse(text)
+                }
+                #[cfg(feature = "security-key")]
+                Line::Kept(Kind::Clone, i, text) if i == id => {
+                    let mut words = text.split(' ').skip(2);
+                    let flag = (words.next().and_then(unhex), words.next().and_then(unhex));
+                    if let (Some(credhash), Some(seedhash)) = flag
+                        && !out.clones.iter().any(|(c, _)| *c == credhash)
+                    {
+                        out.clones.push((credhash, seedhash));
+                    }
+                }
                 _ => {}
             }
         }
@@ -406,8 +594,26 @@ impl Anchor {
         let mut own: Vec<String> = Vec::new();
         own.extend(lines.vault.as_ref().map(|v| render_vault(id, v)));
         own.extend(lines.pending.as_ref().map(|p| render_pending(id, p)));
+        // The security-key build writes the gate line it holds in place of
+        // the one read, and a forget's write drops the clone lines too.
+        #[cfg(feature = "security-key")]
+        own.extend(lines.gate.as_ref().map(|g| g.render(id)));
+        #[cfg(feature = "security-key")]
+        own.extend(lines.review.as_ref().map(|r| r.render(id)));
+        #[cfg(feature = "security-key")]
+        own.extend(
+            lines
+                .clones
+                .iter()
+                .filter(|_| !lines.forget)
+                .map(|(c, s)| format!("clone {} {} {}", hex(id), hex(c), hex(s))),
+        );
+        #[cfg(feature = "security-key")]
+        let kept = |kind: Kind| !matches!(kind, Kind::Gate | Kind::Review | Kind::Clone);
+        #[cfg(not(feature = "security-key"))]
+        let kept = |_: Kind| true;
         own.extend(self.lines.iter().filter_map(|l| match l {
-            Line::Kept(_, i, text) if i == id => Some(text.clone()),
+            Line::Kept(kind, i, text) if i == id && kept(*kind) => Some(text.clone()),
             _ => None,
         }));
         // Other vaults in file order, grouped by vault so that one can go
@@ -661,7 +867,11 @@ fn parse_line(line: &str) -> Option<Line> {
         "gate" => {
             epoch_num(f.get("epoch")?)?;
             unhex::<16>(f.get("tag")?)?;
-            matches!(f.get("state")?, "pending" | "dropped" | "superseded").then_some(())?;
+            matches!(
+                f.get("state")?,
+                "pending" | "dropped" | "superseded" | "none"
+            )
+            .then_some(())?;
             matches!(f.get("g2")?, "on" | "off").then_some(())?;
             num(f.get("since")?)?;
             f.end()?;
@@ -677,6 +887,9 @@ fn parse_line(line: &str) -> Option<Line> {
         }
         "clone" => {
             unhex::<16>(f.0.next()?)?;
+            if let Some(seed) = f.0.next() {
+                unhex::<4>(seed)?;
+            }
             f.end()?;
             Line::Kept(Kind::Clone, id, line.to_owned())
         }
@@ -899,7 +1112,7 @@ fn joined(items: impl Iterator<Item = String>) -> String {
         items.join(",")
     }
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// Lowercase hex of exactly N bytes.
@@ -1036,7 +1249,7 @@ fn read_main(dir: &Path) -> Result<Option<Parsed>, ()> {
 /// handle that does not follow a link. Ok(None) for a reparse point, a
 /// folder or a file with a second name: those are no anchor.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+pub(super) fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     use std::os::windows::fs::OpenOptionsExt;
     // FILE_FLAG_OPEN_REPARSE_POINT: a link is opened as itself.
     let f = OpenOptions::new()
@@ -1053,7 +1266,7 @@ fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 #[cfg(not(windows))]
-fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+pub(super) fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Ok(None);
     }
@@ -1155,6 +1368,16 @@ pub(super) fn update(
     if !change(&mut lines) {
         return Ok(lines);
     }
+    // Every write of the confirmed line drops the "possibly cloned" flags
+    // of keys no longer live there or re-seeded since (S45-2 #10).
+    #[cfg(feature = "security-key")]
+    {
+        let slots = lines.vault.as_ref().map_or(&[][..], |v| &v.state.slots);
+        let live = |(c, s): &([u8; 16], [u8; 4])| {
+            slots.iter().any(|x| x.credhash == *c && x.seedhash == *s)
+        };
+        lines.clones.retain(live);
+    }
     let bytes = doc.render(id, &lines);
     let suffix = crypto::random::<8>().map_err(|_| Failure::Io)?;
     let temp = dir.join(format!("{NAME}.{}.tmp", hex(suffix.as_slice())));
@@ -1188,7 +1411,7 @@ pub(super) fn update(
 /// The lock file around every read-modify-rename (spec §5.10): one anchor
 /// serves every vault, and two goyo-vault.exe processes may each have one
 /// open.
-fn lock(dir: &Path, wait: Duration) -> Result<File, Failure> {
+pub(super) fn lock(dir: &Path, wait: Duration) -> Result<File, Failure> {
     let f = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1232,6 +1455,15 @@ pub enum AnchorClass {
     /// A 0.8 key file for a vault with a line: its state needs its data
     /// key, so it is compared once it opens.
     Legacy,
+    /// A later state that descends from the confirmed one and changes what
+    /// the gate guards (spec §7.15a): the login opens in gate-pending mode
+    /// until the gate passes.
+    #[cfg(feature = "security-key")]
+    Gated(super::gate::GateKind),
+    /// No line for a vault that uses security keys: trust on first use,
+    /// with G1 before the first edit (spec §7.17).
+    #[cfg(feature = "security-key")]
+    Bootstrap,
 }
 /// What the comparison refuses (spec §5.10).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1239,11 +1471,30 @@ pub(super) enum Refusal {
     Downgrade,
     Relist,
     Fork,
-    TooFar { old: u64, new: u64 },
+    TooFar {
+        old: u64,
+        new: u64,
+    },
+    /// A key this PC removed is live again, or authorized the file
+    /// (S-ANCHOR-RELIST-SK).
+    #[cfg(feature = "security-key")]
+    RelistKeys,
+    /// A key both know has another record than this PC pinned.
+    #[cfg(feature = "security-key")]
+    Pinned,
+    /// Another OTP flag than this PC recorded (E1).
+    #[cfg(feature = "security-key")]
+    Otp,
 }
 /// Compares a KF2 key file's public state with the confirmed line.
 pub(super) fn compare(h: &KeyHeader, line: Option<&VaultLine>) -> Result<AnchorClass, Refusal> {
     let Some(line) = line else {
+        // A key file with security keys and no record of this vault: a
+        // bootstrap (spec §7.17).
+        #[cfg(feature = "security-key")]
+        if h.magic.hardware() {
+            return Ok(AnchorClass::Bootstrap);
+        }
         return Ok(AnchorClass::New);
     };
     let c = &line.state;
@@ -1252,6 +1503,17 @@ pub(super) fn compare(h: &KeyHeader, line: Option<&VaultLine>) -> Result<AnchorC
     }
     if h.state() == c.key_state() {
         return Ok(AnchorClass::Equal);
+    }
+    // P3 (a) and P4 against the anchor, at any epoch (round 2, finding 7).
+    #[cfg(feature = "security-key")]
+    if super::gate::relisted(h, c) {
+        return Err(Refusal::RelistKeys);
+    }
+    // E1 (spec §7.14): the OTP flag is set at create and no writer changes
+    // it; a policy change of the gate is only a PIN mode or a magic.
+    #[cfg(feature = "security-key")]
+    if (h.flags ^ c.policy) & 1 != 0 {
+        return Err(Refusal::Otp);
     }
     let had = c.had(h.state());
     let lacks = c
@@ -1273,6 +1535,26 @@ pub(super) fn compare(h: &KeyHeader, line: Option<&VaultLine>) -> Result<AnchorC
         // older state, does not (S23-3 #1).
         if !h.key_ids.contains(&c.keyid) {
             return Err(Refusal::Fork);
+        }
+        // A key this PC lists live that the file lacks with no removal: a
+        // branch that never saw this PC's change (M; round 3, finding 5).
+        // A key both know with another record is no genuine file; one with
+        // another number or seed, and every keyset or policy change, waits
+        // for the gate (spec §7.15a).
+        #[cfg(feature = "security-key")]
+        {
+            // A security-key state this PC never confirmed has no `gated`
+            // epoch: nothing is taken without G1 (round 4, finding 1).
+            let gated = (c.flags.t || !c.hardware()).then_some(c.gated);
+            let base = super::gate::Base::of_line(line);
+            let gates =
+                super::gate::Gates::between(&base, h, gated).map_err(|_| Refusal::Pinned)?;
+            if !gates.kept.is_empty() {
+                return Err(Refusal::Fork);
+            }
+            if let Some(kind) = gates.needed() {
+                return Ok(AnchorClass::Gated(kind));
+            }
         }
         return Ok(AnchorClass::Newer);
     }
@@ -1320,6 +1602,31 @@ pub(super) fn compare_opened_legacy(
         Err(Refusal::Relist)
     }
 }
+/// What a landed pending entry does to the vault's `gate` line (spec
+/// §7.15a): `g` clears the gate, `2` allows G2 again (a key change the user
+/// started; a line that only kept G2 off goes), `s` marks its candidate
+/// superseded.
+#[cfg(feature = "security-key")]
+pub(super) fn apply_clears(lines: &mut Lines, p: &PendingLine) {
+    if p.clears.g {
+        lines.gate = None;
+    }
+    if let Some(g) = lines.gate.as_mut() {
+        if p.clears.s {
+            g.state = GateState::Superseded;
+        }
+        if p.clears.two {
+            g.g2 = true;
+        }
+    }
+    if lines
+        .gate
+        .as_ref()
+        .is_some_and(|g| g.state == GateState::None && g.g2)
+    {
+        lines.gate = None;
+    }
+}
 /// Whether a key file in the state `h` is the pending entry's state.
 pub(super) fn landed(h: &KeyHeader, p: &PendingLine) -> bool {
     h.state() == p.state.key_state()
@@ -1357,6 +1664,31 @@ pub(super) fn descends(h: &KeyHeader, p: &PendingLine, confirmed: Option<&VaultL
         _ => true,
     }
 }
+/// The anchor's record of a live slot (spec §5.10): its number, credhash
+/// and registration day, `idhash` over its slot record with the number and
+/// seed zeroed, and `seedhash` over its seed. No seed and no credential ID.
+#[cfg(feature = "security-key")]
+pub(super) fn slot_of(s: &super::keyfile::SlotPublic) -> Slot {
+    use sha2::{Digest, Sha256};
+    let mut record = Sha256::new();
+    record.update([1, s.flags, 0, 0]);
+    record.update(s.registered.to_le_bytes());
+    record.update(s.added_epoch.to_le_bytes());
+    record.update(s.added_by);
+    record.update([0; 32]);
+    record.update((s.cred_id.len() as u16).to_le_bytes());
+    record.update(&s.cred_id);
+    let seed: [u8; 32] = Sha256::digest(s.seed).into();
+    let mut date = [b'0'; 8];
+    date.copy_from_slice(&crate::fido::stamp(s.registered).as_bytes()[..8]);
+    Slot {
+        number: s.number,
+        credhash: s.credhash,
+        date,
+        idhash: prefix(&record.finalize()),
+        seedhash: prefix(&seed),
+    }
+}
 /// A `hist` entry of a KF2 state.
 pub(super) fn hist_of(h: &KeyHeader) -> Hist {
     let auth = h
@@ -1383,10 +1715,11 @@ pub(super) fn legacy_hist(state: KeyState, key_id: &[u8; 16]) -> Hist {
         kind: 0,
     }
 }
-/// The confirmed line of a password-only KF2 key file `h` that this PC
-/// takes over `old`: its own state with `old`'s history before it, its
-/// removals with what `old` knew of them (new ones taken from this file),
-/// `old`'s `merged`, `sup`, `vkey` and `consumed`. `gated` and `t` stay.
+/// The confirmed line of a KF2 key file `h` that this PC takes over `old`:
+/// its own state with `old`'s history before it, its removals with what
+/// `old` knew of them (new ones taken from this file), `old`'s `merged`,
+/// `sup`, `vkey` and `consumed`. `gated` and `t` stay. With security keys
+/// also its slots, and `old`'s broken pair records between keys still live.
 pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
     let known = |c: &[u8; 16]| {
         old.and_then(|o| o.state.tombs.iter().find(|t| t.credhash == *c))
@@ -1415,6 +1748,35 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             .filter(|e| (e.epoch, e.tag) != (h.epoch, prefix(&h.tag))),
     );
     hist.truncate(HIST_MAX);
+    // The default build has no security-key state: its lines list no slot
+    // and no broken pair record.
+    #[cfg(not(feature = "security-key"))]
+    let (slots, pbad) = (Vec::new(), Vec::new());
+    #[cfg(feature = "security-key")]
+    let (slots, pbad) = {
+        let slots: Vec<Slot> = h.slots.iter().map(slot_of).collect();
+        // A re-seed taken inside any later file: a seed of a key live in
+        // both differs from the state this PC held (S45-1 #3).
+        let reseeded = old.is_some_and(|o| {
+            o.state.slots.iter().any(|a| {
+                slots
+                    .iter()
+                    .any(|b| b.credhash == a.credhash && b.seedhash != a.seedhash)
+            })
+        });
+        if reseeded {
+            hist[0].kind = 8;
+        }
+        // A broken record stays broken while both its keys stay live.
+        let live = |c: &[u8; 4]| slots.iter().any(|s| s.credhash[..4] == c[..]);
+        let pbad = old
+            .map(|o| o.state.pbad.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(o, t)| live(o) && live(t))
+            .collect();
+        (slots, pbad)
+    };
     VaultLine {
         state: State {
             epoch: h.epoch,
@@ -1427,9 +1789,9 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             },
             consumed: old.and_then(|o| o.state.consumed),
             tombs,
-            slots: Vec::new(),
+            slots,
             hist,
-            pbad: Vec::new(),
+            pbad,
             gated: old.map_or(h.epoch, |o| o.state.gated),
             sup: old.map(|o| o.state.sup.clone()).unwrap_or_default(),
             keyid: h.current_key_id(),
@@ -1529,6 +1891,10 @@ pub(super) struct Seen {
     pub lines: Lines,
     pub pending: Decision,
     pub class: AnchorClass,
+    /// The per-vault forget: this vault's lines are ignored in memory, and
+    /// nothing is written for it until the TOFU pass (spec §5.10).
+    #[cfg(feature = "security-key")]
+    pub forgotten: bool,
 }
 /// What becomes of the pending line of this vault (spec §5.1 step 9).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1585,6 +1951,8 @@ pub(super) fn look(id: &[u8; 16], key: &KeyFile, key_path: &Path, restore: bool)
         lines,
         pending,
         class: AnchorClass::New,
+        #[cfg(feature = "security-key")]
+        forgotten: false,
     }
 }
 fn decide(p: &PendingLine, line: Option<&VaultLine>, key: &KeyFile, key_path: &Path) -> Decision {
@@ -2325,7 +2693,15 @@ mod tests {
             })
         );
         let near = ke03(vid, &[dk(9), dk(5), dk(0)], 5 + EPOCH_WINDOW, &[], 9);
+        // More than EPOCH_SILENT above the last state this PC wrote: the
+        // security-key build gates it with G1, the default build takes it.
+        #[cfg(not(feature = "security-key"))]
         assert_eq!(compare(&near, Some(&l5)), Ok(AnchorClass::Newer));
+        #[cfg(feature = "security-key")]
+        assert_eq!(
+            compare(&near, Some(&l5)),
+            Ok(AnchorClass::Gated(super::super::gate::GateKind::G1))
+        );
         // An older state of this PC put back, and another one.
         assert_eq!(compare(&k3, Some(&l5)), Ok(AnchorClass::Rollback));
         let k3x = ke03(vid, &[dk(0x33), dk(0)], 3, &[], 0x33);
@@ -2341,7 +2717,8 @@ mod tests {
         assert_eq!(compare(&k8, Some(&l7)), Err(Refusal::Relist));
         // An older state of this PC that predates the removal is a rollback.
         assert_eq!(compare(&k5, Some(&l7)), Ok(AnchorClass::Rollback));
-        // A later file with removals this PC never knew: a silent update.
+        // A later file with removals this PC never knew: a silent update in
+        // the default build, G1 in the security-key build (T_new).
         let k8t = ke03(
             vid,
             &[dk(8), dk(7), dk(0)],
@@ -2349,7 +2726,13 @@ mod tests {
             &[([0x99; 16], 6), ([0x98; 16], 8)],
             8,
         );
+        #[cfg(not(feature = "security-key"))]
         assert_eq!(compare(&k8t, Some(&l7)), Ok(AnchorClass::Newer));
+        #[cfg(feature = "security-key")]
+        assert_eq!(
+            compare(&k8t, Some(&l7)),
+            Ok(AnchorClass::Gated(super::super::gate::GateKind::G1))
+        );
         // Pinned as hardware.
         let mut hw = l5.clone();
         hw.state.magic = *b"GOYOKS01";

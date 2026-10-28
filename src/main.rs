@@ -3927,6 +3927,9 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
             vault::UnionPassword::Other
         },
         both_passwords: preview.both_passwords,
+        // The fork options' dialog arrives with the key screens (stage 5).
+        #[cfg(feature = "security-key")]
+        fork_option: vault::ForkOption::Both,
     };
     let written = phase(h, Screen::Adopt, serial, |a| {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
@@ -4905,6 +4908,16 @@ fn key_line(notice: &KeyNotice) -> (Zeroizing<String>, isize) {
         KeyNotice::AnchorNewer => (line(vault::ANCHOR_NEWER), TONE_DANGER),
         KeyNotice::KeyTemp => (line(vault::KEYTEMP), TONE_MUTED),
         KeyNotice::KeyTempGone => (line(vault::KEYTEMP_GONE), TONE_DANGER),
+        #[cfg(feature = "security-key")]
+        KeyNotice::AnchorFailed => (line(vault::ANCHOR_FAILED), TONE_DANGER),
+        #[cfg(feature = "security-key")]
+        KeyNotice::RemoveUndone(numbers) => {
+            let list: Vec<String> = numbers.iter().map(u8::to_string).collect();
+            (
+                filled(vault::REMOVE_UNDONE, &[&list.join(", ")]),
+                TONE_DANGER,
+            )
+        }
     }
 }
 /// A path as the user knows it: without the `\\?\` prefix of a
@@ -5787,7 +5800,7 @@ mod tests {
                     let font = SendMessageW(status, 0x31, 0, 0);
                     let mut r = Rect::default();
                     GetClientRect(status, &mut r);
-                    for &(ko, _) in i18n::EN {
+                    for (ko, _) in english_table() {
                         let text = tr(ko);
                         if text.contains('\n') {
                             continue;
@@ -5849,6 +5862,37 @@ mod tests {
         // goyo-sync's settings window draws with this app's i18n.rs.
         ("bin/goyo-sync/gui.rs", include_str!("bin/goyo-sync/gui.rs")),
     ];
+    /// The security-key build's own source files with Korean literals: their
+    /// English is in EN_SK, which only that build compiles, so only that
+    /// build checks it; every build checks that each is listed (spec §9.3).
+    const SCANNED_SK: [&str; 4] = [
+        "fido.rs",
+        "vault/gate.rs",
+        "vault/keyfile/inbox.rs",
+        "vault/rotate/hw.rs",
+    ];
+    #[cfg(feature = "security-key")]
+    const SOURCES_SK: [&str; 4] = [
+        include_str!("fido.rs"),
+        include_str!("vault/gate.rs"),
+        include_str!("vault/keyfile/inbox.rs"),
+        include_str!("vault/rotate/hw.rs"),
+    ];
+    /// The texts english_is_complete checks with their English: EN, and in
+    /// the security-key build EN_SK too.
+    fn english_table() -> Vec<(&'static str, &'static str)> {
+        let table = i18n::EN.iter().copied();
+        #[cfg(feature = "security-key")]
+        let table = table.chain(i18n::EN_SK.iter().copied());
+        table.collect()
+    }
+    /// The sources english_is_complete scans in this build.
+    fn scanned_sources() -> Vec<&'static str> {
+        let sources = SCANNED.iter().map(|(_, source)| *source);
+        #[cfg(feature = "security-key")]
+        let sources = sources.chain(SOURCES_SK);
+        sources.collect()
+    }
     /// Files with Korean literals that english_is_complete does not check.
     const NOT_SCANNED: [&str; 3] = [
         // The table itself.
@@ -5886,11 +5930,24 @@ mod tests {
         }
         for name in &found {
             assert!(
-                SCANNED.iter().any(|(n, _)| n == name) || NOT_SCANNED.contains(&name.as_str()),
+                SCANNED.iter().any(|(n, _)| n == name)
+                    || SCANNED_SK.contains(&name.as_str())
+                    || NOT_SCANNED.contains(&name.as_str()),
                 "{name} has Korean text that english_is_complete does not check"
             );
         }
+        // Each listed name is the file whose text is scanned: a name listed
+        // with another file's text (or none) would pass both checks.
+        let text = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+        for (name, source) in SCANNED {
+            assert_eq!(text(name), source, "{name}: SCANNED holds another file");
+        }
+        #[cfg(feature = "security-key")]
+        for (name, source) in SCANNED_SK.iter().zip(SOURCES_SK) {
+            assert_eq!(text(name), source, "{name}: SOURCES_SK is not SCANNED_SK");
+        }
         assert!(found.iter().any(|n| n == "vault/anchor.rs"));
+        assert!(found.iter().any(|n| n == "vault/keyfile/inbox.rs"));
     }
     /// A source file up to its test module (`mod tests` or
     /// `pub(crate) mod tests` under `#[cfg(test)]`): a test-only item among
@@ -5983,10 +6040,10 @@ mod tests {
     fn english_is_complete() {
         let _korean = KoreanAfter::hold();
         let (mut missing, mut scanned) = (vec![], vec![]);
-        for (_, source) in SCANNED {
+        let table = english_table();
+        for source in scanned_sources() {
             for text in korean_literals(outside_tests(source)) {
-                if !i18n::EN.iter().any(|(ko, _)| *ko == text)
-                    && !i18n::KEEP.contains(&text.as_str())
+                if !table.iter().any(|(ko, _)| *ko == text) && !i18n::KEEP.contains(&text.as_str())
                 {
                     missing.push(text.clone());
                 }
@@ -6010,7 +6067,7 @@ mod tests {
                 .iter()
                 .any(|text| text == "화면을 만들 수 없어 종료합니다.")
         );
-        for (ko, en) in i18n::EN {
+        for (ko, en) in &table {
             assert!(!has_korean(en), "untranslated: {ko:?}");
         }
         i18n::set_english(true);
@@ -8190,18 +8247,48 @@ mod tests {
             // swapped under it) gets the refusal at once, also when its file
             // states an OTP vault (the GOYOKH01 fixture): no code is asked.
             with_app(|a| a.lock("synthetic lock", true));
+            #[cfg(not(feature = "security-key"))]
             let junk = [&b"GOYOKH01"[..], &[0; 300]].concat();
-            let files: [(&[u8], bool); 5] = [
-                (include_bytes!("../tests/fixtures/goyokh01.goyokey"), true),
-                (include_bytes!("../tests/fixtures/goyoks01.goyokey"), true),
+            #[cfg(not(feature = "security-key"))]
+            let files: [(&[u8], &str); 5] = {
+                use vault::keyfile::{NO_SECURITY_KEY_SUPPORT, NO_SECURITY_KEY_SUPPORT_DAMAGED};
+                [
+                    (
+                        include_bytes!("../tests/fixtures/goyokh01.goyokey"),
+                        NO_SECURITY_KEY_SUPPORT,
+                    ),
+                    (
+                        include_bytes!("../tests/fixtures/goyoks01.goyokey"),
+                        NO_SECURITY_KEY_SUPPORT,
+                    ),
+                    (
+                        include_bytes!("../tests/fixtures/goyoks01-truncated.goyokey"),
+                        NO_SECURITY_KEY_SUPPORT_DAMAGED,
+                    ),
+                    (
+                        include_bytes!("../tests/fixtures/goyokh02.goyokey"),
+                        NO_SECURITY_KEY_SUPPORT_DAMAGED,
+                    ),
+                    (&junk, NO_SECURITY_KEY_SUPPORT_DAMAGED),
+                ]
+            };
+            // The security-key build reads them in full instead: a
+            // well-formed one of another vault than this vault file is
+            // refused by the precheck on its vault ID (the touch its own
+            // vault needs is vault.rs's test), a later magic is a newer key
+            // file; neither before any key derivation, nor a failure.
+            #[cfg(feature = "security-key")]
+            let files: [(&[u8], &str); 2] = [
                 (
-                    include_bytes!("../tests/fixtures/goyoks01-truncated.goyokey"),
-                    false,
+                    include_bytes!("../tests/fixtures/goyoks01.goyokey"),
+                    vault::OTHER_VAULT,
                 ),
-                (include_bytes!("../tests/fixtures/goyokh02.goyokey"), false),
-                (&junk, false),
+                (
+                    include_bytes!("../tests/fixtures/goyokh02.goyokey"),
+                    vault::keyfile::NEWER_KEY_FORMAT,
+                ),
             ];
-            for (bytes, well_formed) in files {
+            for (bytes, refusal) in files {
                 std::fs::write(&key, bytes).unwrap();
                 type_in(PASS, pass);
                 let derived = crypto::derive_count();
@@ -8210,11 +8297,6 @@ mod tests {
                 with_app(|a| {
                     assert!(a.session.is_none() && a.failed == 0);
                     assert!(a.retry <= Instant::now());
-                    let refusal = if well_formed {
-                        vault::keyfile::NO_SECURITY_KEY_SUPPORT
-                    } else {
-                        vault::keyfile::NO_SECURITY_KEY_SUPPORT_DAMAGED
-                    };
                     assert_eq!(*a.status, *refusal);
                 });
             }
