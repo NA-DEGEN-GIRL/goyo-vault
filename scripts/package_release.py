@@ -130,7 +130,7 @@ def pack(folder, staged, sums, archive, programs, exact=None):
 # One unversioned folder: extracting a new release over the old one keeps the
 # vault and key files that live next to the executable.
 docs = ['README.md','README.en.md','시작하기.txt','START-HERE.txt','LICENSE-MIT','LICENSE-APACHE','docs/FORMAT.md','docs/SECURITY_REVIEW.md',
-        'docs/SYNC.md','docs/SYNC.en.md','docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json',
+        'docs/SYNC.md','docs/SYNC.en.md','docs/SECURITY_KEY.md','docs/SECURITY_KEY.en.md','docs/THIRD_PARTY_NOTICES.md','docs/dependency-audit.json','docs/binary-inspection.json',
         'docs/binary-inspection-sync.json','server/goyo-sync-server.py','goyo-sync.conf.example']
 docs += sorted(p.relative_to(root).as_posix() for p in (root/'docs/images').rglob('*.png'))
 if (root/'docs/OPUS_FINAL.md').exists(): docs.append('docs/OPUS_FINAL.md')

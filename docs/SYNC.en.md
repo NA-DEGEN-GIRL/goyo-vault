@@ -108,7 +108,7 @@ Make an ssh key just for goyo-sync and tie it on the server to the sync script. 
    ```
 4. In the advanced settings, choose `C:\Users\<you>\.ssh\goyo_sync` as the **Dedicated SSH key file** and press 'Check connection'.
 
-With several PCs, make one key per PC and add one line for each. If you lose a PC, delete only its line. Later script updates also work, since 'Install or update on server' uses your usual login, not the dedicated key.
+With several PCs, make one key per PC and add one line for each. If you lose a PC, delete only its line. A vault that uses key-file sync of the security-key build also needs `--key-sync=<vault ID>` on this line (see 'Key-file sync' below). Later script updates also work, since 'Install or update on server' uses your usual login, not the dedicated key.
 
 ## 3. Choose the vaults and start
 
@@ -224,6 +224,26 @@ From 0.9.0 a password change replaces the vault's data key (section 7 of the REA
 - **A PC opened with an older key file:** if this PC is open with a key file older than the one it wrote before ("This key file is older than the one this Goyo Vault saw before (revision N)…"), it neither merges nor overwrites nor uploads, and the server-copy overwrite is not offered: the server copy is then usually under the newer key this PC itself used before. Open again with the latest key file this PC wrote (a key backup), or take it with 'Receive a new key file'. If you went back yourself, press **This key file is right** in Key management. After that, sync stops again if the server copy was saved under the newer key; if this PC uploaded that copy, put this PC's state over it with the server-copy overwrite.
 - **Check code:** for a vault opened with a 0.9.0 key file, the check code covers the key file's state, so two PCs match only after both took the same key file, and 'Synced' does not show before.
 
+## Key-file sync (security-key build, experimental)
+
+In the security-key build ([SECURITY_KEY.en.md](SECURITY_KEY.en.md)), a vault with security keys on can turn on **key-file sync**, per vault. Its security-key key file (`GOYOKS01`) then travels through the server too, so a password change or a key removal needs no USB carry. **In exchange, to anyone with the server or any PC's sync SSH key, the key file is no longer a separately guarded factor.** The remaining barriers are the password and a registered security key (with its PIN), and you must assume a hacked server keeps every key file ever uploaded. In the default build, in vaults without security keys, and in vaults with keys but without key-file sync, the key file never leaves the PCs.
+
+- **Security-key build on both sides:** both the vault app and goyo-sync must be the security-key build. The server script is the same file (0.9.0).
+- **Forced command:** in the dedicated-key line of **every PC** that uses the vault, add `--key-sync=<vault ID>` after `serve` (32 lower-case hex digits, the second column of `goyo-sync.exe --list`; several vaults joined by commas, no spaces, up to 64). A connection without it does not take key requests (goyo-sync state `nokeys`), and a malformed argument makes the server refuse every request of that line (`server`).
+  ```
+  restrict,command="/usr/bin/python3 -I /home/<user>/.local/share/goyo-sync/goyo-sync-server.py serve --key-sync=0123456789abcdef0123456789abcdef" ssh-ed25519 AAAA… goyo-sync-pc1
+  ```
+  Add it just before turning it on, and remove it from every line once turning it off has finished and every PC has taken that. A vault named on a line keeps a key-record floor on the server, so whoever steals that line's sync key can block every PC's uploads.
+- **A data folder with `flock`:** the server takes a `flock` on `data/<vault ID>/lock` for every key operation of that vault. Once a vault has a key record (`data/<vault ID>/k/`), every connection's upload of it is also checked against that record inside this lock (a mismatch is KEY_BEHIND, state `keyfile`). So the data folder (`<script folder>/data`) must support `flock`. Every common local Linux file system does, and NFS emulates it; the selftest at install checks it. If the lock is not obtained within 20 seconds the server answers `busy` (state `server`) and the helper tries again later.
+- **Deleting `k/`:** delete `data/<vault ID>/k/` **only while no PC syncs that vault**.
+- **Turning it on and using it:** **Turn key-file sync on…** in 'Key management'. Other PCs take changes after their unlock with **Get…** in 'Key management' (a removal by picking the lost keys, an addition or settings change by typing the changing PC's key check code). Until then that PC neither uploads nor merges.
+- **A new PC:** the key file is still carried by USB the first time. At its first unlock, type another PC's key check code.
+- **Turning it off:** **Turn key-file sync off…** in 'Key management' (turning keys off does it too). This PC asks the server to delete the key file (sent when the security-key build's goyo-sync runs) and changes the data key. Turning it off ends the vault's whole key record on the server, so another PC's change that this PC has not taken yet disappears from the server too. Other PCs need this key file by USB. Do not undo it by uploading again from another PC.
+- **A lost PC:** delete its `authorized_keys` line at once. That key can fetch the key file or stop key-file sync (never make a forged key file accepted). Use one server account per person.
+- **Key files in the sync folder:** `vault.goyo.sync\` may hold `incoming.goyokeysync` (a copy of the server's key file), `outgoing.goyokeysync` (a request to send) and `prune.request`. Do not edit them. They are not authenticated, so someone who can write that folder can disrupt sync or have server history deleted.
+
+The details (the 14 trade-offs, what to do on every PC when a key is lost, the order of turning it off) are in 'Key-file sync' in [SECURITY_KEY.en.md](SECURITY_KEY.en.md).
+
 ## 8. Getting things back: server history and pre-merge copies
 
 The server keeps **the newest 200 versions** of each vault as ciphertext. Each upload of changed contents is one version. The newest version number appears in the 'Get from server…' list and in `goyo-sync.log`. 'Get from server…' in the window gets the newest version only; get an older one from the command line (see "Advanced: command line" below).
@@ -271,7 +291,8 @@ The helper writes its state as one word to the `status` file in the sync folder;
 |`config`|Sync warning|`goyo-sync.conf` has an error, so the helper stopped.|Open the settings window: it names the line and shows the settings it could read. Fix them and press 'Save and start'.|
 |`update`|Sync warning, newer-format message|The server copy uses a newer Goyo Vault format (`GOYOVA05` or later).|Update Goyo Vault and goyo-sync on this PC.|
 |`oldserver`|Sync warning, server-script message|The server script is older than 0.9.0 and refused a `GOYOVA04` upload (log: `server refused GOYOVA04`). The settings window's list shows 'Server script update needed'.|Press 'Install or update on server'. The same file is uploaded again every 10 minutes and when the helper restarts.|
-|`keyfile`|Sync warning, key-file message|The server refused the upload with KEY_BEHIND: its key file record does not match this vault copy's key. Only a server with key-file sync answers so. The settings window's list shows 'Key file update needed'.|Uploads resume once this PC has the key file changed on another PC; until then it tries again every 10 minutes.|
+|`keyfile`|Sync warning, key-file message|The server refused the upload with KEY_BEHIND: its key file record does not match this vault copy's key. The server answers so only while it holds a key record (`k/`) for that vault, that is, only for a vault that uses key-file sync of the security-key build. The settings window's list shows 'Key file update needed'.|Uploads resume once this PC has the key file changed on another PC; until then it tries again every 10 minutes.|
+|`nokeys`|Sync warning|(Security-key build) This vault uses key-file sync, but this PC's server connection does not take its key requests (no `--key-sync=<vault ID>` in the forced command). The settings window's list shows 'Key-file sync off on the server'.|Ask the server admin to add `--key-sync=<vault ID>` to this PC's forced-command line ('Key-file sync'). Until then vault uploads may be refused.|
 
 For "Helper off", press 'Save and start' in the settings window and check that autostart is on. If it ends right after starting, the status line and 'View log' tell you why.
 
@@ -316,6 +337,7 @@ For "Helper off", press 'Save and start' in the settings window and check that a
 - Two copies with the same vault ID (such as a restored backup) synced from two places both become copies of the same server vault.
 - If copies edited separately on different PCs each turn sync on, entries deleted or changed on one side reappear, because the format before sync keeps no record of deletions (section 4).
 - Malware running as you can copy the vault and key files or record your password, with or without sync. Sync does not change that risk.
+- **For a vault with key-file sync (security-key build)**, 'the key file never leaves the PCs' above does not hold. A key change the server hides (a freeze) does not reach a PC until you act on that PC, and the server's deletion of key files means something only with an honest server ([SECURITY_KEY.en.md](SECURITY_KEY.en.md)).
 
 ## Advanced: command line and goyo-sync.conf
 

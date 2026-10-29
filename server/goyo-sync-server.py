@@ -15,15 +15,24 @@ upload.
 
 Install, the forced-command key and uninstalling: docs/SYNC.md.
 
-Key-file sync (experimental, security-key builds only) is off unless the
-forced command names a vault in --key-sync=<32 hex>[,<32 hex>...] (at most
-64). Only for a named vault does this connection answer PUTKEY, GETKEY,
-CUTKEY and PRUNE; it then stores GOYOKS01 key files (they open only with the
-password and a registered security key) and nothing password-only or local
-(GOYOKE*, GOYOKH*). Without the flag every key op is BAD_REQUEST and no key
-file is ever stored. Once a vault has k/, every connection checks its vault
-uploads against the stored key record (KEY_BEHIND), with or without the
-flag. The admin may remove data/<id>/k/ only while no PC syncs that vault.
+Key-file sync (experimental, security-key builds only; docs/SECURITY_KEY.md).
+Without --key-sync this script never stores or serves a key file: PUT
+refuses every GOYOK* magic, and every key op (PUTKEY, GETKEY, CUTKEY, PRUNE)
+is BAD_REQUEST. With --key-sync=<vault id>[,<vault id>...] (32 lower-case
+hex digits each, distinct, at most 64, set in the forced command of every
+PC that syncs those vaults; anything else, a bare --key-sync included, is a
+usage error) it also stores, for the vaults it names only, GOYOKS01 key
+files (they open only with the password and a registered security key with
+its PIN; never GOYOKE* or GOYOKH*) as numbered records under data/<id>/k/:
+the latest record and the previous key file of its generation, never
+serving an older one. Turning key-file sync off appends a cut record, which
+ends the generation and removes its key files. Every key operation on a
+vault runs under an exclusive lock on data/<id>/lock (flock: the data root
+must support it). Once a vault has k/, every connection, with or without
+the flag, refuses a vault upload (KEY_BEHIND) unless it is GOYOVA04 and,
+while the latest record is a key file, carries that key file's epoch,
+current key ID and state tag. Vaults without k/ get no lock and no floor.
+The admin may remove data/<id>/k/ only while no PC syncs that vault.
 
 Storage, under <script dir>/data (--root DIR is for tests), 0700/0600:
   <32 hex of the raw vault id>/v/000000000001.goyo   immutable versions;

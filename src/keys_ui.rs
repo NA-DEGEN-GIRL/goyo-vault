@@ -236,11 +236,11 @@ pub const NO: &str = "아니요";
 pub const UNSURE: &str = "모름";
 /// S-LOST-PWCHANGE: the box, and what it does (in the plan's lines).
 pub const LOST_PWCHANGE: &str = "비밀번호도 함께 바꾸기 (권장)";
-pub const LOST_PWCHANGE_NOTE: &str = "비밀번호도 바꾸면 잃어버린 키를 가진 사람이 만든 열쇠 파일은 새 비밀번호로 열리지 않고, 서버가 이 변경을 다른 PC에 숨겨도 그 PC에서 새 비밀번호가 안 먹혀 바로 드러납니다.";
+pub const LOST_PWCHANGE_NOTE: &str = "비밀번호도 바꾸면 잃어버린 키를 가진 사람이 만든 열쇠 파일은 새 비밀번호로 열리지 않습니다. 다른 PC에 이 변경 알림이 뜨지 않으면 서버가 숨기고 있을 수 있으니, 그 PC에서도 '잃어버린 키 제거'를 하세요.";
 /// REMOVE_PWCHANGE's label (optional, off by default).
 pub const REMOVE_PWCHANGE_LABEL: &str = "비밀번호도 바꾸기";
 /// S-LOST-PWUNTICK (danger, default No).
-pub const PWUNTICK: &str = "비밀번호를 바꾸지 않으면, 잃어버린 키와 그 PIN, 비밀번호를 함께 가진 사람이 만든 열쇠 파일이 다른 PC에서 열릴 수 있고, 서버가 이 변경을 숨겨도 드러나지 않습니다. 그래도 비밀번호를 바꾸지 않을까요?";
+pub const PWUNTICK: &str = "비밀번호를 바꾸지 않으면, 잃어버린 키와 그 PIN, 비밀번호를 함께 가진 사람이 만든 열쇠 파일이 다른 PC에서 열릴 수 있습니다. 그래도 비밀번호를 바꾸지 않을까요?";
 pub const LOST_SUBMIT: &str = "제거";
 pub const REMOVE_SUBMIT: &str = "빼기";
 pub const DATE_FORMAT: &str = "날짜 형식이 맞지 않습니다. 예: 2026-10-29 (모르면 비워 두세요)";
@@ -3748,9 +3748,13 @@ impl App {
         let lost = self.screen == Screen::LostKey;
         let (title, small) = (self.font_of(|t| t.title()), self.font_of(|t| t.small()));
         let heading = if lost { LOST_TITLE } else { REMOVE_TITLE };
-        self.text(0, heading, (AX, 80, AW - 100, 34), title, TONE_TEXT, 0);
-        self.button(BACK, "‹ 뒤로", AX + AW - 84, 84, 84, 32, theme::GHOST);
+        // The two columns below span 40..836; the title and [뒤로] too.
+        self.text(0, heading, (40, 80, 696, 34), title, TONE_TEXT, 0);
+        self.button(BACK, "‹ 뒤로", 836 - 84, 84, 84, 32, theme::GHOST);
         let rows = self.keys_view().keys.map(|o| o.rows).unwrap_or_default();
+        // A loss's questions follow the last key row, a little apart: the
+        // space of the rows not shown (up to eight) is not left empty.
+        let up = (27 * (8 - rows.len().clamp(1, 8) as i32) - 10).max(0);
         let exposed = lost && self.toggles.exposure.is_some_and(|e| e != Exposure::No);
         self.note(if lost { LOST_PICK } else { REMOVE_PICK }, 40, 118, 388, 34);
         if exposed {
@@ -3771,20 +3775,20 @@ impl App {
         }
         let (plan, tone) = self.plan_text(lost);
         if lost {
-            self.note(LOST_DATE, 40, 376, 388, 34);
+            self.note(LOST_DATE, 40, 376 - up, 388, 34);
             let date = self
                 .toggles
                 .date
                 .take()
                 .map(|d| vault::shown_time(d)[..10].to_owned())
                 .unwrap_or_default();
-            self.input(LOSS_DATE, &date, (40, 410, 388, 34), false, false, 0);
+            self.input(LOSS_DATE, &date, (40, 410 - up, 388, 34), false, false, 0);
             let cue = wide(tr(DATE_CUE));
             unsafe {
                 // EM_SETCUEBANNER, shown also while the field has focus.
                 SendMessageW(self.handle(LOSS_DATE), 0x1501, 1, cue.as_ptr() as isize);
             }
-            self.note(EXPOSE, 40, 450, 388, 52);
+            self.note(EXPOSE, 40, 450 - up, 388, 52);
             let w = (388 - 2 * 8) / 3;
             for (i, (id, label, answer)) in [
                 (LOSS_YES, YES, Exposure::Yes),
@@ -3796,16 +3800,17 @@ impl App {
             {
                 let on = self.toggles.exposure == Some(answer);
                 let variant = if on { theme::TAB_ON } else { theme::TAB };
-                self.button(id, label, 40 + i as i32 * (w + 8), 504, w, 28, variant);
+                self.button(id, label, 40 + i as i32 * (w + 8), 504 - up, w, 28, variant);
             }
             if exposed {
                 let on = self.toggles.pwchange;
-                self.button(LOSS_PWCHANGE, LOST_PWCHANGE, 40, 538, 388, 26, toggle(on));
+                let y = 538 - up;
+                self.button(LOSS_PWCHANGE, LOST_PWCHANGE, 40, y, 388, 26, toggle(on));
             }
             // The plan under the shared-PIN toggles.
-            self.text(0, &plan, (448, 376, 388, 188), small, tone, 0);
-            self.removal_fields(568, exposed && self.toggles.pwchange);
-            self.button(SUBMIT, LOST_SUBMIT, 40, 638, 300, 40, theme::PRIMARY);
+            self.text(0, &plan, (448, 376 - up, 388, 188), small, tone, 0);
+            self.removal_fields(568 - up, exposed && self.toggles.pwchange);
+            self.button(SUBMIT, LOST_SUBMIT, 40, 638 - up, 300, 40, theme::PRIMARY);
         } else {
             self.text(0, &plan, (448, 118, 388, 262), small, tone, 0);
             let on = self.toggles.pwchange;
@@ -3884,7 +3889,7 @@ impl App {
     /// field, the list (a row opens its entry), [확인함] and [나중에].
     pub(crate) fn build_review(&mut self) {
         let (title, small) = (self.font_of(|t| t.title()), self.font_of(|t| t.small()));
-        self.text(0, REVIEW_TITLE, (AX, 80, AW, 34), title, TONE_TEXT, 0);
+        self.text(0, REVIEW_TITLE, (40, 80, 796, 34), title, TONE_TEXT, 0);
         let day = self.toggles.review_day.flatten();
         let text = match day {
             Some(d) => fill(REVIEW, &[&&vault::shown_time(d)[..10]]),

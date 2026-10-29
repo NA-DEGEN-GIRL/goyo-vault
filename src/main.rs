@@ -1720,22 +1720,38 @@ impl App {
             self.font_of(|t| t.small()),
             self.font_of(|t| t.body()),
         );
-        self.text(0, "열쇠 관리", (AX, 80, AW - 100, 34), title, TONE_TEXT, 0);
-        self.button(BACK, "‹ 뒤로", AX + AW - 84, 84, 84, 32, theme::GHOST);
+        let view = self.keys_view();
+        // The security-key section, when nothing holds key changes, and
+        // under a halted vault channel, which holds none: each key change
+        // asks its gate question, and the removal of a lost key none (spec
+        // §7.5, S-LOST-HALTED). The halt's text and override then sit in it.
+        #[cfg(feature = "security-key")]
+        let halted_keys = matches!(view.hold, Hold::Halted) && view.keys.is_some();
+        #[cfg(not(feature = "security-key"))]
+        let halted_keys = false;
+        #[cfg(feature = "security-key")]
+        let hardware = matches!(view.hold, Hold::None) || halted_keys;
+        #[cfg(not(feature = "security-key"))]
+        let hardware = false;
+        // The part above the security-key section spans its width, so both
+        // start at the same left edge; otherwise the centered column.
+        let (x, w) = if hardware { (40, 796) } else { (AX, AW) };
+        self.text(0, "열쇠 관리", (x, 80, w - 100, 34), title, TONE_TEXT, 0);
+        self.button(BACK, "‹ 뒤로", x + w - 84, 84, 84, 32, theme::GHOST);
         self.note(
             "다른 PC에서 비밀번호를 바꿨다면 그 PC의 새 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.",
-            AX,
+            x,
             124,
-            AW,
+            w,
             40,
         );
-        let half = (AW - 16) / 2;
-        let right = AX + half + 16;
-        self.label("비밀번호", AX, 178, half);
+        let half = (w - 16) / 2;
+        let right = x + half + 16;
+        self.label("비밀번호", x, 178, half);
         self.button(
             KEY_PASSWORD,
             "비밀번호 변경…",
-            AX,
+            x,
             200,
             half,
             38,
@@ -1751,9 +1767,8 @@ impl App {
             38,
             theme::SECONDARY,
         );
-        self.label("열쇠 백업", AX, 254, half);
-        self.button(KEYBACKUP, "열쇠 백업", AX, 276, half, 38, theme::SECONDARY);
-        let view = self.keys_view();
+        self.label("열쇠 백업", x, 254, half);
+        self.button(KEYBACKUP, "열쇠 백업", x, 276, half, 38, theme::SECONDARY);
         if let Some(code) = &view.code {
             self.label("열쇠 확인 코드", right, 254, half);
             self.text(0, code, (right, 282, half, 26), body, TONE_TEXT, 0);
@@ -1761,19 +1776,11 @@ impl App {
             let note = "두 PC의 열쇠 확인 코드가 같으면 같은 열쇠 파일입니다. 열쇠를 바꾼 뒤 다른 PC에서 새 열쇠 파일을 받았다면 두 코드를 비교하세요.";
             #[cfg(feature = "security-key")]
             let note = keys_ui::KEYCODE_NOTE;
-            self.note(note, AX, 326, AW, 40);
+            self.note(note, x, 326, w, 40);
         }
         let mut focus = self.handle(KEY_PASSWORD);
-        // The security-key section, when nothing holds key changes, and
-        // under a halted vault channel, which holds none: each key change
-        // asks its gate question, and the removal of a lost key none (spec
-        // §7.5, S-LOST-HALTED). The halt's text and override then sit in it.
         #[cfg(feature = "security-key")]
-        let halted_keys = matches!(view.hold, Hold::Halted) && view.keys.is_some();
-        #[cfg(not(feature = "security-key"))]
-        let halted_keys = false;
-        #[cfg(feature = "security-key")]
-        if matches!(view.hold, Hold::None) || halted_keys {
+        if hardware {
             let halt = view
                 .hold
                 .shown()

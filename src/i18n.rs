@@ -2248,13 +2248,13 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Change the password too (recommended)",
     ),
     (
-        "비밀번호도 바꾸면 잃어버린 키를 가진 사람이 만든 열쇠 파일은 새 비밀번호로 열리지 않고, 서버가 이 변경을 다른 PC에 숨겨도 그 PC에서 새 비밀번호가 안 먹혀 바로 드러납니다.",
-        "With a new password, a key file made by whoever has the lost key does not open with it, and if the server hides this change from another PC, the new password fails there and shows it at once.",
+        "비밀번호도 바꾸면 잃어버린 키를 가진 사람이 만든 열쇠 파일은 새 비밀번호로 열리지 않습니다. 다른 PC에 이 변경 알림이 뜨지 않으면 서버가 숨기고 있을 수 있으니, 그 PC에서도 '잃어버린 키 제거'를 하세요.",
+        "With a new password, a key file made by whoever has the lost key does not open with it. If another PC shows no notice of this change, the server may be hiding it: run 'Remove a lost key' on that PC too.",
     ),
     ("비밀번호도 바꾸기", "Change the password too"),
     (
-        "비밀번호를 바꾸지 않으면, 잃어버린 키와 그 PIN, 비밀번호를 함께 가진 사람이 만든 열쇠 파일이 다른 PC에서 열릴 수 있고, 서버가 이 변경을 숨겨도 드러나지 않습니다. 그래도 비밀번호를 바꾸지 않을까요?",
-        "If you keep the password, a key file made by someone who has the lost key, its PIN and the password can open on other PCs, and a server that hides this change goes unnoticed. Keep the password anyway?",
+        "비밀번호를 바꾸지 않으면, 잃어버린 키와 그 PIN, 비밀번호를 함께 가진 사람이 만든 열쇠 파일이 다른 PC에서 열릴 수 있습니다. 그래도 비밀번호를 바꾸지 않을까요?",
+        "If you keep the password, a key file made by someone who has the lost key, its PIN and the password can open on other PCs. Keep the password anyway?",
     ),
     ("제거", "Remove"),
     ("빼기", "Remove"),
