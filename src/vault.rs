@@ -206,7 +206,7 @@ pub const ANCHOR_REREAD: &str = "이 PC의 열쇠 기록(goyo-vault.keys)을 처
 /// S-RESTORE-PENDING: a key change of this PC waits for a login.
 pub const RESTORE_PENDING: &str = "이 PC에서 하던 열쇠 변경이 아직 끝나지 않았습니다. 원래 금고 파일을 그 열쇠 파일로 다시 열면 마저 끝납니다. 그때까지 복원한 금고에서는 열쇠를 바꾸거나 새 열쇠 파일을 받거나 서버에 올리거나 서버 사본을 합치지 않습니다. 필요한 항목을 확인하는 데 쓰세요.";
 /// S-PENDING-ELSEWHERE, filled with the key file's path.
-pub const PENDING_ELSEWHERE: &str = "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 열쇠 파일로 열면 마저 끝납니다. 그때까지 이 PC에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 더 쓸 수 없다면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.";
+pub const PENDING_ELSEWHERE: &str = "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 파일로 열면 마저 끝나며, 그때까지 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 쓸 수 없다면, 또는 지금 연 파일이 드라이브 문자만 바뀐 그 파일이라면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.";
 /// S-PENDING-DISCARD, filled with the key file's path (danger, default No).
 pub const PENDING_DISCARD: &str = "이 PC에서 하던 열쇠 변경이 {path}에 저장되었는지 확인하지 않고 그 기록을 버립니다. 그 열쇠 파일을 잃어버렸거나 더 쓸 수 없을 때만 계속하세요. 나중에 그 파일을 다시 찾으면 이 PC의 것으로 알아보지 못하고 다른 열쇠 파일처럼 다룹니다(갈라졌다면 '새 열쇠 파일 받기'로 합치세요). 계속할까요?";
 /// S-PENDING-DISCARDED.
@@ -2268,6 +2268,11 @@ impl Session {
     /// (S-RESTORE-PENDING rather than S-RESTORE-OLDKEY).
     pub fn restore_pending(&self) -> bool {
         self.restore_held && self.anchor.lines.pending.is_some()
+    }
+    /// Whether the key file is a 0.9.0 one (KF2): 0.8 and older cannot open
+    /// this vault, and a 0.8 server script takes none of its copies.
+    pub fn needs_0_9(&self) -> bool {
+        self.key_file.header().is_some()
     }
     /// The key code of the key file's state (spec §4.8), as the Keys screen
     /// shows it: `E{epoch} · XXXX-XXXX-XXXX-XXXX`. None for a 0.8 key file,

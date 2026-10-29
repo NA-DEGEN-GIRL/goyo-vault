@@ -136,7 +136,7 @@ The status line tells you about unsaved changes, and closing the window asks onc
 
 ## 4. Turn sync on
 
-Once the sync folder exists, open the vault in Goyo Vault and a dialog appears. It says that the key file and password are never sent, and that the vault format changes so **version 0.7 and older cannot open this vault or later backups of it.**
+Once the sync folder exists, open the vault in Goyo Vault and a dialog appears. It says that the key file and password are never sent, and that the vault format changes so **version 0.7 and older cannot open this vault or later backups of it.** For a vault whose keys were changed in 0.9.0 it says instead that **0.8 and older cannot open it and a 0.8 server script does not accept its copies, so update the server script first, then your other PCs, to 0.9.0 or later.**
 
 - **Yes:** the vault switches to the sync format (`GOYOVA02`) and its first copy is uploaded. When "Synced" appears at the top of the vault screen, the server has answered that it stored it.
 - **No:** nothing changes, and it asks again at the next unlock. To stop the question, **Remove** that vault in the settings window, press **Save and start**, and delete the `vault.goyo.sync` folder.

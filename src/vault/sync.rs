@@ -1066,6 +1066,13 @@ impl Session {
                     offer(notice, SyncNotice::RollbackHeld);
                 }
             }
+            // Gate-pending mode writes no vault file before its gate passes,
+            // which reads this copy again (spec §5.2 step 8, §2.8 #40): an
+            // older-key copy is not pushed over under the changed key file's
+            // data key, and a bad head is not taken as the repair base.
+            Verdict::Unreadable | Verdict::OlderKey(..) if self.merges_held() => {
+                link.verified = false;
+            }
             Verdict::Held => link.verified = false,
             // A halt belongs to the copy that caused it: a later head that is
             // repaired, pushed over or merged replaces it (spec v3 §7.2).

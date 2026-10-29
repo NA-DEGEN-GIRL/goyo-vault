@@ -66,6 +66,7 @@ CONSENT = GATES + 'a_union_suspends_only_with_consent'
 REVIEW_PATHS = GATES + 'a_removal_for_a_loss_makes_its_review_due_on_every_path'
 UNDONE = GATES + 'a_removal_that_never_landed_is_named_and_its_review_stays_due'
 OTP_PENDING = GATES + 'a_gate_pending_login_keeps_its_otp_code_used'
+GATE_POLL = GATES + 'a_gate_pending_poll_writes_no_vault_file'
 REFUSED_FIRST = HW + 'changes_with_keys_are_refused_before_anything_is_written'
 CREATE_ANCHOR = HW + 'a_vault_made_with_keys_writes_its_anchor_line_first'
 SECOND_LOSS = HW + 'a_replacement_key_and_a_second_loss_before_its_pairing_visit'
@@ -1328,6 +1329,19 @@ ROWS = [
      '    if own.magic.hardware() && !ct_eq(&own.pw_id, &other.pw_id) && same {',
      '    if false && own.magic.hardware() && !ct_eq(&own.pw_id, &other.pw_id) && same {',
      [E2E_HOSTILE]),
+    # The 0.9.0 release review: gate-pending mode pushes nothing over.
+    ('gate-pending mode pushes no older-key copy over', 7, 'feature', 'lib', SYNC,
+     '            Verdict::Unreadable | Verdict::OlderKey(..) if self.merges_held() => {',
+     '            Verdict::Unreadable | Verdict::OlderKey(..) if false && self.merges_held() => {',
+     [GATE_POLL]),
+    ('the gate pass judges the held server copy again', 7, 'feature', 'lib', GATE,
+     '        // against the key file now confirmed.\n        self.relink();',
+     '        // against the key file now confirmed.',
+     [GATE_POLL]),
+    ('gate-pending mode offers no head override', 7, 'feature', 'lib', ROTATE,
+     '        // would write the vault file under its data key (spec §5.2, §7.17).\n        #[cfg(feature = "security-key")]\n        self.edit_held()?;',
+     '        // would write the vault file under its data key (spec §5.2, §7.17).',
+     [GATE_POLL]),
 ]
 
 FEATURE = ['--features', 'security-key']

@@ -601,6 +601,10 @@ pub const EN: &[(&str, &str)] = &[
         "There is a sync folder ({}) next to this vault. goyo-sync uses it to exchange only an encrypted copy of the vault with your server. The key file and password are never sent.\n\nTurning sync on changes the vault format: version 0.7 and older cannot open this vault or later backups of it. Update your other PCs to 0.8 or later first. Turn sync on?",
     ),
     (
+        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n이 금고는 열쇠를 바꾼 적이 있어 0.8 이하 버전에서는 열 수 없고, 0.8 서버 스크립트는 이 금고의 사본을 받지 않습니다. 동기화를 켜기 전에 서버 스크립트를 먼저, 그다음 다른 PC의 고요 금고와 goyo-sync를 0.9.0 이상으로 업데이트하세요. 동기화를 켤까요?",
+        "There is a sync folder ({}) next to this vault. goyo-sync uses it to exchange only an encrypted copy of the vault with your server. The key file and password are never sent.\n\nThe keys of this vault were changed, so version 0.8 and older cannot open it, and a 0.8 server script does not accept its copies. Before turning sync on, update the server script first, then Goyo Vault and goyo-sync on your other PCs, to 0.9.0 or later. Turn sync on?",
+    ),
+    (
         "이 금고 파일은 보안 키로 잠긴 열쇠 파일로 저장되었습니다. 이 고요 금고 빌드에는 보안 키 기능이 없어 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다.",
         "This vault file was saved with a key file locked by a security key. This Goyo Vault build has no security-key support, so it cannot open it. Your password is not wrong.",
     ),
@@ -1418,8 +1422,8 @@ pub const EN: &[(&str, &str)] = &[
         "A key change on this PC has not finished yet. Opening the original vault file with that key file finishes it. Until then the restored vault changes no key, receives no key file, uploads nothing and merges no server copy. Use it to look up the entries you need.",
     ),
     (
-        "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 열쇠 파일로 열면 마저 끝납니다. 그때까지 이 PC에서는 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 더 쓸 수 없다면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.",
-        "A key change on this PC may have been saved in another key file ({path}), which could not be read. Opening the vault with that key file finishes it. Until then this PC changes no key and receives no key file. If that file is lost or can no longer be used, press [Discard the unfinished key change…] in 'Key management'.",
+        "이 PC에서 하던 열쇠 변경이 다른 열쇠 파일({path})에 저장되었을 수 있는데, 그 파일을 읽지 못했습니다. 그 파일로 열면 마저 끝나며, 그때까지 열쇠를 바꾸거나 새 열쇠 파일을 받지 않습니다. 그 파일을 잃어버렸거나 쓸 수 없다면, 또는 지금 연 파일이 드라이브 문자만 바뀐 그 파일이라면 '열쇠 관리'에서 [끝나지 않은 열쇠 변경 버리기…]를 누르세요.",
+        "A key change on this PC may have been saved in another key file ({path}), which could not be read. Opening the vault with that file finishes it; until then this PC changes no key and receives no key file. If that file is lost or unusable, or is the file you opened under a new drive letter, press [Discard the unfinished key change…] in 'Key management'.",
     ),
     (
         "이 PC에서 하던 열쇠 변경이 {path}에 저장되었는지 확인하지 않고 그 기록을 버립니다. 그 열쇠 파일을 잃어버렸거나 더 쓸 수 없을 때만 계속하세요. 나중에 그 파일을 다시 찾으면 이 PC의 것으로 알아보지 못하고 다른 열쇠 파일처럼 다룹니다(갈라졌다면 '새 열쇠 파일 받기'로 합치세요). 계속할까요?",

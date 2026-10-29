@@ -1168,6 +1168,10 @@ impl Session {
     /// newer state (S23-3 #5).
     pub fn head_to_override(&self) -> Result<HaltedHead> {
         self.not_rolled_back()?;
+        // Nor before the key file is confirmed or its gate passed: the push
+        // would write the vault file under its data key (spec §5.2, §7.17).
+        #[cfg(feature = "security-key")]
+        self.edit_held()?;
         self.halted_head().ok_or(NOTHING_HALTED)
     }
     /// P3 of the head override (spec §7.5a): after the Reauth, and only if
@@ -1189,6 +1193,8 @@ impl Session {
             return Err(KEY_DAMAGED);
         }
         self.not_rolled_back()?;
+        #[cfg(feature = "security-key")]
+        self.edit_held()?;
         if !self.push_over_head(head)? {
             return Err(HEAD_CHANGED);
         }
@@ -2505,7 +2511,11 @@ mod tests {
         let id = s.id;
         let (k0, v0) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
         assert!(pc.anchor().is_empty());
+        // The turn-on-sync question asks for 0.8 or later only before the
+        // first change, and for 0.9.0 everywhere after it.
+        assert!(!s.needs_0_9());
         assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert!(s.needs_0_9());
         let line = pc.lines(&id).vault.unwrap();
         assert_eq!(line.state.hist.len(), 2);
         assert_eq!(line.state.hist[1].kind, 0);
@@ -3116,6 +3126,33 @@ mod tests {
         fs::write(pc.key(), &k1).unwrap();
         fs::write(pc.vault(), &v1).unwrap();
         assert_eq!(refused(&pc, NEW, &codes), None);
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+
+    /// Rule (i) takes the highest-epoch temp of the vault whatever this PC
+    /// confirmed (spec §5.12; SECURITY_REVIEW.md, the `.goyotmp` row): one
+    /// below the confirmed state, beside a damaged key file, opens held as a
+    /// local rollback and gets the key file's name back.
+    #[test]
+    fn a_key_temp_below_the_confirmed_state_opens_held() {
+        let pc = Pc::new();
+        let (mut s, mut codes) = setup(&pc, false, false, false);
+        let id = s.id;
+        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
+        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        drop(s);
+        assert_eq!(pc.lines(&id).vault.unwrap().state.epoch, 2);
+        let k2 = fs::read(pc.key()).unwrap();
+        fs::write(pc.key(), &k2[..40]).unwrap();
+        fs::write(pc.vault(), &v1).unwrap();
+        let mut name = pc.key().into_os_string();
+        name.push(format!(".{:032x}.goyotmp", 0x1u8));
+        fs::write(&name, &k1).unwrap();
+        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        assert!(s.local_rollback());
+        assert!(notices(&mut s).contains(&KeyNotice::LocalRollback { old: 2, new: 1 }));
+        assert_eq!(fs::read(pc.key()).unwrap(), k1);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 

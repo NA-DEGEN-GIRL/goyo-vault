@@ -4619,6 +4619,59 @@ mod tests {
             set_kdf_profile(KdfProfile::Real);
         }
 
+        /// Spec §5.2 step 8, §2.8 #40: a synced PC that got another PC's
+        /// removal on a shared stick (the key file alone) opens in
+        /// gate-pending mode with its vault file under the older data key.
+        /// A server copy under that older key is not pushed over before the
+        /// gate passes, so the vault file stays under the key of the file
+        /// this PC confirmed, nor is the head override offered; the pass
+        /// judges the copy again and pushes over it then.
+        #[test]
+        fn a_gate_pending_poll_writes_no_vault_file() {
+            let a = Pc::new();
+            let (mut sa, mut codes, keys) = create(&a, 4, false, false);
+            let b = second_pc(&a, &mut codes, &keys, 3);
+            let dir = syncfile::sync_dir(&b.vault()).unwrap();
+            fs::create_dir(&dir).unwrap();
+            let now = otp::now().unwrap();
+            let status = syncfile::render_status(now, now, syncfile::SyncState::Ok);
+            syncfile::replace_file(&dir.join(syncfile::STATUS), &status).unwrap();
+            // B's copy under the first data key, as the server holds it.
+            let mut s = open(&b, OLD, &mut codes, &keys, 3).unwrap();
+            s.enable_sync().unwrap();
+            s.put(None, entry("from b")).unwrap();
+            let out = fs::read(dir.join(syncfile::OUTGOING)).unwrap();
+            let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+            let incoming = syncfile::render_incoming(1, copy).unwrap();
+            drop(s);
+            fs::remove_file(dir.join(syncfile::OUTGOING)).unwrap();
+            remove_lost(&mut sa, &mut codes, &keys, 1, 2);
+            drop(sa);
+            fs::copy(a.key(), b.key()).unwrap();
+            syncfile::replace_file(&dir.join(syncfile::INCOMING), &incoming).unwrap();
+            let vault = fs::read(b.vault()).unwrap();
+            let mut s = login_older(&b, &mut codes, &keys, 3);
+            assert!(s.gate_pending());
+            let generation = s.generation;
+            for _ in 0..3 {
+                let _ = s.poll_sync();
+            }
+            assert_eq!(
+                fs::read(b.vault()).unwrap(),
+                vault,
+                "written before the gate"
+            );
+            assert_eq!(s.generation, generation);
+            assert!(!dir.join(syncfile::OUTGOING).exists());
+            assert_eq!(s.head_to_override().err(), Some(GATE_HELD));
+            let typed = parse_code(&code_of(&s).show(s.key_state().epoch)).unwrap();
+            s.pass_login_gate(GateAnswer::Code(typed)).unwrap();
+            let _ = s.poll_sync();
+            assert!(s.generation > generation, "not judged again after the pass");
+            assert_ne!(fs::read(b.vault()).unwrap(), vault);
+            set_kdf_profile(KdfProfile::Real);
+        }
+
         /// Spec §7.15a (one-shot G2): a wrong pick while the anchor cannot be
         /// written (its lock held by another process) is the anchor's error,
         /// and G2 stays off for the session all the same, at login and at a

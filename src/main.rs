@@ -4967,18 +4967,23 @@ fn offer_sync(h: Hwnd) {
         }
         let folder = syncfile::sync_dir(&s.path)?;
         let folder = folder.file_name()?.to_string_lossy().into_owned();
-        Some((s.path.clone(), folder))
+        Some((s.path.clone(), folder, s.needs_0_9()))
     });
-    let Some((path, folder)) = asked else {
+    let Some((path, folder, needs_0_9)) = asked else {
         return;
     };
     unsafe {
         UpdateWindow(h);
     }
-    let consent = fill(
-        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n동기화를 켜면 금고 형식이 바뀌어 0.7 이하 버전에서는 이 금고와 이후 백업을 열 수 없습니다. 다른 PC도 먼저 0.8 이상으로 업데이트하세요. 동기화를 켤까요?",
-        &[&folder],
-    );
+    // A vault whose keys were changed (a 0.9.0 key file) is already beyond
+    // 0.8, and its first upload is GOYOVA04, which a 0.8 server script
+    // refuses (SYNC.md, the order of the 0.9.0 update).
+    let text = if needs_0_9 {
+        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n이 금고는 열쇠를 바꾼 적이 있어 0.8 이하 버전에서는 열 수 없고, 0.8 서버 스크립트는 이 금고의 사본을 받지 않습니다. 동기화를 켜기 전에 서버 스크립트를 먼저, 그다음 다른 PC의 고요 금고와 goyo-sync를 0.9.0 이상으로 업데이트하세요. 동기화를 켤까요?"
+    } else {
+        "이 금고 옆에 동기화 폴더({})가 있습니다. goyo-sync가 이 폴더를 통해 암호화된 금고 사본만 서버와 주고받습니다. 열쇠 파일과 비밀번호는 보내지 않습니다.\n\n동기화를 켜면 금고 형식이 바뀌어 0.7 이하 버전에서는 이 금고와 이후 백업을 열 수 없습니다. 다른 PC도 먼저 0.8 이상으로 업데이트하세요. 동기화를 켤까요?"
+    };
+    let consent = fill(text, &[&folder]);
     // No keeps v1, and the question comes again at the next unlock.
     if !ask(h, &consent) {
         return;

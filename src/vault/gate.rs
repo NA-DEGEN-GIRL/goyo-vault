@@ -617,6 +617,9 @@ impl Session {
         self.gate_login = None;
         self.tofu = false;
         self.g2_spent.set(false);
+        // The server copy the gate held is judged again at the next poll,
+        // against the key file now confirmed.
+        self.relink();
         // The review holds the vault outgoing before anything is flushed.
         if let Some(date) = &review {
             self.review_now(date);
