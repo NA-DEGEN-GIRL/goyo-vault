@@ -31,7 +31,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zeroize::Zeroizing;
 
@@ -42,8 +42,9 @@ mod hw;
 pub use adopt::{ForkOption, KeyGates};
 #[cfg(feature = "security-key")]
 pub use hw::{
-    ANCHOR_FAILED, Exposure, KEYSOFF_SYNCED, LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED,
-    REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, UNION_FULL, UNREACHABLE,
+    ANCHOR_FAILED, Exposure, KEYSOFF_SYNCED, KeyRow, KeysOverview, LossReport, NOT_PLANNED,
+    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow,
+    UNION_FULL, UNREACHABLE,
 };
 #[cfg(feature = "security-key")]
 pub(super) use hw::{create_with_keys, probe_anchor};
@@ -123,7 +124,9 @@ pub struct Reauth {
     /// The app's screen serial when the token was made; the app refuses a
     /// token from another screen (spec §5.3, §8.5).
     pub app_serial: u64,
-    created: Instant,
+    /// When it was made, on crypto::now_ms (spec §5.3 step 5, S45-2 #15),
+    /// the clock a test moves.
+    created: u64,
     password: Zeroizing<String>,
     /// The OTP step verified and saved; None without an OTP code.
     otp_step: Option<u64>,
@@ -132,6 +135,17 @@ pub struct Reauth {
     #[cfg(feature = "security-key")]
     keys: Option<hw::Authorizer>,
     _lock: FileLock,
+}
+impl Reauth {
+    /// What is left of its REAUTH_MAX (spec §9.2a): a flow checks it before
+    /// a registration, another ceremony and the write.
+    pub fn remaining(&self) -> Duration {
+        REAUTH_MAX.saturating_sub(self.age())
+    }
+    /// How long ago it was made: every REAUTH_MAX check reads this.
+    fn age(&self) -> Duration {
+        Duration::from_millis(crate::crypto::now_ms().saturating_sub(self.created))
+    }
 }
 /// What a key change does (spec §5.5).
 pub enum Change {
@@ -374,7 +388,7 @@ impl Session {
         Ok(Reauth {
             session: self.serial,
             app_serial: 0,
-            created: Instant::now(),
+            created: crate::crypto::now_ms(),
             password: Zeroizing::new(password.to_owned()),
             otp_step,
             #[cfg(feature = "security-key")]
@@ -483,7 +497,7 @@ impl Session {
     ) -> Result<Rekeyed> {
         // R0.
         if r.session != self.serial
-            || r.created.elapsed() > REAUTH_MAX
+            || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);
@@ -1025,7 +1039,7 @@ impl Session {
     /// this PC that the confirmed line held is forgotten. Not for a Restore.
     pub fn confirm_key_file(&mut self, r: Reauth) -> Result<()> {
         if r.session != self.serial
-            || r.created.elapsed() > REAUTH_MAX
+            || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);
@@ -1076,7 +1090,7 @@ impl Session {
     /// as one that never landed, if it is still the one this session found.
     pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {
         if r.session != self.serial
-            || r.created.elapsed() > REAUTH_MAX
+            || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);
@@ -1110,7 +1124,7 @@ impl Session {
     /// persisted: a later unlock, or any other head, is judged again.
     pub fn override_head(&mut self, r: Reauth, head: &HaltedHead) -> Result<()> {
         if r.session != self.serial
-            || r.created.elapsed() > REAUTH_MAX
+            || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);
@@ -2200,9 +2214,17 @@ mod tests {
         let mut r = reauth(&mut s);
         r.session ^= 1;
         assert_eq!(rekey(&mut s, r, NEW, true), Err(REAUTH_STALE));
-        let mut r = reauth(&mut s);
-        r.created = Instant::now() - REAUTH_MAX - Duration::from_secs(1);
+        // Older than REAUTH_MAX on the clock a test moves.
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1_000_000));
+        crate::crypto::set_test_clock(Some(clock.clone()));
+        let r = reauth(&mut s);
+        clock.fetch_add(
+            REAUTH_MAX.as_millis() as u64 + 1000,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert_eq!(r.remaining(), Duration::ZERO);
         assert_eq!(rekey(&mut s, r, NEW, true), Err(REAUTH_STALE));
+        crate::crypto::set_test_clock(None);
         // A gate the user was not asked about.
         s.stale_key_file = true;
         assert_eq!(s.password_change(), Ok(Some(Gate::StaleKeyFile)));
@@ -2554,7 +2576,12 @@ mod tests {
             super::super::ANCHOR_RELIST,
             super::super::ANCHOR_DOWNGRADE,
         ] {
+            // The default build's only way out; the security-key build
+            // offers the per-vault forget instead (spec §9.3).
+            #[cfg(not(feature = "security-key"))]
             assert!(text.ends_with(anchor::LAST_RESORT));
+            #[cfg(feature = "security-key")]
+            assert!(!text.contains("goyo-vault.keys"), "{text}");
         }
         // This PC's own pair opens as it is.
         fs::write(pc.vault(), &v2).unwrap();

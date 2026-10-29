@@ -55,10 +55,12 @@ for program in ('goyo-vault.exe', 'goyo-sync.exe'):
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
 subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe', 'target/release/goyo-sync.exe'], cwd=root)
-# Both programs check their own cryptography (and goyo-sync its windows).
+# Both programs check their own cryptography (and goyo-sync its windows),
+# and say which build they are (spec §8.8): the release is the default one.
 for program in ('goyo-vault.exe', 'goyo-sync.exe'):
     check = subprocess.run([str(release/program), '--self-check'], cwd=root, capture_output=True, text=True)
-    if check.returncode != 0 or 'HKDF self-test: PASS' not in check.stdout:
+    lines = check.stdout.splitlines()
+    if check.returncode != 0 or 'HKDF self-test: PASS' not in lines or 'security-key: not built' not in lines:
         sys.exit(f'Refusing to package: {program} --self-check failed: {check.stdout.strip()} {check.stderr.strip()}')
 # The server script runs on the user's server, so check the shipped copy here:
 # it must compile and pass its own selftest (CAS, history, key-file refusal).

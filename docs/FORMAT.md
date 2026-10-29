@@ -327,8 +327,8 @@ rejected=<64자리 16진수>|-  마지막으로 거부된 outgoing 파일의 SHA
 **형식.** ASCII(0x20~0x7E), 한 줄에 한 기록, LF. 첫 줄 `goyo-vault-keys 3`. 숫자는 앞자리 0 없는 10진수, 바이트열은 소문자 16진수, 빈 목록과 없는 값은 `-`, 목록은 쉼표로 나눕니다. 금고마다 `vault` 줄 하나(확정 상태)와 `pending` 줄 하나(쓰는 중인 열쇠 변경)까지입니다.
 
 ```
-vault <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hist= merged= pbad= gated= sup= keyid= vkey=
-pending <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hist= pbad= gated= sup= keyid=
+vault <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hist= merged= pbad= gated= sup= ks= keyid= vkey=
+pending <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hist= pbad= gated= sup= ks= keyid=
         kind= src= opt= rm= loss= exp= clone= clears= merged= kpath= pw= base=
 ```
 
@@ -336,7 +336,7 @@ pending <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hi
 |---|---|
 |`epoch`, `tag`|확정한 열쇠 파일의 수정 번호와 상태 태그(16바이트)|
 |`magic`|그 열쇠 파일의 매직. `GOYOKH`·`GOYOKS`로 시작하면 이 PC는 그 금고를 보안 키로 연 것으로 보고, 비밀번호만으로 여는 열쇠 파일을 거부합니다|
-|`policy`, `slots`, `pbad`, `sup`, `flags`의 `t`·`p`|보안 키 빌드가 씁니다. 이 빌드는 읽고 그대로 둡니다|
+|`policy`, `slots`, `pbad`, `sup`, `ks`, `flags`의 `t`·`p`|보안 키 빌드가 씁니다. 이 빌드는 읽고 그대로 둡니다. `sup`의 항목은 `<키 ID>.<수정 번호>.<태그>`, `ks`는 `-`·`on.<n>`·`off.<n>`·`off.?`이고, `ks`가 없는 줄은 `-`로 읽습니다|
 |`flags`의 `b`|이 상태의 열쇠 백업을 했음|
 |`consumed`|마지막으로 끝난 열쇠 변경의 `resume`(그 금고 파일이 이미 다시 저장되었음)|
 |`tombs`|제거 기록: credhash(16) : 처음 본 상태의 현재 키 ID 앞 4바이트(모르면 0) : `o`(이 PC에서 뺌) 또는 `t`(받은 파일에 있었음)|

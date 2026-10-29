@@ -1,6 +1,7 @@
 """Read PE headers/imports without loading or executing the program.
 
 Usage: python scripts/inspect_pe.py [exe] [--profile vault|sync] [--out FILE]
+                                     [--feature security-key]
 
 Profiles (default vault):
 - vault: goyo-vault.exe. Only the GUI and system DLLs it was built with, no
@@ -12,7 +13,15 @@ Profiles (default vault):
   crypto DLL. Writes docs/binary-inspection-sync.json.
 Both need ASLR, high-entropy ASLR, DEP, CFG, CET, DependentLoadFlags 0x800
 (System32 only), no delay imports, no import by ordinal and the GUI
-subsystem.
+subsystem. Neither imports webauthn.dll: the security-key build loads it at
+run time from System32 (spec v3 §8.1, §12). The release is the default
+build, which has no WebAuthn code at all: no `webauthn` text in goyo-vault.exe
+(ASCII or UTF-16LE, any case), no message pump or thread of a ceremony,
+and no key-file sync magic in goyo-sync.exe.
+
+--feature security-key (the manual checklist only) inspects a security-key
+build: those string and import rules are relaxed, the static-import ban on
+webauthn.dll stays, and it writes only to --out, never to docs/.
 """
 import argparse, hashlib, json, pathlib, struct, sys
 
@@ -29,7 +38,10 @@ parser = argparse.ArgumentParser(description='Check the PE flags and imports of 
 parser.add_argument('exe', nargs='?')
 parser.add_argument('--profile', choices=sorted(DEFAULTS), default='vault')
 parser.add_argument('--out')
+parser.add_argument('--feature', choices=['security-key'])
 args = parser.parse_args()
+if args.feature and not args.out:
+    sys.exit('inspect_pe.py --feature writes only to --out: docs/binary-inspection*.json describe the release (default) build.')
 p = pathlib.Path(args.exe or DEFAULTS[args.profile][0])
 out = pathlib.Path(args.out or DEFAULTS[args.profile][1])
 b = p.read_bytes()
@@ -97,6 +109,28 @@ for dll, names in imports.items():
     assert not any(n.startswith('ordinal:') for n in names), f'{dll}: import by ordinal'
 def crypto(name):
     return name.startswith(('BCrypt', 'CryptProtect', 'CryptUnprotect')) or name == 'SystemFunction036'
+# The security-key build loads webauthn.dll at run time from System32 only,
+# like wtsapi32; an import would load it before any defense, in every build.
+for dll in imports:
+    assert dll.lower() != 'webauthn.dll', 'webauthn.dll must never be imported (spec §8.1)'
+def holds(text):
+    """The text anywhere in the file, ASCII or UTF-16LE, in any case."""
+    low = b.lower()
+    return text.lower().encode('ascii') in low or text.lower().encode('utf-16-le') in low
+# What only the security-key build has: the ceremony's message pump and
+# its worker thread (spec §8.5), and in goyo-sync the key-file sync channel.
+CEREMONY = {'user32.dll': {'PeekMessageW', 'MsgWaitForMultipleObjectsEx'},
+            'kernel32.dll': {'CreateThread', 'GetExitCodeThread', 'SetThreadDescription',
+                             'SwitchToThread', 'ExitThread'}}
+if not args.feature:
+    if args.profile == 'vault':
+        assert not holds('webauthn'), 'goyo-vault.exe holds "webauthn": not the default build'
+        for dll, names in imports.items():
+            extra = sorted(set(names) & CEREMONY.get(dll.lower(), set()))
+            assert not extra, f'{dll}!{extra}: a ceremony pump or thread in the default build'
+    else:
+        for magic in ('GOYOSKO2', 'GOYOSKI2', 'GOYOSKR1'):
+            assert not holds(magic), f'goyo-sync.exe holds {magic}: not the default build'
 if args.profile == 'vault':
     # Only these DLLs may load before main runs; anything else (wtsapi32
     # pulled SspiCli.dll from the exe folder) must be loaded at run time

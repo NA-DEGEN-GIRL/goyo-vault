@@ -45,7 +45,7 @@ pub(super) const LIMIT: usize = 1 << 20;
 pub(super) const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// States a `hist` keeps, newest first.
 const HIST_MAX: usize = 64;
-/// Server files a `merged` list keeps, and data-key IDs a `sup` list keeps.
+/// Server files a `merged` list keeps, and candidates a `sup` list keeps.
 const RECENT_MAX: usize = 16;
 /// Slots of a key file (spec §4.1), and pair records among them.
 const SLOTS_MAX: usize = 8;
@@ -88,23 +88,37 @@ macro_rules! fork_vault {
         )
     };
 }
-/// S-ANCHOR-LASTRESORT: this build's only way out of the refusals above.
+/// S-ANCHOR-LASTRESORT, on its own status line after the refusals below:
+/// the default build's only way out of them (S23-1 #12). The security-key
+/// build offers the per-vault forget instead ([이 금고의 기록 지우고 다시
+/// 확인…], spec §5.10), which keeps every other vault's record.
+#[cfg(not(feature = "security-key"))]
 macro_rules! last_resort {
     () => {
-        "이 열쇠 파일이 맞는 것이 확실하고 다른 방법이 없으면, 마지막 방법으로 고요 금고를 모두 닫고 %LOCALAPPDATA%\\GoyoVault 폴더의 goyo-vault.keys와 goyo-vault.keys.로 시작하는 .tmp 파일을 지운 뒤 다시 여세요. 이 PC에 있는 모든 금고의 열쇠 기록이 함께 지워집니다(README의 '이 PC의 열쇠 기록'을 보세요)."
+        concat!(
+            "\r\n",
+            "이 열쇠 파일이 맞는 것이 확실하고 다른 방법이 없으면, 마지막 방법으로 고요 금고를 모두 닫고 %LOCALAPPDATA%\\GoyoVault 폴더의 goyo-vault.keys와 goyo-vault.keys.로 시작하는 .tmp 파일을 지운 뒤 다시 여세요. 이 PC에 있는 모든 금고의 열쇠 기록이 함께 지워집니다(README의 '이 PC의 열쇠 기록'을 보세요)."
+        )
     };
 }
-/// The last-resort advice that ends the refusals below.
-#[cfg(test)]
+#[cfg(feature = "security-key")]
+macro_rules! last_resort {
+    () => {
+        ""
+    };
+}
+/// The last-resort advice that ends the refusals below (empty in the
+/// security-key build).
+#[cfg(all(test, not(feature = "security-key")))]
 pub(super) const LAST_RESORT: &str = last_resort!();
 /// The anchor refusals of a login (spec §5.1 step 9). None counts as a
-/// failed attempt, and each comes before any key derivation. Each ends with
-/// the last resort: this build has no other way out (S23-1 #12).
-pub const ANCHOR_DOWNGRADE: &str = concat!(downgrade!(), "\r\n", last_resort!());
-pub const ANCHOR_RELIST: &str = concat!(relist!(), "\r\n", last_resort!());
-pub const ANCHOR_FORK: &str = concat!(fork!(), "\r\n", last_resort!());
+/// failed attempt, and each comes before any key derivation. In the default
+/// build each ends with the last resort.
+pub const ANCHOR_DOWNGRADE: &str = concat!(downgrade!(), last_resort!());
+pub const ANCHOR_RELIST: &str = concat!(relist!(), last_resort!());
+pub const ANCHOR_FORK: &str = concat!(fork!(), last_resort!());
 /// The same when the vault file is under the forked branch's key as well.
-pub const ANCHOR_FORK_VAULT: &str = concat!(fork!(), "\r\n", fork_vault!(), "\r\n", last_resort!());
+pub const ANCHOR_FORK_VAULT: &str = concat!(fork!(), "\r\n", fork_vault!(), last_resort!());
 /// S-ANCHOR-EPOCH, filled with the key file's epoch and this PC's.
 pub const ANCHOR_EPOCH: &str = "이 열쇠 파일의 수정 번호(수정 {new})가 이 PC가 본 것(수정 {old})보다 비정상적으로 큽니다. 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.";
 /// S-ANCHOR-NEWER: a later version wrote the anchor, so this one keeps its
@@ -196,6 +210,29 @@ pub(super) struct Flags {
     pub t: bool,
     pub p: bool,
 }
+/// A `sup` entry (spec §5.10): the data-key ID of a candidate this PC
+/// superseded or wrote a removal on top of, and that candidate's state. The
+/// security-key build's key-file sync decides with it (stage 6); every
+/// build reads and keeps it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Sup {
+    pub keyid: [u8; 16],
+    pub epoch: u64,
+    pub tag: [u8; 16],
+}
+/// `ks`, this PC's key-file sync intent (spec §7.11): none (`-`, also an
+/// absent field), a consented "on" made over the server's cut (`on.<c>`), a
+/// write that left key-file sync over the record `L` (`off.<L>`), or one
+/// made with no server view (`off.?`). Only the security-key build sets it
+/// (stage 6); every build reads it and copies it to every line it writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum Ks {
+    #[default]
+    None,
+    On(u64),
+    Off(u64),
+    OffUnknown,
+}
 /// What a `vault` line and a `pending` line both state of a key-file state.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct State {
@@ -213,7 +250,8 @@ pub(super) struct State {
     /// The newest state this PC wrote for a change its user started, or
     /// confirmed (spec §5.10).
     pub gated: u64,
-    pub sup: Vec<[u8; 16]>,
+    pub sup: Vec<Sup>,
+    pub ks: Ks,
     /// The state's current key ID in full.
     pub keyid: [u8; 16],
 }
@@ -779,7 +817,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 let (epoch, tag) = m.split_once(':')?;
                 Some((epoch_num(epoch)?, unhex(tag)?))
             })?;
-            let (pbad, gated, sup) = tail(&mut f, state.epoch)?;
+            let (pbad, gated, sup, ks) = tail(&mut f, state.epoch)?;
             let keyid = unhex(f.get("keyid")?)?;
             let vkey = maybe(f.get("vkey")?, unhex)?;
             f.end()?;
@@ -787,6 +825,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 pbad,
                 gated,
                 sup,
+                ks,
                 keyid,
                 ..state
             };
@@ -801,7 +840,7 @@ fn parse_line(line: &str) -> Option<Line> {
         }
         "pending" => {
             let state = state(&mut f)?;
-            let (pbad, gated, sup) = tail(&mut f, state.epoch)?;
+            let (pbad, gated, sup, ks) = tail(&mut f, state.epoch)?;
             let keyid = unhex(f.get("keyid")?)?;
             let kind = num(f.get("kind")?).filter(|k| (1..=10).contains(k))? as u8;
             let src = f.get("src")?;
@@ -842,6 +881,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 pbad,
                 gated,
                 sup,
+                ks,
                 keyid,
                 ..state
             };
@@ -963,11 +1003,13 @@ fn state(f: &mut Fields) -> Option<State> {
         pbad: Vec::new(),
         gated: epoch,
         sup: Vec::new(),
+        ks: Ks::None,
         keyid: [0; 16],
     })
 }
-/// `pbad`, `gated` (a line without it reads as its epoch) and `sup`.
-type Tail = (Vec<([u8; 4], [u8; 4])>, u64, Vec<[u8; 16]>);
+/// `pbad`, `gated` (a line without it reads as its epoch), `sup` and `ks`
+/// (a line without it reads as `-`).
+type Tail = (Vec<([u8; 4], [u8; 4])>, u64, Vec<Sup>, Ks);
 fn tail(f: &mut Fields, epoch: u64) -> Option<Tail> {
     let pbad = list(f.get("pbad")?, SLOTS_MAX * (SLOTS_MAX - 1), |p| {
         let (owner, target) = p.split_once('>')?;
@@ -977,8 +1019,27 @@ fn tail(f: &mut Fields, epoch: u64) -> Option<Tail> {
         Some(g) => epoch_num(g)?,
         None => epoch,
     };
-    let sup = list(f.get("sup")?, RECENT_MAX, unhex)?;
-    Some((pbad, gated, sup))
+    // `<keyid>.<epoch>.<tag>`; the bare key ID that 308909f parsed was
+    // never released, so it is not read (S6R2 #13).
+    let sup = list(f.get("sup")?, RECENT_MAX, |s| {
+        let mut p = s.split('.');
+        let sup = Sup {
+            keyid: unhex(p.next()?)?,
+            epoch: epoch_num(p.next()?)?,
+            tag: unhex(p.next()?)?,
+        };
+        p.next().is_none().then_some(sup)
+    })?;
+    let ks = match f.maybe("ks")? {
+        None | Some("-") => Ks::None,
+        Some("off.?") => Ks::OffUnknown,
+        Some(k) => match k.split_once('.')? {
+            ("on", c) => Ks::On(num(c)?),
+            ("off", l) => Ks::Off(num(l)?),
+            _ => return None,
+        },
+    };
+    Some((pbad, gated, sup, ks))
 }
 fn render_state(out: &mut String, s: &State) {
     let flags: String = [(s.flags.b, 'b'), (s.flags.t, 't'), (s.flags.p, 'p')]
@@ -1034,8 +1095,18 @@ fn render_tail(out: &mut String, s: &State) {
         s.pbad.iter().map(|(o, t)| format!("{}>{}", hex(o), hex(t))),
     ));
     out.push_str(&format!(" gated={} sup=", s.gated));
-    out.push_str(&joined(s.sup.iter().map(|k| hex(k))));
-    out.push_str(&format!(" keyid={}", hex(&s.keyid)));
+    out.push_str(&joined(
+        s.sup
+            .iter()
+            .map(|e| format!("{}.{}.{}", hex(&e.keyid), e.epoch, hex(&e.tag))),
+    ));
+    let ks = match s.ks {
+        Ks::None => "-".into(),
+        Ks::On(c) => format!("on.{c}"),
+        Ks::Off(l) => format!("off.{l}"),
+        Ks::OffUnknown => "off.?".into(),
+    };
+    out.push_str(&format!(" ks={ks} keyid={}", hex(&s.keyid)));
 }
 fn render_vault(id: &[u8; 16], v: &VaultLine) -> String {
     let mut out = format!("vault {}", hex(id));
@@ -1718,7 +1789,7 @@ pub(super) fn legacy_hist(state: KeyState, key_id: &[u8; 16]) -> Hist {
 /// The confirmed line of a KF2 key file `h` that this PC takes over `old`:
 /// its own state with `old`'s history before it, its removals with what
 /// `old` knew of them (new ones taken from this file), `old`'s `merged`,
-/// `sup`, `vkey` and `consumed`. `gated` and `t` stay. With security keys
+/// `sup`, `ks`, `vkey` and `consumed`. `gated` and `t` stay. With security keys
 /// also its slots, and `old`'s broken pair records between keys still live.
 pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
     let known = |c: &[u8; 16]| {
@@ -1794,6 +1865,7 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             pbad,
             gated: old.map_or(h.epoch, |o| o.state.gated),
             sup: old.map(|o| o.state.sup.clone()).unwrap_or_default(),
+            ks: old.map_or(Ks::None, |o| o.state.ks),
             keyid: h.current_key_id(),
         },
         merged: old.map(|o| o.merged.clone()).unwrap_or_default(),
@@ -1872,6 +1944,7 @@ pub(super) fn legacy_line(
             pbad: Vec::new(),
             gated: state.epoch,
             sup: old.map(|o| o.state.sup.clone()).unwrap_or_default(),
+            ks: old.map_or(Ks::None, |o| o.state.ks),
             keyid: *key_id,
         },
         merged: old.map(|o| o.merged.clone()).unwrap_or_default(),
@@ -2146,7 +2219,19 @@ mod tests {
             ],
             pbad: vec![([11; 4], [12; 4])],
             gated: 11,
-            sup: vec![[13; 16], [0x13; 16]],
+            sup: vec![
+                Sup {
+                    keyid: [13; 16],
+                    epoch: 9,
+                    tag: [0xd3; 16],
+                },
+                Sup {
+                    keyid: [0x13; 16],
+                    epoch: EPOCH_MAX,
+                    tag: [0; 16],
+                },
+            ],
+            ks: Ks::Off(7),
             keyid: [14; 16],
         }
     }
@@ -2165,6 +2250,7 @@ mod tests {
             pbad: Vec::new(),
             gated: 0,
             sup: Vec::new(),
+            ks: Ks::None,
             keyid: [0xff; 16],
         }
     }
@@ -2815,5 +2901,111 @@ mod tests {
         let first = pending_of(&k6, None, Some(legacy), None);
         assert_eq!(first.state.hist, [hist_of(&k6), legacy]);
         assert_eq!(first.base, None);
+    }
+
+    /// The two grammars of stage 6 that every build reads, writes back and
+    /// keeps (S6R2 #13): `sup` entries as `<keyid>.<epoch>.<tag>` and `ks`
+    /// in each of its forms, at their places before `keyid`, in `vault` and
+    /// `pending` lines alike; a line without `ks` reads `-`; the bare key ID
+    /// and every other form is malformed; and every line this PC takes over
+    /// or writes (`line_of`, `pending_of`, `legacy_line`, a promotion)
+    /// carries the old line's values on.
+    #[test]
+    fn sup_and_ks_round_trip_and_are_kept() {
+        let id = [0x5e; 16];
+        let forms = [
+            (Ks::None, "-"),
+            (Ks::On(0), "on.0"),
+            (Ks::On(41), "on.41"),
+            (Ks::Off(u64::MAX), "off.18446744073709551615"),
+            (Ks::OffUnknown, "off.?"),
+        ];
+        for (ks, form) in forms {
+            let mut state = full_state();
+            state.ks = ks;
+            let vault = VaultLine {
+                state: state.clone(),
+                merged: Vec::new(),
+                vkey: None,
+            };
+            let text = render_vault(&id, &vault);
+            let sup = format!(
+                " sup={}.9.{},{}.{EPOCH_MAX}.{} ks={form} keyid=",
+                "0d".repeat(16),
+                "d3".repeat(16),
+                "13".repeat(16),
+                "00".repeat(16)
+            );
+            assert!(text.contains(&sup), "{text}");
+            assert_eq!(parsed(&text), Some(Line::Vault(id, Box::new(vault))));
+            let pending = PendingLine {
+                state,
+                ..full_pending()
+            };
+            let text = render_pending(&id, &pending);
+            assert!(text.contains(&format!(" ks={form} keyid=")), "{text}");
+            assert_eq!(parsed(&text), Some(Line::Pending(id, Box::new(pending))));
+        }
+        // Without `ks`: `-`. Every other form, the bare key ID of 308909f,
+        // a fourth part, an epoch above EPOCH_MAX and `ks` out of its place
+        // are malformed.
+        let text = render_vault(
+            &id,
+            &VaultLine {
+                state: full_state(),
+                merged: Vec::new(),
+                vkey: None,
+            },
+        );
+        let without = text.replace(" ks=off.7", "");
+        assert!(matches!(parsed(&without), Some(Line::Vault(_, v)) if v.state.ks == Ks::None));
+        let keyid = format!(" keyid={}", "0e".repeat(16));
+        let first = format!("{}.9.{}", "0d".repeat(16), "d3".repeat(16));
+        for bad in [
+            text.replace("ks=off.7", "ks=off"),
+            text.replace("ks=off.7", "ks=off."),
+            text.replace("ks=off.7", "ks=off.07"),
+            text.replace("ks=off.7", "ks=on.?"),
+            text.replace("ks=off.7", "ks=off.?1"),
+            text.replace("ks=off.7", "ks=up.7"),
+            text.replace("ks=off.7", "ks=OFF.7"),
+            text.replace("ks=off.7", "ks="),
+            text.replace(" ks=off.7", "")
+                .replace(&keyid, &format!("{keyid} ks=off.7")),
+            text.replace(&first, &"0d".repeat(16)),
+            text.replace(&first, &format!("{first}.1")),
+            text.replace(&first, &format!("{}.9", "0d".repeat(16))),
+            text.replace(
+                &first,
+                &first.replace(".9.", &format!(".{}.", EPOCH_MAX + 1)),
+            ),
+            text.replace(&first, &first.replace(".9.", ".09.")),
+        ] {
+            assert_ne!(bad, text);
+            assert_eq!(parsed(&bad), None, "{bad}");
+        }
+        // Kept by every line this PC writes over the old one.
+        let vid = [0x79; 16];
+        let k5 = ke03(vid, &[dk(5), dk(0)], 5, &[], 5);
+        let mut l5 = line_of(&k5, None);
+        assert_eq!((l5.state.sup.as_slice(), l5.state.ks), (&[][..], Ks::None));
+        l5.state.sup = full_state().sup;
+        l5.state.ks = Ks::On(3);
+        let k6 = ke03(vid, &[dk(6), dk(5), dk(0)], 6, &[], 6);
+        let l6 = line_of(&k6, Some(&l5));
+        assert_eq!((&l6.state.sup, l6.state.ks), (&l5.state.sup, Ks::On(3)));
+        let p = pending_of(&k6, Some(&l5), None, None);
+        assert_eq!((&p.state.sup, p.state.ks), (&l5.state.sup, Ks::On(3)));
+        let promoted = p.promoted(Some(&l5));
+        assert_eq!(
+            (&promoted.state.sup, promoted.state.ks),
+            (&l5.state.sup, Ks::On(3))
+        );
+        let legacy = KeyState {
+            epoch: 0,
+            tag: [0x0e; 16],
+        };
+        let back = legacy_line(legacy, keyfile::Magic::Ke02, false, &[0; 16], Some(&l5));
+        assert_eq!((&back.state.sup, back.state.ks), (&l5.state.sup, Ks::On(3)));
     }
 }

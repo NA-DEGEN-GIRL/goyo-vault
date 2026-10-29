@@ -1043,6 +1043,19 @@ impl Session {
                 }
                 // The OTP watermark of this session may be newer (unlock).
                 merged.last = merged.last.max(self.last);
+                // The merge's provenance lines first (spec §5.13): a merge
+                // whose lines cannot be written is not saved, and runs again
+                // at the next poll.
+                #[cfg(feature = "security-key")]
+                if report.changed && self.logs_merges() {
+                    let brought = super::review::brought(
+                        &self.entries,
+                        &self.tombstones,
+                        &merged.entries,
+                        &merged.tombstones,
+                    );
+                    self.log_merge(version, &brought)?;
+                }
                 if report.changed {
                     let bytes = self.encode_as(Format::V2, merged.view()).map_err(|_| ())?;
                     self.write(&bytes).map_err(|_| ())?;

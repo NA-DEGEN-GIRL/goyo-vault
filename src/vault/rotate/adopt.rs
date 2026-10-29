@@ -229,6 +229,10 @@ pub struct Preview {
     /// Keys nothing touched reaches: written only with S-SUSPEND's consent.
     #[cfg(feature = "security-key")]
     pub suspend: Vec<u8>,
+    /// The same keys by credential, which S-SUSPEND names as this PC does
+    /// (`Session::named`) and its extra touches ask for.
+    #[cfg(feature = "security-key")]
+    pub suspend_keys: Vec<[u8; 16]>,
     /// The result is password-only for a vault with keys: [받기] asks
     /// S-ADOPT-PWONLY first.
     #[cfg(feature = "security-key")]
@@ -541,7 +545,7 @@ impl Session {
         password: Option<&str>,
         touch: Option<&Touch>,
     ) -> Result<OtherOpened> {
-        if r.session != self.serial || r.created.elapsed() > REAUTH_MAX {
+        if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
         let password = password.unwrap_or(&r.password);
@@ -621,7 +625,7 @@ impl Session {
         gate: GatePass,
         #[cfg(feature = "security-key")] option: ForkOption,
     ) -> Result<AdoptPlan> {
-        if r.session != self.serial || r.created.elapsed() > REAUTH_MAX {
+        if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
         let now = self.adopt_check(other, Source::File(other.path().to_owned()))?;
@@ -683,6 +687,8 @@ impl Session {
             #[cfg(feature = "security-key")]
             suspend: Vec::new(),
             #[cfg(feature = "security-key")]
+            suspend_keys: Vec::new(),
+            #[cfg(feature = "security-key")]
             password_only: false,
         };
         // A union with security keys, planned now with the touches so far:
@@ -704,6 +710,7 @@ impl Session {
             preview.renumbered = plan.renumbered.clone();
             preview.dropped_uv = plan.dropped_uv.clone();
             preview.suspend = plan.unreached.clone();
+            preview.suspend_keys = plan.unreached_keys.clone();
             preview.password_only = self.key_file.needs_security_key() && plan.password_only();
         }
         Ok(AdoptPlan {
@@ -739,7 +746,7 @@ impl Session {
         if r.session != self.serial
             || plan.session != self.serial
             || r.app_serial != plan.app_serial
-            || r.created.elapsed() > REAUTH_MAX
+            || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);

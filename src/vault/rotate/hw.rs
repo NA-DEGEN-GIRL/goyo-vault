@@ -112,6 +112,55 @@ impl LossReport {
     }
 }
 
+/// Which flow [다시 하기] (`LOST_REDO`, spec §9.2) reopens for a removal
+/// that never landed: the one its pending entry's `src` names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RedoFlow {
+    /// "잃어버린 키 제거", with the pick and the loss report.
+    Lost,
+    /// "키 빼기", with the same keys.
+    Retire,
+    /// "새 열쇠 파일 받기" (an adopt or an accept): the file is picked
+    /// again; never a removal of this PC's own.
+    Adopt,
+}
+/// A removal that never landed (S-REMOVE-UNDONE, spec §5.2 step 7): what
+/// [다시 하기] fills the reopened screen with.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Redo {
+    pub flow: RedoFlow,
+    /// The removed keys' numbers.
+    pub remove: Vec<u8>,
+    /// The lost-key flow's loss date, exposure answer and shared-PIN keys.
+    pub loss: Option<LossReport>,
+}
+impl Redo {
+    /// What a dropped pending entry asks [다시 하기] to reopen; None for
+    /// any other source (S-NOTFINISHED).
+    pub(in crate::vault) fn of(p: &anchor::PendingLine) -> Option<Self> {
+        let flow = match p.src {
+            anchor::Src::Lost => RedoFlow::Lost,
+            anchor::Src::Retire => RedoFlow::Retire,
+            anchor::Src::Adopt | anchor::Src::Accept => RedoFlow::Adopt,
+            _ => return None,
+        };
+        let remove: Vec<u8> = p.rm.iter().map(|(n, _)| *n).collect();
+        if remove.is_empty() {
+            return None;
+        }
+        let loss = (flow == RedoFlow::Lost).then(|| LossReport {
+            date: p.loss.as_deref().and_then(super::super::review::day_of),
+            exposure: match p.exp {
+                Some(b'y') => Exposure::Yes,
+                Some(b'u') => Exposure::Unsure,
+                _ => Exposure::No,
+            },
+            shared_pin: p.clone.clone(),
+        });
+        Some(Self { flow, remove, loss })
+    }
+}
+
 /// One key's entry of a re-seed (spec §5.5): its number, its new seed and
 /// its output for that seed. Built only by `ReSeedPlan`; zeroized on drop.
 pub struct ReSeedKey {
@@ -151,6 +200,25 @@ impl ReSeedPlan {
             .keys
             .iter()
             .filter(|k| !k.proved)
+            .map(|k| {
+                let (old, new) = (
+                    salt(&self.vault_id, &k.seed),
+                    salt(&self.vault_id, &k.seed_new),
+                );
+                (k.cred_id.clone(), old, Some(new))
+            })
+            .collect();
+        AssertRequest::new(owner, allow, self.pin)
+    }
+    /// The allow list of the first 2-salt ceremony, whose touch is also the
+    /// flow's Reauth (spec §9.2 re-seed step 3, §9.2a "for an authorizer,
+    /// not suspended"): the keys of `active` (the live, non-suspended ones)
+    /// only, since a suspended key cannot open the key file.
+    pub fn first_request(&self, active: &[u8], owner: isize) -> Result<AssertRequest> {
+        let allow = self
+            .keys
+            .iter()
+            .filter(|k| !k.proved && active.contains(&k.number))
             .map(|k| {
                 let (old, new) = (
                     salt(&self.vault_id, &k.seed),
@@ -587,7 +655,165 @@ fn every_pair(slots: &[SlotPublic]) -> Vec<PairPlan> {
     out
 }
 
+/// One key as the Keys screen lists it (spec §9.1): from this PC's own key
+/// file and anchor, public bytes only.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct KeyRow {
+    pub number: u8,
+    /// Unix seconds, as its registration's `<STAMP>` shows them.
+    pub registered: u64,
+    /// The registration's `<STAMP>` (`YYYYMMDD-HHMMSS`, UTC) and its whole
+    /// display name `Goyo Vault <TAG> key <N> <STAMP>` (spec §8.3).
+    pub stamp: String,
+    pub display: String,
+    /// Live but without an S-wrap: it opens the key file again only after
+    /// a pairing.
+    pub suspended: bool,
+    /// Suspended and owning no pair record: only a removal and a new
+    /// registration help.
+    pub orphan: bool,
+    /// The anchor flags it "possibly cloned" (spec §5.10 `clone`).
+    pub cloned: bool,
+    /// The key this session was unlocked with.
+    pub opened: bool,
+    /// The other live keys it is not paired with both ways, through records
+    /// this PC did not find broken.
+    pub unpaired: Vec<u8>,
+    /// The other keys whose record with it this PC found broken (`pbad`).
+    pub broken: Vec<u8>,
+}
+/// The Keys screen's security-key section (spec §9.1): PIN mode, one row
+/// per live key, and the full authorizers (keys that reach every other
+/// live, non-suspended key through records not marked broken).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct KeysOverview {
+    pub pin: bool,
+    pub rows: Vec<KeyRow>,
+    pub full: Vec<u8>,
+}
+impl KeysOverview {
+    /// The live, non-suspended keys.
+    pub fn active(&self) -> Vec<u8> {
+        self.rows
+            .iter()
+            .filter(|r| !r.suspended)
+            .map(|r| r.number)
+            .collect()
+    }
+}
+
 impl Session {
+    /// What the Keys screen shows of this key file's security keys (spec
+    /// §9.1): None for a key file without them. The pairing status counts
+    /// the public pair records minus those this PC found broken.
+    pub fn keys_overview(&self) -> Option<KeysOverview> {
+        let h = self.key_file.header().filter(|h| !h.slots.is_empty())?;
+        let pbad = self
+            .anchor
+            .lines
+            .vault
+            .as_ref()
+            .filter(|v| v.state.key_state() == self.key_state)
+            .map(|v| v.state.pbad.clone())
+            .unwrap_or_default();
+        let shorts: Vec<[u8; 4]> = h.slots.iter().map(|s| short(&s.credhash)).collect();
+        let broken = |o: usize, t: usize| pbad.contains(&(shorts[o], shorts[t]));
+        // Records that deliver: owner → target, not marked broken.
+        let delivers = |o: usize, t: usize| {
+            h.pairs
+                .iter()
+                .any(|(a, b)| usize::from(*a) == o && usize::from(*b) == t)
+                && !broken(o, t)
+        };
+        let suspended = |j: usize| (h.suspended >> j) & 1 != 0;
+        let tag: String = h.vault_id[..4].iter().map(|b| format!("{b:02X}")).collect();
+        let clones = &self.anchor.lines.clones;
+        let rows = h
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(j, s)| {
+                let others = (0..h.slots.len()).filter(|k| *k != j);
+                let stamp = fido::stamp(s.registered);
+                KeyRow {
+                    number: s.number,
+                    registered: s.registered,
+                    display: format!("Goyo Vault {tag} key {} {stamp}", s.number),
+                    stamp,
+                    suspended: suspended(j),
+                    orphan: suspended(j) && !h.pairs.iter().any(|(o, _)| usize::from(*o) == j),
+                    cloned: clones.iter().any(|(c, _)| *c == s.credhash),
+                    opened: self.unlocked_with == Some(s.number),
+                    unpaired: others
+                        .clone()
+                        .filter(|k| !(delivers(j, *k) && delivers(*k, j)))
+                        .map(|k| h.slots[k].number)
+                        .collect(),
+                    broken: others
+                        .filter(|k| broken(j, *k) || broken(*k, j))
+                        .map(|k| h.slots[k].number)
+                        .collect(),
+                }
+            })
+            .collect();
+        let full = (0..h.slots.len())
+            .filter(|a| !suspended(*a))
+            .filter(|a| {
+                (0..h.slots.len())
+                    .filter(|t| t != a && !suspended(*t))
+                    .all(|t| delivers(*a, t))
+            })
+            .map(|a| h.slots[a].number)
+            .collect();
+        Some(KeysOverview {
+            pin: h.pin(),
+            rows,
+            full,
+        })
+    }
+    /// The vault ID every registration's salt binds (spec §3.2, §8.3).
+    pub fn vault_id(&self) -> [u8; 16] {
+        self.id
+    }
+    /// What the registration of `n` keys added to this key file needs
+    /// (spec §8.3, §5.5 R1): the numbers they get, in order, and every live
+    /// credential, which none of them may register again.
+    pub fn add_plan(&self, n: usize) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+        let h = self.key_file.header();
+        let mut used: Vec<u8> = h
+            .map(|h| h.slots.iter().map(|s| s.number).collect())
+            .unwrap_or_default();
+        let mut next = h.map_or(1, |h| h.next);
+        let mut numbers = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (number, after) = new_number(next, &used).ok_or(NOT_PLANNED)?;
+            used.push(number);
+            numbers.push(number);
+            next = after;
+        }
+        let exclude = h
+            .map(|h| h.slots.iter().map(|s| s.cred_id.clone()).collect())
+            .unwrap_or_default();
+        Ok((numbers, exclude))
+    }
+    /// The keys a write authorized by key `number` cannot deliver to (spec
+    /// §5.4): the live keys outside its reach, the records this PC found
+    /// broken counted as missing, as numbers.
+    pub fn unreached(&self, number: u8) -> Vec<u8> {
+        let Some(o) = self.keys_overview() else {
+            return Vec::new();
+        };
+        let Some(row) = o.rows.iter().find(|r| r.number == number) else {
+            return Vec::new();
+        };
+        let h = self.key_file.header();
+        let reach = h.map(|h| h.reach(number)).unwrap_or_default();
+        o.rows
+            .iter()
+            .map(|r| r.number)
+            .filter(|n| *n != number && (!reach.contains(n) || row.broken.contains(n)))
+            .collect()
+    }
     /// Whether the anchor is mandatory for this session (spec §5.10): its
     /// key file has security keys, or this PC pins the vault as hardware.
     pub(in crate::vault) fn hardware_anchor(&self) -> bool {
@@ -747,6 +973,135 @@ impl Session {
             .map(|s| (s.cred_id.clone(), salt(&h.vault_id, &s.seed), None))
             .collect();
         AssertRequest::new(owner, allow, h.pin())
+    }
+    /// The removal that never landed at this unlock, as [다시 하기]
+    /// reopens it (S-REMOVE-UNDONE).
+    pub fn redo(&self) -> Option<&Redo> {
+        self.redo.as_ref()
+    }
+    /// A key change or adopt landed in this session: [다시 하기] is no
+    /// longer offered (the UI only reads it until then).
+    pub fn take_redo(&mut self) -> Option<Redo> {
+        self.redo.take()
+    }
+    /// The allow list of an adopt's Reauth touch (spec §9.2 adopt step
+    /// 2.4): this key file's live, non-suspended keys, each with a second
+    /// salt where `other` registers the same credential under another seed
+    /// (a re-seed on one branch, S45-1 #3), so one touch opens both files.
+    pub fn adopt_request(&self, other: &KeyFile, owner: isize) -> Result<AssertRequest> {
+        let h = self.key_file.header().ok_or(NOT_PLANNED)?;
+        let theirs = other.header();
+        let allow = h
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| (h.suspended >> j) & 1 == 0)
+            .map(|(_, s)| {
+                let second = theirs
+                    .and_then(|t| t.slots.iter().find(|o| o.cred_id == s.cred_id))
+                    .filter(|o| o.seed != s.seed)
+                    .zip(theirs)
+                    .map(|(o, t)| salt(&t.vault_id, &o.seed));
+                (s.cred_id.clone(), salt(&h.vault_id, &s.seed), second)
+            })
+            .collect();
+        AssertRequest::new(owner, allow, h.pin())
+    }
+    /// The keys that open `other`: live and not suspended there, each as
+    /// this PC names it (S-OTHERKEY-ONLY; spec §5.8 "Touch", §7.15a).
+    pub fn opening_keys(&self, other: &KeyFile) -> Vec<(u8, bool)> {
+        other.header().map_or_else(Vec::new, |t| {
+            t.slots
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| (t.suspended >> j) & 1 == 0)
+                .filter_map(|(_, s)| self.named(other, &s.credhash))
+                .collect()
+        })
+    }
+    /// How this PC names the key `credhash` of `other` or of an adopt's
+    /// result (spec §7.15a display rule): its own number when this key file
+    /// has the credential, else `other`'s number, marked new to this PC
+    /// (true). None for a credential neither file has.
+    pub fn named(&self, other: &KeyFile, credhash: &[u8; 16]) -> Option<(u8, bool)> {
+        let own = self
+            .key_file
+            .header()
+            .and_then(|h| h.slots.iter().find(|s| s.credhash == *credhash));
+        if let Some(s) = own {
+            return Some((s.number, false));
+        }
+        other
+            .header()?
+            .slots
+            .iter()
+            .find(|s| s.credhash == *credhash)
+            .map(|s| (s.number, true))
+    }
+    /// The allow list of the single-salt touch that opens `other` when the
+    /// Reauth touch of this key file's key `number` brought no `pbSecond`
+    /// (S-TWOTOUCH; spec §8.3, §9.2 adopt step 2.6, S45-3 #10): the same
+    /// credential with `other`'s seed.
+    pub fn other_seed_request(
+        &self,
+        other: &KeyFile,
+        number: u8,
+        owner: isize,
+    ) -> Result<AssertRequest> {
+        let mine = self
+            .key_file
+            .header()
+            .and_then(|h| h.slots.iter().find(|s| s.number == number))
+            .ok_or(NOT_PLANNED)?;
+        let t = other.header().ok_or(NOT_PLANNED)?;
+        let s = t
+            .slots
+            .iter()
+            .find(|s| s.cred_id == mine.cred_id)
+            .ok_or(NOT_PLANNED)?;
+        let allow = vec![(s.cred_id.clone(), salt(&t.vault_id, &s.seed), None)];
+        AssertRequest::new(owner, allow, t.pin())
+    }
+    /// Whether this key file's key `number` opens `other` too: the same
+    /// credential live and not suspended there (spec §9.2 adopt step 2.6).
+    pub fn opens_other(&self, other: &KeyFile, number: u8) -> bool {
+        let Some(mine) = self
+            .key_file
+            .header()
+            .and_then(|h| h.slots.iter().find(|s| s.number == number))
+        else {
+            return false;
+        };
+        other.header().is_some_and(|t| {
+            t.slots
+                .iter()
+                .enumerate()
+                .any(|(j, s)| s.cred_id == mine.cred_id && (t.suspended >> j) & 1 == 0)
+        })
+    }
+    /// The allow list of a touch for `other` alone (S-OTHERKEY-ONLY): its
+    /// live, non-suspended keys with its own seeds.
+    pub fn other_request(other: &KeyFile, owner: isize) -> Result<AssertRequest> {
+        let t = other.header().ok_or(NOT_PLANNED)?;
+        let allow = t
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| (t.suspended >> j) & 1 == 0)
+            .map(|(_, s)| (s.cred_id.clone(), salt(&t.vault_id, &s.seed), None))
+            .collect();
+        AssertRequest::new(owner, allow, t.pin())
+    }
+    /// The numbers `other` gives the credentials `hashes` (S-FORK-READMIT
+    /// names the keys option 1 brings back).
+    pub fn numbers_in(other: &KeyFile, hashes: &[[u8; 16]]) -> Vec<u8> {
+        other.header().map_or_else(Vec::new, |t| {
+            t.slots
+                .iter()
+                .filter(|s| hashes.contains(&s.credhash))
+                .map(|s| s.number)
+                .collect()
+        })
     }
     /// A pairing or extra touch between ceremonies (spec §5.5, §8.3;
     /// S45-1 #14): the public checks against its own slot, then its own
@@ -1456,6 +1811,9 @@ pub(super) struct UnionPlan {
     /// Keys that nothing touched reaches, by the result's number: suspended
     /// only with consent (S-SUSPEND).
     pub unreached: Vec<u8>,
+    /// The same keys by credential, for S-SUSPEND's names and its extra
+    /// touches (spec §7.15a: this PC names them by its own numbers).
+    pub unreached_keys: Vec<[u8; 16]>,
     landing: Landing,
 }
 impl UnionPlan {
@@ -1568,6 +1926,58 @@ impl Session {
             ..Landing::default()
         };
         Ok(built)
+    }
+    /// [이 금고의 기록 지우고 다시 확인…] in gate-pending mode (spec §5.10,
+    /// round 4, finding 13): the Reauth verified the factors in place of
+    /// the unlock, so the session now runs as a bootstrap, with this
+    /// vault's lines ignored in memory: the changed key file's gate is
+    /// dropped and TOFU (G1, or S-TOFU-NOPC) takes its place. Nothing of
+    /// the record is written here; the TOFU pass alone removes this
+    /// vault's lines, so a lock before it leaves every line as it was.
+    pub fn forget_record(&mut self, r: Reauth) -> Result<()> {
+        if r.session != self.serial
+            || r.age() > super::REAUTH_MAX
+            || (self.uses_otp() && r.otp_step.is_none())
+        {
+            return Err(REAUTH_STALE);
+        }
+        if self.gate_login.is_none() {
+            return Err(super::super::gate::GATE_NOT_PENDING);
+        }
+        self.gate_login = None;
+        self.tofu = true;
+        self.forgotten = true;
+        self.held_unconfirmed = false;
+        self.g2_spent.set(false);
+        Ok(())
+    }
+    /// S-FORK-HINT's key (spec §5.8 "Order and display", round 1, finding
+    /// 19): the number, in this PC's own key file, of a key that authorized
+    /// a state of this PC's history since the state it shares with `other`
+    /// and that `other` tombstones. None when there is none, or when the
+    /// history does not reach the shared state. Local facts only: the UI
+    /// shows it in the preview, after the gate, never before.
+    pub fn fork_hint(&self, other: &KeyFile) -> Option<u8> {
+        let theirs = other.header()?;
+        let own = self.key_file.header()?;
+        let hist = &self.anchor.lines.vault.as_ref()?.state.hist;
+        let shared = hist
+            .iter()
+            .position(|e| theirs.key_ids.iter().any(|i| i[..4] == e.keyid))?;
+        let removed: Vec<[u8; 4]> = theirs
+            .tombstones
+            .iter()
+            .map(|t| short(&t.credhash))
+            .collect();
+        hist[..shared]
+            .iter()
+            .filter(|e| e.auth != [0; 4] && removed.contains(&e.auth))
+            .find_map(|e| {
+                own.slots
+                    .iter()
+                    .find(|s| short(&s.credhash) == e.auth)
+                    .map(|s| s.number)
+            })
     }
     /// Whether this PC re-seeded since the state it shares with `other`
     /// (spec §5.8 "Seeds that differ"): a kind-8 state in its history after
@@ -1802,6 +2212,7 @@ impl Session {
         let mut inbox = Vec::new();
         let mut suspended = Vec::new();
         let mut unreached = Vec::new();
+        let mut unreached_keys = Vec::new();
         if !slots.is_empty() {
             let a = authorizer.ok_or(NOT_PLANNED)?;
             let (sa, h_a) = (
@@ -1823,6 +2234,7 @@ impl Session {
                         suspended.push(s.credhash);
                         if !own_suspended(&s.credhash) {
                             unreached.push(s.number);
+                            unreached_keys.push(s.credhash);
                         }
                     }
                 }
@@ -1858,6 +2270,7 @@ impl Session {
             renumbered,
             dropped_uv,
             unreached,
+            unreached_keys,
             landing,
         })
     }
@@ -2813,6 +3226,23 @@ mod tests {
         );
         assert!(pc.lines(&id).clones.is_empty());
         set_kdf_profile(KdfProfile::Real);
+    }
+
+    /// The re-seed's first touch is its Reauth (spec §9.2 re-seed step 3,
+    /// §9.2a): its allow list holds only the keys the flow names as live
+    /// and not suspended; every later one holds every key not yet proved.
+    #[test]
+    fn a_reseeds_first_touch_lists_only_active_keys() {
+        let pc = Pc::new();
+        let (s, _codes, keys) = create(&pc, 2, false, false);
+        let plan = s.plan_reseed().unwrap();
+        let first = plan.first_request(&[2], 0).unwrap();
+        let two = header(&pc).slots[1].cred_id.clone();
+        assert_eq!(first.allow.len(), 1);
+        assert_eq!(first.allow[0].0, two);
+        assert!(first.allow[0].2.is_some(), "two salts");
+        assert_eq!(plan.request(0).unwrap().allow.len(), 2);
+        drop(keys);
     }
 
     /// Spec §14.4-8: a re-seed gives every key a new seed, rewrites every
@@ -4231,6 +4661,15 @@ mod tests {
             assert_eq!(notices(&mut sa), [KeyNotice::RemoveUndone(vec![1])]);
             assert_eq!(sa.review_due(), Some("unknown"));
             assert_eq!(header(&a).slots.len(), 3);
+            // [다시 하기] reopens the lost-key flow with its answers (I14).
+            let redo = Redo {
+                flow: RedoFlow::Lost,
+                remove: vec![1],
+                loss: Some(lost()),
+            };
+            assert_eq!(sa.redo(), Some(&redo));
+            assert_eq!(sa.take_redo(), Some(redo));
+            assert_eq!(sa.redo(), None);
             remove_lost(&mut sa, &mut codes, &keys, 1, 2);
             let ka = fs::read(a.key()).unwrap();
             drop(sa);
@@ -4252,6 +4691,10 @@ mod tests {
             let mut s = open(&b, OLD, &mut codes, &keys, 3).unwrap();
             assert_eq!(notices(&mut s), [KeyNotice::RemoveUndone(vec![1])]);
             assert_eq!(s.review_due(), Some("unknown"));
+            // A dropped adopt reopens "새 열쇠 파일 받기", never a removal of
+            // this PC's own (round 2, finding 20).
+            assert_eq!(s.redo().map(|r| r.flow), Some(RedoFlow::Adopt));
+            assert_eq!(s.redo().and_then(|r| r.loss.clone()), None);
             set_kdf_profile(KdfProfile::Real);
         }
 

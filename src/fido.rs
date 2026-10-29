@@ -192,6 +192,16 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+    /// What an `Authenticator` asks right before its one call: Cancelled,
+    /// with no call made, once the app's cancel reached the token. Windows
+    /// forgets a cancel that comes with no operation running, so without
+    /// this a cancel issued just before the call would be lost.
+    pub fn check(&self) -> std::result::Result<(), FidoError> {
+        if self.is_cancelled() {
+            return Err(FidoError::Cancelled);
+        }
+        Ok(())
+    }
 }
 
 /// A registration (spec §8.3 MakeCredential). The builders of webauthn.rs

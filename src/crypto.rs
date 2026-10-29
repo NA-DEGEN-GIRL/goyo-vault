@@ -137,6 +137,17 @@ thread_local! {
 pub fn set_test_clock(clock: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>) {
     TEST_CLOCK.with(|c| *c.borrow_mut() = clock);
 }
+/// Moves this thread's test clock on by `ms`; false when none is set. The
+/// app's ceremony pump runs on it while a test set one (spec §8.5).
+#[cfg(debug_assertions)]
+pub fn advance_test_clock(ms: u64) -> bool {
+    TEST_CLOCK.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|clock| clock.fetch_add(ms, std::sync::atomic::Ordering::SeqCst))
+            .is_some()
+    })
+}
 /// Milliseconds on a monotonic clock, for every age and limit counted in
 /// time (spec §8.5): the ceremony's cap, the Reauth's age, a typed code's.
 /// Only its differences mean anything. A build with debug assertions reads

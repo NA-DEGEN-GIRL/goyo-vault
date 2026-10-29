@@ -41,6 +41,8 @@ use keyfile::{
 };
 pub use keyfile::{KeyInfo, key_info};
 pub use recover::Recovery;
+#[cfg(feature = "security-key")]
+pub use review::{ReviewChange, ReviewList, ReviewRow, day_of, shown_time};
 pub use rotate::{
     ADOPT_CONTAINED, ADOPT_EQUAL, ADOPT_OLDER, ADOPT_REFUSED, ADOPT_ROLLBACK, Acks, AdoptCheck,
     AdoptClass, AdoptPlan, Adopted, Change, Consent, Gate, GatePass, KEY_DAMAGED,
@@ -50,9 +52,9 @@ pub use rotate::{
 };
 #[cfg(feature = "security-key")]
 pub use rotate::{
-    ANCHOR_FAILED, Exposure, ForkOption, KEYSOFF_SYNCED, KeyGates, LossReport, NOT_PLANNED,
-    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, UNION_FULL,
-    UNREACHABLE,
+    ANCHOR_FAILED, Exposure, ForkOption, KEYSOFF_SYNCED, KeyGates, KeyRow, KeysOverview,
+    LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey,
+    ReSeedPlan, Redo, RedoFlow, UNION_FULL, UNREACHABLE,
 };
 pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
@@ -217,8 +219,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 /// Returns `text` and keeps `values` for its `{…}` slots (see
-/// refusal_values).
-fn refuse(text: &'static str, values: Vec<String>) -> &'static str {
+/// refusal_values); the app's flows fill their own refusals this way.
+pub fn refuse(text: &'static str, values: Vec<String>) -> &'static str {
     FILLED.with(|f| *f.borrow_mut() = Some((text, values)));
     text
 }
@@ -1032,6 +1034,29 @@ impl Prepared {
             .collect();
         crate::fido::AssertRequest::new(owner, allow, h.pin()).ok()
     }
+    /// The gate a changed key file asks at login before the touch (spec
+    /// §5.2 step 3, §7.15a): G2 while this PC still allows it, else G1,
+    /// with the keys S-LOSTPICK offers, from the anchor's confirmed state
+    /// only, and the key file's epoch (public; S-GATE-CODE shows it). None
+    /// when the key file needs no gate.
+    #[cfg(feature = "security-key")]
+    pub fn login_gate(&self) -> Option<(GateKind, Vec<GateChoice>, u64)> {
+        let AnchorClass::Gated(kind) = self.check.anchor else {
+            return None;
+        };
+        let kind = match kind {
+            GateKind::G2 if gate::g2_allowed(&self.seen.lines) => GateKind::G2,
+            _ => GateKind::G1,
+        };
+        let choices = self
+            .seen
+            .lines
+            .vault
+            .as_ref()
+            .map(|v| gate::choices(&v.state.slots))
+            .unwrap_or_default();
+        Some((kind, choices, self.key.header()?.epoch))
+    }
     /// What a failed authentication of these files says instead of
     /// AUTH_ERROR (spec §5.12): rule (i)'s text for a key file that is only
     /// a temp file, or AUTH_ERROR with a hint when this PC's own key change
@@ -1106,6 +1131,59 @@ pub fn prepare(vault: &Path, key_path: &Path) -> Result<Prepared> {
 #[cfg(feature = "security-key")]
 pub fn prepare_forgotten(vault: &Path, key_path: &Path) -> Result<Prepared> {
     prepared(vault, key_path, false, true)
+}
+/// The epoch of this PC's record of the vault of the key file at
+/// `key_path` (S-ANCHOR-FORGET's `{old}`, spec §5.10): None without one.
+/// Reads the anchor and writes nothing.
+#[cfg(feature = "security-key")]
+pub fn recorded_epoch(key_path: &Path) -> Option<u64> {
+    let key = KeyFile::read(key_path).ok()?;
+    let id = key.vault_id()?;
+    anchor::look(&id, &key, key_path, false)
+        .confirmed()
+        .map(|l| l.state.epoch)
+}
+/// What the login screen's note says of a chosen key file (spec §9.1,
+/// feature build): S-LOGIN-NOTE with the number of security keys and the
+/// PIN line, or S-LOGIN-PWONLY.
+#[cfg(feature = "security-key")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoginKeys {
+    Keys { n: usize, pin: bool },
+    PasswordOnly,
+}
+/// The login note of the key file at `key_path` (spec §9.1): its keys, but
+/// this PC's confirmed state's whenever the file differs from it (a changed
+/// file's key count is part of what its gate hides; round 2, finding 3),
+/// and nothing then for a confirmed state without keys; S-LOGIN-PWONLY for
+/// a password-only file this PC has no record of. Reads the anchor and
+/// writes nothing.
+#[cfg(feature = "security-key")]
+pub fn login_keys(key_path: &Path) -> Option<LoginKeys> {
+    let key = KeyFile::read(key_path).ok()?;
+    let id = key.vault_id()?;
+    let confirmed = anchor::look(&id, &key, key_path, false).confirmed();
+    let own = key.header().map(|h| (h.state(), h.slots.len(), h.pin()));
+    let keys = |n: usize, pin: bool| (n > 0).then_some(LoginKeys::Keys { n, pin });
+    match (confirmed, own) {
+        (Some(c), Some((state, n, pin))) if c.state.key_state() == state => keys(n, pin),
+        (Some(c), _) => keys(c.state.slots.len(), c.state.policy & 2 != 0),
+        (None, Some((_, n, pin))) if n > 0 => keys(n, pin),
+        (None, _) => Some(LoginKeys::PasswordOnly),
+    }
+}
+/// A login refusal that [이 금고의 기록 지우고 다시 확인…] answers (spec
+/// §5.10, §9.1): S-ANCHOR-FORK (with or without its vault line),
+/// S-ANCHOR-RELIST and S-ANCHOR-DOWNGRADE; not S-ANCHOR-EPOCH.
+#[cfg(feature = "security-key")]
+pub fn forgettable(e: &str) -> bool {
+    [
+        ANCHOR_FORK,
+        ANCHOR_FORK_VAULT,
+        ANCHOR_RELIST,
+        ANCHOR_DOWNGRADE,
+    ]
+    .contains(&e)
 }
 /// Phase 1 of a Restore of `backup`.
 pub fn prepare_restore(backup: &Path, key_path: &Path) -> Result<Prepared> {
@@ -1320,6 +1398,10 @@ pub struct Session {
     /// date: the vault outgoing waits until it is done.
     #[cfg(feature = "security-key")]
     review_due: Option<String>,
+    /// A removal that never landed, as [다시 하기] reopens it (spec §9.2;
+    /// S-REMOVE-UNDONE).
+    #[cfg(feature = "security-key")]
+    redo: Option<rotate::Redo>,
     /// The anchor could not be written for a security-key session
     /// (AnchorFailed, spec §5.10): key changes, adopts and every outgoing
     /// write wait until a write succeeds, retried at every save and poll.
@@ -1405,6 +1487,8 @@ impl Session {
             held_unconfirmed: false,
             #[cfg(feature = "security-key")]
             review_due: None,
+            #[cfg(feature = "security-key")]
+            redo: None,
             #[cfg(feature = "security-key")]
             anchor_failed: false,
             #[cfg(feature = "security-key")]
@@ -1837,6 +1921,10 @@ impl Session {
                     ) && !p.rm.is_empty()
                 })
                 .map(|p| p.rm.iter().map(|(n, _)| *n).collect::<Vec<u8>>());
+            #[cfg(feature = "security-key")]
+            {
+                s.redo = dropped.as_ref().and_then(rotate::Redo::of);
+            }
             let not_finished = dropped.is_some();
             // The post-removal review due from the anchor or the merge log
             // (spec §5.13 "Due is durable").
@@ -2495,6 +2583,29 @@ impl Session {
             return Err(AUTH_ERROR);
         }
         self.verify(password)?;
+        Ok(OtpSetup {
+            id: self.id,
+            otp: boxed(otp),
+        })
+    }
+    /// The OTP backup of a key file with security keys (spec §5.10): no
+    /// password verifier is kept, so the key file opens again with the
+    /// password and the touch of one of its live, non-suspended keys, to
+    /// this session's keys. Nothing is written, and no OTP code is asked.
+    #[cfg(feature = "security-key")]
+    pub fn otp_setup_with(&self, password: &str, touch: &Touch) -> Result<OtpSetup> {
+        let otp = self.keys.otp().ok_or("이 금고는 OTP를 쓰지 않습니다.")?;
+        if password.len() > 1024 {
+            return Err(AUTH_ERROR);
+        }
+        if !self
+            .key_file
+            .open(password, Some(touch))?
+            .bundle
+            .same(&self.keys)
+        {
+            return Err(AUTH_ERROR);
+        }
         Ok(OtpSetup {
             id: self.id,
             otp: boxed(otp),

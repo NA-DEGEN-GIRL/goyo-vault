@@ -549,12 +549,18 @@ pub struct DialogButton<'a> {
     pub label: &'a str,
     pub role: Role,
 }
-/// What a guarded input dialog asks for. The security-key build adds a
-/// pick and a code entry.
+/// What a guarded input dialog asks for (spec §9.2a): a password, a code,
+/// a pick from a checklist, or a preview to accept.
 #[derive(Clone, Copy)]
 pub enum InputKind<'a> {
     /// A masked password field under the text.
     Password,
+    /// A code field under the text (a key code, an OTP code): not masked,
+    /// with the same subclass and input scope as a password field.
+    Code,
+    /// A checklist under the text: each item's label (composed by the
+    /// caller) and first state. At most PICK_MAX items.
+    Pick(&'a [(&'a str, bool)]),
     /// The text read-only and scrollable (a preview the caller composed),
     /// with an optional check box: its control ID, label and first state.
     Preview { check: Option<(i32, &'a str, bool)> },
@@ -564,13 +570,24 @@ pub enum InputKind<'a> {
 /// button.
 pub enum InputAnswer {
     Password(Zeroizing<String>),
-    Accept { checked: bool },
+    Code(Zeroizing<String>),
+    /// The indexes of the ticked items, ascending.
+    Pick(Vec<u8>),
+    Accept {
+        checked: bool,
+    },
     Switch(i32),
     Cancel(i32),
 }
 /// The control ID of the password field of an input dialog: the edit
 /// subclass clears a password pasted into it from the clipboard.
 pub const INPUT_EDIT: i32 = 0x7f01;
+/// The control ID of the code field of an input dialog.
+pub const INPUT_CODE: i32 = 0x7f02;
+/// The control ID of a checklist's first item; the others follow.
+pub const INPUT_PICK: i32 = 0x7f10;
+/// The most items a checklist holds (a key file holds at most 8 keys).
+pub const PICK_MAX: usize = 8;
 /// The open input dialog (0 when none), for the queue filter: like a
 /// confirm box it is an owned popup, not a child of the main window.
 static INPUT_BOX: AtomicIsize = AtomicIsize::new(0);
@@ -585,6 +602,8 @@ struct Input {
     edit: Hwnd,
     edit_own: isize,
     check: Hwnd,
+    /// The checklist's items, in order.
+    picks: Vec<Hwnd>,
     /// The other controls under input_child_proc, with their procedures.
     children: Vec<(Hwnd, isize)>,
     buttons: Vec<(i32, Role)>,
@@ -642,7 +661,10 @@ unsafe fn run_input(
     edit_proc: Proc,
 ) -> Option<InputAnswer> {
     // One at a time: a flow asks one question after the other.
-    if input_box() != 0 || buttons.is_empty() {
+    if input_box() != 0
+        || buttons.is_empty()
+        || matches!(kind, InputKind::Pick(items) if items.is_empty() || items.len() > PICK_MAX)
+    {
         return None;
     }
     let class = wide("GoyoInputDialog");
@@ -726,7 +748,7 @@ unsafe fn build_input(
     let inner = width - 2 * margin;
     let text_h = match kind {
         InputKind::Preview { .. } => px(240),
-        InputKind::Password => unsafe {
+        InputKind::Password | InputKind::Code | InputKind::Pick(_) => unsafe {
             let dc = GetDC(owner);
             let old = SelectObject(dc, font);
             let mut r = Rect {
@@ -743,7 +765,8 @@ unsafe fn build_input(
     let mut y = margin + text_h + px(12);
     let field_y = y;
     match kind {
-        InputKind::Password => y += px(26) + px(16),
+        InputKind::Password | InputKind::Code => y += px(26) + px(16),
+        InputKind::Pick(items) => y += items.len() as i32 * px(26) + px(8),
         InputKind::Preview { check: Some(_) } => y += px(22) + px(12),
         InputKind::Preview { check: None } => {}
     }
@@ -877,22 +900,26 @@ unsafe fn fill_input(
     };
     ok &= guard(text_box);
     match kind {
-        InputKind::Password => {
-            // ES_PASSWORD | ES_AUTOHSCROLL, WS_TABSTOP, with a sunken edge.
+        InputKind::Password | InputKind::Code => {
+            // ES_AUTOHSCROLL, WS_TABSTOP, with a sunken edge; ES_PASSWORD
+            // for a password.
+            let password = matches!(kind, InputKind::Password);
             let edit = child(
                 "EDIT",
                 "",
-                0x20 | 0x80 | 0x0001_0000,
+                if password { 0x20 } else { 0 } | 0x80 | 0x0001_0000,
                 0x200,
                 (margin, field_y, inner, px(26)),
-                INPUT_EDIT,
+                if password { INPUT_EDIT } else { INPUT_CODE },
             );
             ok &= edit != 0;
             if edit != 0 {
                 unsafe {
                     // The mask goes first: the subclass blocks EM_SETPASSWORDCHAR.
-                    SendMessageW(edit, 0xcc, '•' as usize, 0);
-                    SendMessageW(edit, 0xc5, 1024, 0); // EM_LIMITTEXT
+                    if password {
+                        SendMessageW(edit, 0xcc, '•' as usize, 0);
+                    }
+                    SendMessageW(edit, 0xc5, if password { 1024 } else { 64 }, 0); // EM_LIMITTEXT
                     let own = SetWindowLongPtrW(edit, -4, edit_proc as *const () as isize);
                     ok &= own != 0 && SetInputScope(edit, 31) == 0;
                     INPUT.with(|s| {
@@ -921,6 +948,26 @@ unsafe fn fill_input(
                     SendMessageW(check, 0xf1, on as usize, 0); // BM_SETCHECK
                 }
                 INPUT.with(|s| s.borrow_mut().check = check);
+            }
+        }
+        InputKind::Pick(items) => {
+            // BS_AUTOCHECKBOX, WS_TABSTOP; one per row.
+            for (i, (label, on)) in items.iter().enumerate() {
+                let item = child(
+                    "BUTTON",
+                    tr(label),
+                    0x3 | 0x0001_0000,
+                    0,
+                    (margin, field_y + i as i32 * px(26), inner, px(22)),
+                    INPUT_PICK + i as i32,
+                );
+                ok &= guard(item);
+                if item != 0 {
+                    unsafe {
+                        SendMessageW(item, 0xf1, *on as usize, 0); // BM_SETCHECK
+                    }
+                    INPUT.with(|s| s.borrow_mut().picks.push(item));
+                }
             }
         }
         InputKind::Preview { check: None } => {}
@@ -962,8 +1009,17 @@ unsafe fn fill_input(
         // Active first, then the owner disabled: activation stays with this
         // thread's windows.
         ShowWindow(dialog, 5);
-        let edit = INPUT.with(|s| s.borrow().edit);
-        SetFocus(if edit != 0 { edit } else { first });
+        let (edit, pick) = INPUT.with(|s| {
+            let s = s.borrow();
+            (s.edit, s.picks.first().copied().unwrap_or(0))
+        });
+        SetFocus(if edit != 0 {
+            edit
+        } else if pick != 0 {
+            pick
+        } else {
+            first
+        });
         EnableWindow(owner, 0);
     }
     let mut msg = Msg::default();
@@ -986,13 +1042,20 @@ unsafe fn fill_input(
             }
         }
     }
-    let (answer, check) = INPUT.with(|s| {
+    let (answer, check, picks) = INPUT.with(|s| {
         let s = s.borrow();
-        (s.answer, s.check)
+        (s.answer, s.check, s.picks.clone())
     });
     let result = match answer {
         Some((_, Role::Accept)) => match kind {
             InputKind::Password => unsafe { read_input() }.map(InputAnswer::Password),
+            InputKind::Code => unsafe { read_input() }.map(InputAnswer::Code),
+            // BM_GETCHECK of each item.
+            InputKind::Pick(_) => Some(InputAnswer::Pick(
+                (0..picks.len() as u8)
+                    .filter(|i| unsafe { SendMessageW(picks[*i as usize], 0xf0, 0, 0) } == 1)
+                    .collect(),
+            )),
             InputKind::Preview { .. } => Some(InputAnswer::Accept {
                 checked: check != 0 && unsafe { SendMessageW(check, 0xf0, 0, 0) } == 1, // BM_GETCHECK
             }),

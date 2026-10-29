@@ -1765,6 +1765,291 @@ pub const EN: &[(&str, &str)] = &[
 #[cfg(feature = "security-key")]
 pub const EN_SK: &[(&str, &str)] = &[
     (
+        "이 열쇠 파일을 열 수 있는 보안 키가 보안 키 {n} 하나뿐입니다(나머지는 일시 정지). 이 키를 잃으면 이 금고를 열 수 없습니다. 다른 키와 '짝 맺기'를 하세요.",
+        "Only security key {n} can open this key file (the others are suspended). If it is lost, this vault cannot be opened. Pair it with another key.",
+    ),
+    ("짝 맺기 필요", "needs pairing"),
+    (
+        "짝 기록 손상: 다시 짝 맺기 필요",
+        "pair record damaged: pair it again",
+    ),
+    ("보안 키: 꺼짐", "Security keys: off"),
+    (
+        "보안 키: 켜짐 · {n}개 등록",
+        "Security keys: on · {n} registered",
+    ),
+    (
+        "보안 키: 켜짐 · PIN 사용 · {n}개 등록",
+        "Security keys: on · PIN used · {n} registered",
+    ),
+    (
+        "보안 키 {n} · {date} 등록",
+        "Security key {n} · registered {date}",
+    ),
+    ("이번에 연 키", "used for this unlock"),
+    ("등록 표시 {stamp}", "label {stamp}"),
+    ("모든 키와 짝", "paired with every key"),
+    (
+        "보안 키 {list}과(와) 짝 맺기 필요",
+        "needs pairing with security key {list}",
+    ),
+    (
+        "짝 기록 손상: 보안 키 {list}과(와) 다시 짝 맺기 필요",
+        "pair record damaged: pair again with security key {list}",
+    ),
+    (
+        "짝 기록 없음: 빼고 다시 등록해야 함",
+        "no pair record: remove it and register it again",
+    ),
+    ("일시 정지(짝 맺기 필요)", "suspended (needs pairing)"),
+    (
+        "복제됐을 수 있음: 모든 키 새로 잠그기나 다시 등록 권장",
+        "may have been cloned: re-lock all keys or register it again",
+    ),
+    (
+        "다른 키를 모두 대신할 수 있는 키: 보안 키 {list}",
+        "Keys that can stand in for all the others: security key {list}",
+    ),
+    (
+        "다른 키를 모두 대신할 수 있는 키: 없음 ('짝 맺기'를 하세요)",
+        "Keys that can stand in for all the others: none (use 'Pair keys')",
+    ),
+    (
+        "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. OTP보다 권하는 방법이 아니라 또 하나의 선택지이며, 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.",
+        "With security keys on (YubiKey or another FIDO2 key), the key file is locked with both the password and a registered security key. This is not recommended over the OTP; it is another option, and experimental.\nIf every registered key is lost, no one (not even you) can open this vault, and there is no recovery, so register two or more. Keys registered together on one PC are paired, so if one is lost the other alone can remove it at once. Give each key its own PIN, and write the key number on each key.",
+    ),
+    (
+        "다른 PC에서 이 금고의 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력합니다.",
+        "Another PC enters this code when it takes an added security key or a settings change of this vault.",
+    ),
+    ("보안 키 켜기", "Turn on security keys"),
+    (
+        "보안 키 PIN도 사용 (권장)",
+        "Also use the key PIN (recommended)",
+    ),
+    (
+        "비밀번호도 바꾸기 (권장)",
+        "Also change the password (recommended)",
+    ),
+    ("키 추가", "Add key"),
+    ("짝 맺기…", "Pair keys…"),
+    ("모든 키 새로 잠그기…", "Re-lock all keys…"),
+    ("보안 키 끄기", "Turn off keys"),
+    (
+        "이 열쇠 파일은 아직 '열쇠 백업'으로 백업하지 않았습니다. 열쇠 파일을 잃으면 보안 키와 비밀번호가 있어도 열 수 없습니다.",
+        "This key file has not been backed up with 'Back up key' yet. If the key file is lost, the vault cannot be opened even with the security keys and the password.",
+    ),
+    (
+        "보안 키로도 잠그기 (실험)",
+        "Security keys too (experimental)",
+    ),
+    ("키 PIN도 사용 (권장)", "Key PIN too (recommended)"),
+    (
+        "열 때마다 등록한 보안 키를 연결하고 터치합니다. 모두 잃으면 누구도 복구할 수 없으니 2개 이상, 지금 함께 등록하세요(함께 등록한 키끼리 짝을 맺습니다). 등록할 때 키마다 Windows 창이 세 번 열립니다. 키마다 PIN을 다르게 정하세요.",
+        "Each unlock needs a registered security key connected and touched. If all are lost, no one can recover the vault, so register two or more now (keys registered together are paired). Each key's registration opens a Windows window three times. Give each key its own PIN.",
+    ),
+    (
+        "보안 키 없이 비밀번호와 열쇠 파일로 여는 금고를 만듭니다.",
+        "Creates a vault that opens with the password and key file, without security keys.",
+    ),
+    (
+        "보안 키 {n} 등록: Windows 창이 세 번 열립니다(등록 1번, 확인 2번). 매번 키를 터치하세요.",
+        "Registering security key {n}: a Windows window opens three times (registration once, check twice). Touch the key each time.",
+    ),
+    (
+        "보안 키 {n} 등록: Windows 창이 세 번 열립니다(등록 1번, 확인 2번). 매번 키를 터치하고 PIN도 입력하세요.",
+        "Registering security key {n}: a Windows window opens three times (registration once, check twice). Touch the key and enter its PIN each time.",
+    ),
+    (
+        "키마다 다른 PIN을 쓰세요. 모든 키에 같은 PIN을 쓰면, 잃어버린 키와 그 PIN을 아는 사람이 다른 키를 잠깐 손에 넣는 것만으로 그 키를 복제할 수 있습니다.",
+        "Use a different PIN on each key. With the same PIN on every key, someone with a lost key and its PIN can copy another key by getting hold of it for a moment.",
+    ),
+    (
+        "보안 키 {n}개를 등록했습니다. 등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없습니다.\n예비 키를 지금 등록할까요? (강력 권장) 지금 함께 등록한 키끼리 짝을 맺어, 나중에 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다.",
+        "Security keys registered so far: {n}. If every registered key is lost, no one (not even you) can open this vault, and there is no recovery.\nRegister a spare key now? (Strongly recommended) Keys registered together now are paired, so if one is lost later the other alone can remove it at once.",
+    ),
+    (
+        "예비 키 없이 계속할까요? 나중에 '열쇠 관리 › 키 추가'로 등록할 수 있습니다.",
+        "Continue without a spare key? You can register one later with 'Key management › Add key'.",
+    ),
+    (
+        "보안 키가 1개뿐입니다. 이 키를 잃거나 초기화하면 비밀번호와 열쇠 파일이 있어도 누구도 이 금고를 열 수 없습니다. '열쇠 관리'에서 예비 키를 추가하세요.",
+        "Only one security key. If it is lost or reset, no one can open this vault, even with the password and key file. Add a spare key in 'Key management'.",
+    ),
+    (
+        "새 금고를 만들었습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 따로 두세요.",
+        "New vault created. {n} security keys are registered and paired with each other. Keep a copy of the key file elsewhere with 'Back up key' below.",
+    ),
+    (
+        "확인한 지 오래되어 더 등록하지 않았습니다. 나머지 키는 '키 추가'로 등록하세요.",
+        "The check is too old for another registration. Register the other keys with 'Add key'.",
+    ),
+    (
+        "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
+        "It has been a while, so we check once more. Enter a new OTP code. The keys registered or touched so far are kept.",
+    ),
+    (
+        "확인한 지 오래되어 한 번 더 확인합니다. 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
+        "It has been a while, so we check once more. Touch security key {n} again. The keys registered or touched so far are kept.",
+    ),
+    (
+        "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력한 뒤 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
+        "It has been a while, so we check once more. Enter a new OTP code, then touch security key {n} again. The keys registered or touched so far are kept.",
+    ),
+    (
+        "비밀번호를 그대로 두면, 보안 키를 켜기 전에 만든 열쇠 파일과 그 백업(비밀번호만으로 열림)을 가진 사람은 누구나 이 비밀번호를 오프라인으로 계속 추측할 수 있고, 맞히면 남은 것은 등록한 보안 키(와 PIN)뿐입니다. 그 사본들을 지우거나 비밀번호도 바꾸세요.",
+        "If the password stays, anyone with a key file made before security keys were on, or its backup (which opens with the password alone), can keep guessing this password offline, and once it is guessed only the registered keys (and PIN) remain. Delete those copies or change the password too.",
+    ),
+    (
+        "보안 키를 켰습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다.",
+        "Security keys are on. {n} security keys are registered and paired with each other.",
+    ),
+    (
+        "앞으로는 이번에 새로 정한 비밀번호로 엽니다.",
+        "From now on, it opens with the new password you just set.",
+    ),
+    (
+        "지금 꽂혀 있는 다른 보안 키가 있으면 함께 터치해 새 키와 짝을 맺으세요(키마다 한 번).\n다른 장소의 키와는 나중에 '짝 맺기'를 하면 됩니다. 지금 다른 키를 터치할까요?",
+        "If another security key is plugged in now, touch it too to pair it with the new key (once per key).\nKeys kept elsewhere can be paired later with 'Pair keys'. Touch another key now?",
+    ),
+    (
+        "짝을 맺을 보안 키를 연결하고 터치하세요.",
+        "Connect and touch the security key to pair.",
+    ),
+    ("보안 키 {n}을(를) 추가했습니다.", "Security key {n} added."),
+    (
+        "새 열쇠 파일을 지금 백업할까요?",
+        "Back up the new key file now?",
+    ),
+    (
+        "다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 다른 PC에서 '새 열쇠 파일 받기'로 이 열쇠 파일을 받고, 이 PC의 열쇠 확인 코드를 입력하세요.",
+        "Other PCs pause sync until they take this key file. On each other PC, take it with 'Receive a new key file' and enter this PC's key check code.",
+    ),
+    (
+        "다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 다른 PC에서 '새 열쇠 파일 받기'로 이 열쇠 파일을 받으세요(코드는 필요 없습니다).",
+        "Other PCs pause sync until they take this key file. On each other PC, take it with 'Receive a new key file' (no code needed).",
+    ),
+    ("짝 맺기", "Pair keys"),
+    (
+        "함께 꽂아 차례로 터치하면 서로 짝을 맺습니다. 짝을 맺은 키끼리는 서로를 대신해 새 열쇠를 전할 수 있어, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 일시 정지된 키도 여기서 다시 쓰게 됩니다.",
+        "Plug the keys in together and touch them in turn to pair them. Paired keys can pass a new key on for each other, so if one is lost the other alone can remove it at once. A suspended key works again after this.",
+    ),
+    (
+        "짝을 맺을 보안 키를 두 개 이상 고르세요.",
+        "Choose two or more security keys to pair.",
+    ),
+    ("보안 키 {n}", "Security key {n}"),
+    (
+        "짝을 맺을 보안 키 {n}을(를) 연결하고 터치하세요. ({i}/{m})",
+        "Connect and touch security key {n} to pair. ({i}/{m})",
+    ),
+    (
+        "보안 키 {list}이(가) 서로 짝을 맺었습니다.",
+        "Security keys {list} are paired with each other.",
+    ),
+    (
+        "모든 보안 키를 차례로 터치해 키별 값, 짝 기록, 키세트 비밀, 데이터 키를 모두 새로 만듭니다. 누군가 PIN을 알고 보안 키를 잠깐 가져가 터치했을 수 있을 때 쓰세요.\n등록한 키가 모두 여기 있어야 합니다. 다른 PC는 이 PC의 열쇠 확인 코드를 입력해야 받습니다. 비밀번호도 노출되었을 수 있으면 끝난 뒤 '비밀번호 변경'도 하세요. 계속할까요?",
+        "Touch every security key in turn to renew each key's values, the pair records, the keyset secret and the data key. Use it when someone who knows a PIN may have borrowed a key and touched it.\nEvery registered key must be here. Other PCs take the result only with this PC's key check code. If the password may be exposed too, also use 'Change password' afterwards. Continue?",
+    ),
+    (
+        "모든 보안 키를 하나씩 연결하고 터치하세요. ({i}/{n})",
+        "Connect and touch every security key, one at a time. ({i}/{n})",
+    ),
+    (
+        "마지막으로 보안 키 하나를 한 번 더 터치해 새 값을 확인합니다.",
+        "Finally, touch one security key once more to check its new value.",
+    ),
+    (
+        "이 Windows는 한 번의 터치로 두 값을 주지 않아 키마다 두 번 터치합니다.",
+        "This Windows does not give two values in one touch, so each key is touched twice.",
+    ),
+    (
+        "모든 보안 키를 새로 잠갔습니다. 다른 PC에서는 이 PC의 열쇠 확인 코드를 입력해야 받습니다.",
+        "All security keys are re-locked. Other PCs take it only with this PC's key check code.",
+    ),
+    (
+        "보안 키를 끄면 비밀번호와 열쇠 파일만으로 열리게 되어 더 약해집니다.\n데이터 키를 바꿉니다. 계속할까요?",
+        "With security keys off, the vault opens with the password and key file alone, which is weaker.\nThe data key is changed. Continue?",
+    ),
+    (
+        "보안 키를 껐습니다. 이제 비밀번호와 열쇠 파일만으로 열립니다.",
+        "Security keys are off. The vault now opens with the password and key file alone.",
+    ),
+    (
+        "다른 PC는 이 열쇠 파일을 USB로 받고 이 PC의 열쇠 확인 코드를 입력해야 합니다.",
+        "Other PCs must take this key file by USB and enter this PC's key check code.",
+    ),
+    (
+        "더 쓰지 않는 보안 키에서는 이 금고의 등록 '{display}'을(를) 지우세요.\n보안 키에서 등록 하나만 지우려면 키 제조사의 관리 도구를 쓰세요(YubiKey는 `ykman fido credentials delete`, Windows에서는 관리자 권한 명령 창에서). 이때 그 키의 PIN이 필요합니다. PIN이 없는 키는 먼저 PIN을 정해야 하는데, 그 키를 PIN 없이 쓰는 다른 고요 금고가 있으면 PIN을 정한 뒤 그 금고가 열리지 않을 수 있습니다.\n지우지 않으면 그 키와 예전 열쇠 파일 사본, 비밀번호로 예전 내용을 열 수 있습니다. 그 키를 다른 곳(다른 고요 금고, 웹사이트 패스키)에 쓰지 않을 때만 FIDO 초기화를 하세요. 초기화는 그 키의 모든 패스키와 다른 금고의 등록까지 지우며, 그 키가 다른 금고의 유일한 키라면 그 금고는 영영 열 수 없게 됩니다.",
+        "On a security key you no longer use, delete this vault's registration '{display}'.\nTo delete one registration from a key, use the key maker's management tool (for a YubiKey `ykman fido credentials delete`, on Windows from an administrator command prompt). It needs the key's PIN. A key without a PIN needs one set first, and another Goyo vault that uses the key without a PIN may then no longer open.\nUntil it is deleted, that key with an old key file copy and the password opens the old contents. FIDO-reset the key only if it is used nowhere else (another Goyo vault, website passkeys): a reset deletes every passkey on the key and other vaults' registrations, and a vault whose only key it is can never be opened again.",
+    ),
+    (
+        "모든 키와 짝을 맺은 키가 없습니다. 먼저 '짝 맺기'로 키를 모두 함께 터치하세요.",
+        "No key is paired with all the others. First touch all keys together with 'Pair keys'.",
+    ),
+    (
+        "다른 PC에서 보안 키가 제거되었습니다. 이 PC에서 고르기 전에는 무엇이 바뀌었는지 보여 주지 않습니다.\n잃어버렸거나 뺀 키를 모두 고르세요.",
+        "Security keys were removed on another PC. Nothing about the change is shown before you choose on this PC.\nChoose every key that was lost or removed.",
+    ),
+    (
+        "잃어버렸거나 뺀 키를 하나 이상 고르세요.",
+        "Choose at least one key that was lost or removed.",
+    ),
+    (
+        "다른 PC의 '열쇠 관리'에 지금 보이는 열쇠 확인 코드를 입력하세요(E{epoch} · XXXX-XXXX-XXXX-XXXX).\n이 PC에서는 코드를 입력하기 전에 무엇이 바뀌었는지 보여 주지 않습니다.",
+        "Enter the key check code shown now in 'Key management' on the other PC (E{epoch} · XXXX-XXXX-XXXX-XXXX).\nNothing about the change is shown on this PC before the code is entered.",
+    ),
+    (
+        "코드 형식이 맞지 않습니다. 16자리(예: E7 · 1A2B-3C4D-5E6F-7A8B)를 입력하세요.",
+        "The code is not in the right form. Enter its 16 characters (for example E7 · 1A2B-3C4D-5E6F-7A8B).",
+    ),
+    ("코드로 확인…", "Confirm with a code…"),
+    ("나중에", "Later"),
+    (
+        "바뀐 열쇠 파일을 확인했습니다. 이제 항목을 고치고 저장할 수 있습니다.",
+        "The changed key file is confirmed. Entries can be edited and saved now.",
+    ),
+    (
+        "바뀐 열쇠 파일을 확인하기 전에는 항목을 고치거나 저장하지 않습니다. '열쇠 관리'의 [받기…]로 확인하세요.",
+        "Until the changed key file is confirmed, nothing is edited or saved. Confirm it with [Get…] in 'Key management'.",
+    ),
+    ("이 열쇠 파일 확인", "Confirm this key file"),
+    (
+        "이 PC는 이 열쇠 파일(수정 {e})을 아직 확인하지 않았습니다. 다른 PC의 '열쇠 관리'에 지금 보이는 열쇠 확인 코드를 입력하세요. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다.",
+        "This PC has not confirmed this key file (revision {e}) yet. Enter the key check code shown now in 'Key management' on another PC. Until then, nothing is edited or uploaded.",
+    ),
+    (
+        "이 열쇠 파일은 보안 키 없이 열리지만, 이 금고에는 보안 키를 쓴 흔적이 있습니다. 다른 PC에서 보안 키를 끈 것이 맞을 때만, 그 PC의 열쇠 확인 코드를 입력하세요.",
+        "This key file opens without a security key, but this vault shows signs of security keys. Enter the other PC's key check code only if security keys really were turned off there.",
+    ),
+    (
+        "다른 PC의 코드가 다른 수정 번호(E…)로 시작하면, 이 열쇠 파일을 복사한 뒤 그 PC에서 열쇠를 다시 바꾼 것입니다. 그 PC의 지금 열쇠 파일을 다시 복사해 와서 여세요.",
+        "If the other PC's code starts with another revision (E…), its keys changed again after this key file was copied. Copy that PC's current key file again and open it.",
+    ),
+    (
+        "확인할 다른 PC가 없으면 이 열쇠 파일이 진짜인지 확인할 방법이 없습니다.\n잃어버린 보안 키와 그 PIN, 비밀번호를 가진 사람이 서버를 장악했다면 위조된 열쇠 파일일 수 있습니다(보안 키를 뺄 때 비밀번호도 바꿨다면 위조 파일은 새 비밀번호로 열리지 않습니다). 그래도 이 열쇠 파일을 믿고 쓸까요?",
+        "Without another PC to check against, there is no way to tell whether this key file is genuine.\nIf someone with a lost security key, its PIN and the password took over the server, it may be forged (if the password was changed when the key was removed, a forged file does not open with the new password). Trust and use this key file anyway?",
+    ),
+    ("다른 PC의 열쇠 확인 코드", "Key check code of the other PC"),
+    ("다른 PC가 없습니다…", "There is no other PC…"),
+    ("잠그기", "Lock"),
+    (
+        "이 열쇠 파일을 확인했습니다. 이제 항목을 고치고 저장할 수 있습니다.",
+        "This key file is confirmed. Entries can be edited and saved now.",
+    ),
+    (
+        "보안 키는 8개까지 등록할 수 있습니다.",
+        "Up to 8 security keys can be registered.",
+    ),
+    (
+        "Windows 보안 창에서 보안 키를 연결하고 터치하세요…",
+        "Connect and touch your security key in the Windows Security window…",
+    ),
+    (
+        "Windows 창에 이 보안 키를 쓸 수 없다고 나왔다면, 그 키는 이 열쇠 파일에 등록되지 않았거나 이 금고에서 뺀 키이거나 FIDO 초기화된 키입니다. 등록된 다른 보안 키로 하세요.",
+        "If the Windows window said this security key cannot be used, the key is not registered in this key file, was removed from this vault or was FIDO-reset. Use another registered security key.",
+    ),
+    (
         "보안 키 확인을 취소했거나 시간이 지났습니다.",
         "The security key check was cancelled or timed out.",
     ),
@@ -1782,7 +2067,7 @@ pub const EN_SK: &[(&str, &str)] = &[
     ),
     (
         "이 보안 키는 PIN 필수 보호(credProtect)를 지원하지 않습니다. 'PIN도 사용'을 끄거나 다른 키를 쓰세요.",
-        "This security key does not support required PIN protection (credProtect). Turn off 'Also use a PIN' or use another key.",
+        "This security key does not support required PIN protection (credProtect). Turn off 'Key PIN too' ('Also use the key PIN' on the Keys screen) or use another key.",
     ),
     (
         "USB·NFC 보안 키만 쓸 수 있습니다(Windows Hello·휴대폰 제외).",
@@ -1927,5 +2212,348 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "보안 키는 8개까지 등록할 수 있습니다. 두 열쇠 파일을 합치면 8개를 넘어 받지 않았습니다.",
         "Up to 8 security keys can be registered. Joining the two key files would give more than 8, so it was not taken.",
+    ),
+    // Stage 5c: the removals, the review, the adopt with keys.
+    ("잃어버린 키 제거…", "Remove a lost key…"),
+    ("키 빼기…", "Remove keys…"),
+    ("잃어버린 키 제거", "Remove a lost key"),
+    ("키 빼기", "Remove keys"),
+    (
+        "잃어버린 키를 모두 고르세요.",
+        "Pick every key that was lost.",
+    ),
+    (
+        "뺄 보안 키를 고르세요.",
+        "Pick the security keys to remove.",
+    ),
+    (
+        "같은 PIN을 쓰는 다른 보안 키를 고르세요. 그 키는 복제됐을 수 있다고 표시합니다.",
+        "Pick the other security keys that use the same PIN. They are marked as possibly cloned.",
+    ),
+    (
+        "대략 언제 잃어버렸나요? (모르면 비워 두세요)",
+        "Roughly when was it lost? (Leave it empty if you do not know.)",
+    ),
+    ("비워 두면 모름", "Leave empty if unknown"),
+    (
+        "PIN이나 비밀번호를 다른 사람이 알 수 있나요? (보았거나, 키와 함께 적어 두었거나, 다른 곳에도 같은 것을 썼다면 '예')",
+        "Could someone else know the PIN or the password? ('Yes' if someone saw it, it was written down with the key, or you use it elsewhere too)",
+    ),
+    ("예", "Yes"),
+    ("아니요", "No"),
+    ("모름", "Not sure"),
+    (
+        "비밀번호도 함께 바꾸기 (권장)",
+        "Change the password too (recommended)",
+    ),
+    (
+        "비밀번호도 바꾸면 잃어버린 키를 가진 사람이 만든 열쇠 파일은 새 비밀번호로 열리지 않고, 서버가 이 변경을 다른 PC에 숨겨도 그 PC에서 새 비밀번호가 안 먹혀 바로 드러납니다.",
+        "With a new password, a key file made by whoever has the lost key does not open with it, and if the server hides this change from another PC, the new password fails there and shows it at once.",
+    ),
+    ("비밀번호도 바꾸기", "Change the password too"),
+    (
+        "비밀번호를 바꾸지 않으면, 잃어버린 키와 그 PIN, 비밀번호를 함께 가진 사람이 만든 열쇠 파일이 다른 PC에서 열릴 수 있고, 서버가 이 변경을 숨겨도 드러나지 않습니다. 그래도 비밀번호를 바꾸지 않을까요?",
+        "If you keep the password, a key file made by someone who has the lost key, its PIN and the password can open on other PCs, and a server that hides this change goes unnoticed. Keep the password anyway?",
+    ),
+    ("제거", "Remove"),
+    ("빼기", "Remove"),
+    (
+        "날짜 형식이 맞지 않습니다. 예: 2026-10-29 (모르면 비워 두세요)",
+        "The date is not in the right format. Example: 2026-10-29 (leave it empty if you do not know).",
+    ),
+    (
+        "PIN이나 비밀번호를 다른 사람이 알 수 있는지 '예', '아니요', '모름' 중에서 고르세요.",
+        "Choose 'Yes', 'No' or 'Not sure': could someone else know the PIN or the password?",
+    ),
+    (
+        "잃어버린 키를 하나 이상 고르세요.",
+        "Pick at least one lost key.",
+    ),
+    (
+        "뺄 키를 하나 이상 고르세요.",
+        "Pick at least one key to remove.",
+    ),
+    (
+        "키를 모두 뺄 수는 없습니다. 하나 이상 남겨 두세요. 보안 키를 모두 없애려면 '보안 키 끄기'를 쓰세요.",
+        "You cannot remove every key. Keep at least one. To remove all security keys, use 'Turn off keys'.",
+    ),
+    (
+        "키를 고르면 어느 키를 터치할지 여기에 보여 줍니다.",
+        "Pick keys, and this shows which key to touch.",
+    ),
+    (
+        "터치할 키: 보안 키 {list} 중 하나",
+        "Key to touch: one of security key {list}",
+    ),
+    (
+        "일시 정지될 키: 보안 키 {list}",
+        "Keys that would be suspended: security key {list}",
+    ),
+    (
+        "이 키와만 짝을 맺은 키: 보안 키 {list} (함께 뺍니다)",
+        "Keys paired only with these: security key {list} (removed too)",
+    ),
+    (
+        "보안 키 {list}은(는) 빼는 키와만 짝을 맺었습니다. 남는 키로는 이 키에 새 열쇠를 줄 수 없고, 빼는 키가 몰래 넣은 키일 수도 있습니다. 남겨 두면 일시 정지되고 짝 기록이 남지 않아 다시 쓸 수 없습니다(빼고 다시 등록해야 합니다).\n다만 이 키가 다른 장소에서 쓰는 유일한 키일 수 있다면 남겨 두세요. 빼면 그 장소의 PC는 이 변경을 받을 때 다른 키를 가져가 짝을 맺은 뒤 '새 열쇠 파일 받기'로 합쳐야 합니다. 함께 뺄까요? (권장)",
+        "Security key {list} is paired only with the keys being removed. No staying key can give it the new key, and it may be a key the removed one added in secret. If kept, it is suspended with no pair record left and cannot be used again (remove it and register it again).\nBut keep it if it may be the only key used at another site. If it is removed, that site's PC must take another key there and pair it, then join the files with 'Receive a new key file' when it takes this change. Remove it too? (Recommended)",
+    ),
+    (
+        "보안 키 {list}은(는) 빼는 키와만 짝을 맺었습니다(예: 그 키로 추가한 예비 키). 이번에 함께 터치하면 그대로 남고, 터치하지 않으면 일시 정지되며 짝 기록이 남지 않아 나중에 빼고 다시 등록해야 합니다.\n이 키가 다른 장소에서 쓰는 유일한 키일 수 있다면, 먼저 '짝 맺기'로 남는 키와 짝을 맺은 뒤에 빼세요. 함께 빼려면 목록에서 고르세요.",
+        "Security key {list} is paired only with the keys being removed (for example a spare added with one of them). Touched in this flow too, it stays as it is; untouched, it is suspended with no pair record left and must later be removed and registered again.\nIf it may be the only key used at another site, pair it with a staying key first ('Pair keys'), then remove the others. To remove it as well, pick it in the list.",
+    ),
+    (
+        "보안 키 {list}은(는) 터치할 키와 짝을 맺지 않아 새 열쇠 파일을 받을 수 없습니다. 이대로 하면 이 키는 일시 정지되고, 나중에 '짝 맺기'로 다시 쓸 수 있습니다.",
+        "Security key {list} is not paired with the key you touch, so it cannot receive the new key file. If you go on, it is suspended, and 'Pair keys' makes it usable again later.",
+    ),
+    (
+        "모든 키와 짝을 맺은 키(보안 키 {full})로 터치하면 일시 정지되지 않습니다.",
+        "Touching a key paired with every key (security key {full}) suspends none.",
+    ),
+    (
+        "다음에 모든 키와 짝을 맺은 키(보안 키 {full})로 터치하면 일시 정지되지 않습니다.",
+        "Next time, touching a key paired with every key (security key {full}) suspends none.",
+    ),
+    (
+        "다만 보안 키 {orphans}은(는) 남는 짝 기록이 없어 다시 쓸 수 없고, 빼고 다시 등록해야 합니다.",
+        "But security key {orphans} has no pair record left and cannot be used again: remove it and register it again.",
+    ),
+    (
+        "그 키가 지금 여기 있으면 '그 키도 함께 터치'를 누르세요. 함께 터치한 키는 일시 정지되지 않습니다. 계속할까요?",
+        "If that key is here now, press 'Touch that key too'. A key touched as well is not suspended. Go on?",
+    ),
+    ("계속", "Continue"),
+    ("그 키도 함께 터치", "Touch that key too"),
+    (
+        "이 PC에서 처음 보는 키는 여기서 함께 터치할 수 없습니다. 계속할까요?",
+        "A key new to this PC cannot be touched here as well. Continue?",
+    ),
+    (
+        "함께 터치할 보안 키 {list}을(를) 연결하고 터치하세요.",
+        "Connect security key {list}, to be touched as well, and touch it.",
+    ),
+    (
+        "모든 키와 짝을 맺은 키가 없어, 보안 키 {list}도 연결해 함께 터치해야 합니다. 그 키가 지금 여기 없으면 '취소'를 누르고, 키가 모일 때 '짝 맺기'를 하세요.",
+        "No key is paired with every other key, so security key {list} must be connected and touched as well. If it is not here now, press 'Cancel' and pair the keys when they are together.",
+    ),
+    (
+        "보안 키 {x}과(와) {y} 사이의 짝 기록이 손상되어 있습니다. 두 키가 모두 여기 있으면 보안 키 {a}을(를) 터치한 뒤 다른 키도 함께 터치해, 이번 변경에서 고치세요. 한 키가 다른 곳에 있으면 '건너뛰기'를 누르세요. 변경은 그대로 진행됩니다.",
+        "The pair record between security keys {x} and {y} is damaged. If both keys are here, touch security key {a}, then the other one as well, and this change repairs it. If one of them is elsewhere, press 'Skip': the change goes ahead as planned.",
+    ),
+    ("둘 다 터치", "Touch both"),
+    (
+        "이 금고의 기록을 무시하고, 이 열쇠 파일을 처음 보는 열쇠 파일로 확인합니다. 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 아래에 입력하세요.",
+        "This vault's record is ignored, and this key file is checked as one seen for the first time. Enter below the key check code shown in 'Key management' on another PC.",
+    ),
+    ("건너뛰기", "Skip"),
+    (
+        "보안 키 {x}과(와) {y} 사이의 손상된 짝 기록은 고치지 않았습니다. 두 키를 한곳에서 '짝 맺기'하기 전까지 다른 PC가 이 변경을 받지 않을 수 있습니다.",
+        "The damaged pair record between security keys {x} and {y} was not repaired. Until the two keys are paired at one site, other PCs may refuse this change.",
+    ),
+    (
+        "선택한 보안 키 {list}을(를) 뺍니다. 남는 키 하나를 터치하면 새 키세트 비밀과 데이터 키를 만들고, 이 PC에서는 바로 끝납니다.\n다른 키를 옮길 필요는 없습니다. 뺀 키와 예전 비밀번호로는 앞으로 저장하는 내용을 열 수 없습니다. 계속할까요?",
+        "This removes security key {list}. One touch of a staying key makes a new keyset secret and data key, and on this PC it is done at once.\nNo other key needs to travel. The removed keys and the old password cannot open what is saved from now on. Go on?",
+    ),
+    (
+        "이 PC의 동기화가 멈춰 있지만, 잃어버린 키 제거는 이 PC를 바로 보호하므로 그대로 진행합니다. 다른 PC의 변경과는 나중에 합쳐집니다.",
+        "This PC's sync is halted, but removing a lost key protects this PC at once, so it goes ahead. It is joined with the other PC's change later.",
+    ),
+    (
+        "보안 키 {list}을(를) 이 PC에서 뺐습니다. 이 PC는 지금부터 보호됩니다.\n이 금고를 쓰는 다른 PC마다 '잃어버린 키 제거'를 하거나, 그 PC를 열 때 보안 키 {list}을(를) 모두 고르세요(서버가 이 변경을 숨겨도 그 PC에서 직접 하면 바로 보호됩니다).",
+        "Security key {list} is removed on this PC. This PC is protected from now on.\nOn every other PC that uses this vault, run 'Remove a lost key', or pick every security key {list} when it opens (done there, it protects that PC at once, even if the server hides this change).",
+    ),
+    (
+        "보안 키 {list}을(를) 이 PC에서 뺐습니다. 이 PC는 지금부터 보호됩니다.",
+        "Security key {list} is removed on this PC. This PC is protected from now on.",
+    ),
+    (
+        "보안 키 {list}을(를) 이 PC에서 뺐습니다. 이 PC는 지금부터 보호됩니다. 다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다.\n다른 PC마다 둘 중 하나를 하세요. ① 이 열쇠 파일을 USB로 가져가 그 PC에서 '새 열쇠 파일 받기'로 받고, 보안 키 {list}을(를) 모두 고르세요(한 번 옮기면 끝납니다). ② 그 PC를 지금 바로 보호해야 하면 그 PC에서도 '잃어버린 키 제거'를 하세요. 그 뒤에는 두 PC가 서로의 열쇠 파일을 한 번씩 '새 열쇠 파일 받기'로 받아야 동기화가 다시 이어집니다.\n그 PC에서 쓰던 보안 키를 모두 뺐다면 그 PC는 열리지 않습니다. 여기서 새 키를 추가한 뒤, 그 키와 새 열쇠 파일을 함께 가져가 그 PC의 로그인에서 이 열쇠 파일을 고르고, 이 PC의 열쇠 확인 코드를 입력하세요.",
+        "Security key {list} is removed on this PC. This PC is protected from now on. Other PCs halt sync until they take this key file.\nOn each other PC, do one of two things. ① Take this key file there on a USB stick, use 'Receive a new key file' and pick every security key {list} (one carry does it). ② If that PC must be protected right now, run 'Remove a lost key' there too; the two PCs must then each take the other's key file once with 'Receive a new key file' before sync goes on.\nIf every key that PC used was removed, it does not open: add a new key here, take that key and the new key file there together, choose this key file at that PC's login and enter this PC's key check code.",
+    ),
+    (
+        "보안 키 {list}을(를) 이 PC에서 뺐습니다. 이 PC는 지금부터 보호됩니다. 다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다.",
+        "Security key {list} is removed on this PC. This PC is protected from now on. Other PCs halt sync until they take this key file.",
+    ),
+    (
+        "새 열쇠 파일은 보안 키 {present}(으)로만 열 수 있습니다(보안 키 {suspended}은(는) 일시 정지됨).\n그 키가 없는 다른 PC는 이 열쇠 파일을 받을 수 없으니, 그 PC마다 직접 같은 키를 빼세요(잃어버린 키는 '잃어버린 키 제거', 아니면 '키 빼기'). 두 PC의 열쇠 파일은 나중에 보안 키 하나를 다른 PC로 가져가 '새 열쇠 파일 받기'로 합칩니다.",
+        "The new key file opens only with security key {present} (security key {suspended} is suspended).\nAnother PC without that key cannot take this key file, so remove the same keys on each such PC yourself ('Remove a lost key' for a lost key, otherwise 'Remove keys'). The two PCs' key files are joined later by taking one security key to the other PC and using 'Receive a new key file'.",
+    ),
+    (
+        "같은 PIN을 쓰는 보안 키 {list}은(는) 복제됐을 수 있습니다. 모든 키가 한곳에 모일 때 '모든 키 새로 잠그기'를 하거나, 그 키를 빼고 다시 등록하세요.",
+        "Security key {list}, which uses the same PIN, may have been cloned. When all keys are in one place, use 'Re-lock all keys', or remove that key and register it again.",
+    ),
+    (
+        "보안 키 {list}을(를) 뺐습니다.",
+        "Security key {list} is removed.",
+    ),
+    (
+        "다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 다른 PC에서 '새 열쇠 파일 받기'로 이 열쇠 파일을 받고, 뺀 보안 키 {list}을(를) 모두 고르세요.",
+        "Other PCs halt sync until they take this key file. On each other PC, take it with 'Receive a new key file' and pick every removed security key {list}.",
+    ),
+    (
+        "보안 키 {list} 제거를 저장하지 못했습니다. 아무것도 바뀌지 않았고 이 PC는 아직 보호되지 않습니다. 저장장치와 쓰기 권한을 확인한 뒤 다시 하세요.",
+        "The removal of security key {list} could not be saved. Nothing changed, and this PC is not protected yet. Check the drive and the write permission, then try again.",
+    ),
+    ("다시 하기", "Redo"),
+    (
+        "'새 열쇠 파일 받기…'로 받으려던 열쇠 파일을 다시 고르세요. 이 PC의 키는 빼지 않습니다.",
+        "Pick the key file you were receiving again with 'Receive a new key file…'. No key of this PC is removed.",
+    ),
+    ("동기화로 들어온 변경 확인", "Review what came in by sync"),
+    (
+        "보안 키를 잃어버린 날({date}) 하루 전부터 다른 PC에서 동기화로 들어온 변경입니다. 잃어버린 키를 가진 사람이 서버를 통해 바꿔 넣었을 수 있습니다.\n계좌번호, 지갑 주소, 복구 이메일, 로그인 주소처럼 바뀌면 위험한 항목을 확인하고 필요하면 고치세요. 확인을 마치면 '확인함'을 누르세요. 그 전에는 이 PC의 금고 내용을 서버에 올리지 않습니다.",
+        "These are the changes that came in by sync from other PCs since the day before the security key was lost ({date}). Whoever has the lost key may have put them in through the server.\nCheck entries that are dangerous if changed, such as account numbers, wallet addresses, recovery e-mails and login addresses, and fix them if needed. When you are done, press 'Reviewed'. Until then this PC does not upload its vault.",
+    ),
+    (
+        "보안 키를 잃어버린 날을 몰라, 이 PC에 동기화로 들어온 변경 기록 전체입니다. 잃어버린 키를 가진 사람이 서버를 통해 바꿔 넣었을 수 있습니다.\n계좌번호, 지갑 주소, 복구 이메일, 로그인 주소처럼 바뀌면 위험한 항목을 확인하고 필요하면 고치세요. 확인을 마치면 '확인함'을 누르세요. 그 전에는 이 PC의 금고 내용을 서버에 올리지 않습니다.",
+        "The day the security key was lost is unknown, so this is every change that came in to this PC by sync. Whoever has the lost key may have put them in through the server.\nCheck entries that are dangerous if changed, such as account numbers, wallet addresses, recovery e-mails and login addresses, and fix them if needed. When you are done, press 'Reviewed'. Until then this PC does not upload its vault.",
+    ),
+    (
+        "기록이 너무 많아 {time} 이전에 들어온 변경 일부는 이 목록에 없습니다. 백업이나 서버 기록과 비교하세요.",
+        "There were too many records: some changes that came in before {time} are not in this list. Compare with a backup or the server history.",
+    ),
+    (
+        "같은 항목에 다른 PC의 내용이 들어왔습니다: {title}. 이 PC의 원래 내용은 '{title2}' 항목으로 옮겨졌습니다. 어느 쪽이 맞는지 확인하고, 틀린 쪽을 고치거나 지우세요.",
+        "Another PC's content came in under the same entry: {title}. This PC's original content moved to the entry '{title2}'. Check which one is right, and fix or delete the wrong one.",
+    ),
+    (
+        "잃어버린 날 (비워 두면 기록 전체)",
+        "Day of the loss (empty: all records)",
+    ),
+    (
+        "항목을 두 번 누르면 열립니다. 날짜를 바꾸면 목록이 바뀝니다.",
+        "Double-click an entry to open it. Changing the date changes the list.",
+    ),
+    ("확인함", "Reviewed"),
+    ("고친 항목", "Edited entry"),
+    (
+        "다른 PC의 내용으로 바뀐 항목",
+        "Entry with another PC's content",
+    ),
+    ("이 PC의 원래 내용", "This PC's original content"),
+    (
+        "다른 PC에서 지운 항목 (내용은 백업이나 서버 기록에서 확인)",
+        "Entry deleted on another PC (see a backup or the server history for its content)",
+    ),
+    ("이 PC에 없는 항목", "Entry not on this PC"),
+    (
+        "이 PC에 없는 항목은 열 수 없습니다. 백업이나 서버 기록에서 확인하세요.",
+        "An entry that is not on this PC cannot be opened. Check it in a backup or the server history.",
+    ),
+    ("검토를 마쳤습니다.", "Review done."),
+    (
+        "검토는 나중에 합니다. '확인함'을 누르기 전에는 이 PC의 금고 내용을 서버에 올리지 않고, 열 때마다 다시 보여 줍니다.",
+        "Review later. Until you press 'Reviewed', this PC does not upload its vault, and the review comes back at every unlock.",
+    ),
+    (
+        "열쇠 파일이 갈라졌습니다. [다른 PC 쪽 사용]은 이 PC의 열쇠 변경을 버리고 다른 PC의 열쇠 파일 내용으로 새 열쇠 파일을 씁니다(이 PC의 항목은 합칩니다).\n[둘 다 합치기]는 두 열쇠 파일을 합쳐 새로 만듭니다. 보안 키 구성이나 설정이 달라지는 쪽을 고르면, 먼저 잃어버린 키를 고르거나 다른 PC의 코드를 입력해야 합니다.",
+        "The key files have split. [Use the other PC's] drops this PC's key changes and writes a new key file from the other PC's (this PC's entries are merged).\n[Join both] joins the two key files into a new one. If the side you choose changes the security keys or settings, you first pick the lost keys or enter the other PC's code.",
+    ),
+    ("열쇠 파일이 갈라졌습니다.", "The key files have split."),
+    (
+        "[다른 PC 쪽 사용]은 이 PC의 열쇠 변경을 버리고 다른 PC의 열쇠 파일 내용으로 새 열쇠 파일을 씁니다(이 PC의 항목은 합칩니다).",
+        "[Use the other PC's] drops this PC's key changes and writes a new key file from the other PC's (this PC's entries are merged).",
+    ),
+    (
+        "[둘 다 합치기]는 두 열쇠 파일을 합쳐 새로 만듭니다.",
+        "[Join both] joins the two key files into a new one.",
+    ),
+    (
+        "보안 키 구성이나 설정이 바뀌는 경우, 먼저 잃어버린 키를 고르거나 다른 PC의 코드를 입력해야 합니다.",
+        "If it changes the security keys or settings, you first pick the lost keys or enter the other PC's code.",
+    ),
+    ("다른 PC 쪽 사용", "Use the other PC's"),
+    ("둘 다 합치기", "Join both"),
+    (
+        "이 PC가 받은 변경은 다른 PC에서 제거한 보안 키 {n}이(가) 승인한 것입니다. '다른 PC 쪽 사용'을 권합니다.",
+        "A change this PC holds was approved by security key {n}, which the other PC removed. 'Use the other PC's' is recommended.",
+    ),
+    ("뒤로", "Back"),
+    (
+        "이 PC가 다른 PC에서 받은 보안 키 {list} 제거를 되돌려, 그 키를 다시 쓸 수 있게 합니다.\n그 키를 잃어버렸거나 뺀 것이 맞다면 [아니요]를 누르고 [둘 다 합치기]를 쓰세요. 잘못 고른 키 때문에 받은 위조 변경을 되돌리는 경우에만 계속하세요.",
+        "This undoes the removal of security key {list} that this PC took from another PC, so that key can be used again.\nIf that key really was lost or removed, press [No] and use [Join both]. Go on only to undo a forged change taken because of a wrong pick.",
+    ),
+    (
+        "받으면 보안 키가 모두 빠지고 이 금고는 비밀번호와 열쇠 파일만으로 열리게 됩니다(더 약해집니다). 다른 PC에서 보안 키를 끈 것이 맞을 때만 받으세요.",
+        "Taking it removes every security key, and this vault then opens with the password and key file alone (weaker). Take it only if security keys really were turned off on the other PC.",
+    ),
+    (
+        "받을 열쇠 파일은 보안 키 {list}(으)로만 열 수 있습니다. 그 키가 지금 이 PC에 있으면 연결하고 '터치'를 누르세요. 없으면 '취소'를 누르세요.",
+        "The key file to receive opens only with security key {list}. If that key is here now, connect it and press Touch. Otherwise press Cancel.",
+    ),
+    ("터치", "Touch"),
+    (
+        "받을 열쇠 파일에서 이 PC의 보안 키가 모두 빠졌거나 일시 정지되어 받을 수 없습니다. 키를 잃어버렸다면 이 PC에서 '잃어버린 키 제거'를 직접 하세요. 아니면 다른 키와 '짝 맺기'를 한 뒤 받으세요.",
+        "Every security key of this PC is removed or suspended in the key file to receive, so it cannot be taken. If a key was lost, run 'Remove a lost key' on this PC yourself. Otherwise pair with another key first, then receive it.",
+    ),
+    (
+        "받으면 일시 정지될 키: 보안 키 {list}",
+        "Keys suspended if you take it: security key {list}",
+    ),
+    (
+        "결과: 비밀번호만으로 열림",
+        "Result: opens with the password alone",
+    ),
+    (
+        "번호가 겹쳐 보안 키 {a}를 보안 키 {b}(으)로 바꿨습니다. 실물 키의 표시도 고치세요.",
+        "The numbers collided: security key {a} is now security key {b}. Change the label on the physical key too.",
+    ),
+    (
+        "PIN 없이 등록한 보안 키 {N}은(는) PIN을 쓰는 열쇠 파일에 넣을 수 없어 빠졌습니다. 다시 등록하세요.",
+        "Security key {N}, registered without a PIN, cannot be in a key file that uses PINs, so it was left out. Register it again.",
+    ),
+    ("이 PC에서 처음 보는 키", "new to this PC"),
+    (
+        "이 열쇠 파일은 보안 키가 필요합니다(등록 {n}개). '잠금 해제'를 누르면 Windows 보안 창이 열립니다.",
+        "This key file needs a security key ({n} registered). Unlock opens the Windows Security window.",
+    ),
+    (
+        "보안 키 PIN은 Windows 창에 입력합니다.",
+        "Enter the security key's PIN in the Windows window.",
+    ),
+    (
+        "이 열쇠 파일은 보안 키 없이 비밀번호만으로 열립니다.",
+        "This key file opens with the password alone, without a security key.",
+    ),
+    (
+        "이 금고의 기록 지우고 다시 확인…",
+        "Forget this vault's record and confirm again…",
+    ),
+    (
+        "이 PC에 남은 이 금고의 열쇠 기록(수정 {old})을 지우고, 지금 고른 열쇠 파일을 처음 보는 열쇠 파일로 다시 확인합니다. 그 뒤에는 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력해야 항목을 고치거나 올릴 수 있습니다(다른 PC가 없으면 믿고 쓰기를 고를 수 있습니다).\n코드로 확인하기 전에 잠그면 이 기록은 지워지지 않고 그대로 남습니다. 이 PC에서 한 열쇠 변경 중 이 열쇠 파일에 없는 것은 사라질 수 있습니다. 다른 금고의 기록은 그대로 둡니다.\n예전 열쇠 파일이나 위조된 열쇠 파일일 수 있다면 누르지 마세요. 계속할까요?",
+        "This forgets this PC's key record of this vault (revision {old}) and checks the chosen key file again as one it has never seen. Afterwards, entries can be edited or uploaded only once you enter the key check code shown in 'Key management' on another PC (with no other PC, you can choose to trust it).\nIf you lock before the code is confirmed, the record is not forgotten and stays as it is. Key changes made on this PC that this key file lacks may be lost. The records of other vaults stay.\nDo not press it if this may be an old or forged key file. Continue?",
+    ),
+    ("함께 빼기", "Remove them too"),
+    ("남겨 두기", "Keep them"),
+    (
+        "오늘 이후 날짜는 쓸 수 없습니다. 날짜를 확인하세요(모르면 비워 두세요).",
+        "A day after today cannot be used. Check the date (leave it empty if you do not know).",
+    ),
+    (
+        "보안 키 {N}은(는) 이 열쇠 파일에서 일시 정지되어 있지만, 지금 연 보안 키 {M}과(와) 짝을 맺고 있어 이 PC에서 바로 다시 쓰게 할 수 있습니다.\n보안 키 {N}이(가) 이 PC 곁에 있다면 '열쇠 관리 › 짝 맺기'로 두 키를 터치하세요(2번 터치). 그러지 않으면 이 PC에서 쓸 수 있는 키가 보안 키 {M} 하나뿐일 수 있고, 그 키를 잃으면 다른 장소의 키를 가져올 때까지 이 PC에서 금고를 열 수 없습니다.",
+        "Security key {N} is suspended in this key file, but it is paired with security key {M}, which you just opened with, so this PC can make it usable again at once.\nIf security key {N} is here, touch both keys with 'Key management › Pair keys' (2 touches). Otherwise security key {M} may be the only key this PC can use, and if it is lost, this PC cannot open the vault until a key from the other site is brought here.",
+    ),
+    (
+        "보안 키 {N}은(는) 일시 정지되어 있어, 이 PC에서 쓸 수 있는 키가 보안 키 {M} 하나뿐일 수 있습니다. 두 키가 여기 있으면 '열쇠 관리 › 짝 맺기'로 다시 쓰게 하세요.",
+        "Security key {N} is suspended, so security key {M} may be the only key this PC can use. If both keys are here, pair them in 'Key management › Pair keys'.",
+    ),
+    (
+        "보안 키를 켰습니다. 보안 키 1개가 등록되었습니다.",
+        "Security keys are on. One security key is registered.",
+    ),
+    (
+        "열쇠 확인 코드: {code}. 다른 PC는 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력하고, 제거를 받을 때는 잃어버린 키를 고릅니다. 모든 PC가 받아야 열쇠 변경이 끝난 것입니다.",
+        "Key check code: {code}. Other PCs enter this code when they take a security key addition or a settings change, and pick the lost keys when they take a removal. The key change is finished once every PC has taken it.",
+    ),
+    (
+        "터치할 키: 보안 키 {list}",
+        "Key to touch: security key {list}",
+    ),
+    (
+        "새 금고를 만들었습니다. 보안 키 1개가 등록되었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 따로 두세요.",
+        "New vault created. One security key is registered. Keep a copy of the key file elsewhere with 'Back up key' below.",
+    ),
+    (
+        "일시 정지된 키: 보안 키 {list} ('짝 맺기'로 다시 쓰게 하세요)",
+        "Suspended keys: security key {list} (make them usable again with 'Pair keys')",
     ),
 ];

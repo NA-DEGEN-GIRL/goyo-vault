@@ -639,6 +639,11 @@ fn self_check() -> i32 {
         return ERROR;
     }
     sys::print("HKDF self-test: PASS\n", false);
+    // Which build this is (spec §8.8); the release is the default one.
+    #[cfg(not(feature = "security-key"))]
+    sys::print("security-key: not built\n", false);
+    #[cfg(feature = "security-key")]
+    sys::print("security-key: EXPERIMENTAL build\n", false);
     let mut ok = true;
     if !gui::self_check() {
         sys::print("FAIL: the settings window could not be built\n", true);

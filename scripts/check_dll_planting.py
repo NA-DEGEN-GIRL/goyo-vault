@@ -12,15 +12,24 @@ next to every exe too. goyo-vault.exe and goyo-sync.exe both print PASS from
 switched off for the copies, so a failing build does not leave a "bad image"
 dialog on the desktop.
 
-Usage: python scripts/check_dll_planting.py [exe ...]
+Usage: python scripts/check_dll_planting.py [--webauthn] [exe ...]
 (default: target/release/goyo-vault.exe and target/release/goyo-sync.exe)
+
+--webauthn (a security-key build, the manual checklist only; spec v3 §12):
+webauthn.dll joins the DLLs loaded at run time, and the import closure of
+each of them is planted too, since `--self-check` of that build loads
+webauthn.dll and its dependencies.
 """
 import ctypes, os, pathlib, shutil, struct, subprocess, sys, tempfile, winreg
 
+webauthn = '--webauthn' in sys.argv[1:]
 exes = [pathlib.Path(a).resolve()
-        for a in sys.argv[1:] or ['target/release/goyo-vault.exe', 'target/release/goyo-sync.exe']]
+        for a in [a for a in sys.argv[1:] if a != '--webauthn']
+        or ['target/release/goyo-vault.exe', 'target/release/goyo-sync.exe']]
 system32 = pathlib.Path(os.environ['SystemRoot']) / 'System32'
 RUNTIME = ['msctf.dll', 'wtsapi32.dll', 'sspicli.dll']
+if webauthn:
+    RUNTIME.append('webauthn.dll')
 
 
 def imports(path):
@@ -69,7 +78,7 @@ ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
 
 failures = []
 for exe in exes:
-    seen, queue = set(), list(imports(exe))
+    seen, queue = set(), list(imports(exe)) + (RUNTIME if webauthn else [])
     while queue:
         name = queue.pop().lower()
         if name in seen or name.startswith(('api-ms-', 'ext-ms-')):

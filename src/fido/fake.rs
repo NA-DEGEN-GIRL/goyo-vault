@@ -260,9 +260,12 @@ impl Fake {
             .finalize()
             .into()
     }
-    /// Starts an operation: the pause hook, then the touched key, if the
-    /// user touches one that is plugged in.
-    fn begin(&self, seen: Seen) -> Result<usize, FidoError> {
+    /// Starts an operation as the app's `Authenticator` does: the app's
+    /// cancel flag checked right before the call (spec §8.5), the pause
+    /// hook, then the touched key, if the user touches one that is plugged
+    /// in.
+    fn begin(&self, c: &CancelToken, seen: Seen) -> Result<usize, FidoError> {
+        c.check()?;
         let pause = self.lock().pause.take();
         if let Some((reached, wait)) = pause {
             let _ = reached.send(());
@@ -460,26 +463,28 @@ impl Authenticator for Fake {
     fn make_credential(
         &self,
         r: &MakeRequest,
-        _c: &CancelToken,
+        c: &CancelToken,
     ) -> Result<RawCredential, FidoError> {
-        let i = self.begin(Seen {
-            owner: r.owner,
-            credentials: r.exclude.clone(),
-            uv: r.uv,
-        })?;
+        let i = self.begin(
+            c,
+            Seen {
+                owner: r.owner,
+                credentials: r.exclude.clone(),
+                uv: r.uv,
+            },
+        )?;
         let result = self.wait(i).and_then(|()| self.make(i, r));
         self.end(result)
     }
-    fn get_assertion(
-        &self,
-        r: &AssertRequest,
-        _c: &CancelToken,
-    ) -> Result<RawAssertion, FidoError> {
-        let i = self.begin(Seen {
-            owner: r.owner,
-            credentials: r.allow.iter().map(|(id, ..)| id.clone()).collect(),
-            uv: r.uv,
-        })?;
+    fn get_assertion(&self, r: &AssertRequest, c: &CancelToken) -> Result<RawAssertion, FidoError> {
+        let i = self.begin(
+            c,
+            Seen {
+                owner: r.owner,
+                credentials: r.allow.iter().map(|(id, ..)| id.clone()).collect(),
+                uv: r.uv,
+            },
+        )?;
         let result = self.wait(i).and_then(|()| self.assert(i, r));
         self.end(result)
     }
@@ -737,6 +742,17 @@ mod tests {
         fake.cancel(&fake.new_cancel().unwrap());
         release.send(()).unwrap();
         assert_eq!(worker.join().unwrap(), Ok(()));
+        // A cancel that reached the token before the call: no call at all,
+        // as the app's WebAuthn does it (spec §8.5).
+        let seen = fake.seen().len();
+        let token = fake.new_cancel().unwrap();
+        token.cancel();
+        assert_eq!(token.check(), Err(FidoError::Cancelled));
+        assert_eq!(
+            fake.get_assertion(&req, &token).err(),
+            Some(FidoError::Cancelled)
+        );
+        assert_eq!(fake.seen().len(), seen);
         // A slow key answers when the test clock gets there, unless a
         // cancel ends the operation first.
         fake.device(i, |d| d.answer_at = Some(150_000));

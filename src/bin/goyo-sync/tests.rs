@@ -587,17 +587,39 @@ fn ssh_log_is_fresh_bounded_and_removed() {
 
 // ---- 19: bounded child processes ----
 
+/// `python` as the tests start it outside the bounded runner: with
+/// CREATE_NO_WINDOW, as run_bounded starts every child. This binary is a
+/// windows-subsystem program, so it has no console of its own, and a
+/// console program it starts without that flag gets a new console window
+/// each time; while the GUI tests make their windows, Windows sometimes
+/// fails to set one up and the child dies in its start-up with
+/// STATUS_DLL_INIT_FAILED (0xC0000142), printing nothing.
+fn python_command() -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = Command::new("python");
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
 /// Whether python can run the server script; panics if not, unless
-/// GOYO_SYNC_SKIP_PYTHON=1.
+/// GOYO_SYNC_SKIP_PYTHON=1. Only a python that is not found counts as
+/// missing; one that does not run says what Windows or python reported.
 pub(crate) fn python() -> bool {
-    let ok = Command::new("python")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok && std::env::var("GOYO_SYNC_SKIP_PYTHON").as_deref() != Ok("1") {
-        panic!("python is needed for these tests; set GOYO_SYNC_SKIP_PYTHON=1 to skip them");
+    match python_command().arg("--version").output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => panic!(
+            "`python --version` exited with {:?} (code {:#x}): {}",
+            o.status,
+            o.status.code().unwrap_or(0) as u32,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if std::env::var("GOYO_SYNC_SKIP_PYTHON").as_deref() == Ok("1") {
+                return false;
+            }
+            panic!("python is needed for these tests; set GOYO_SYNC_SKIP_PYTHON=1 to skip them");
+        }
+        Err(e) => panic!("`python --version` did not start: {e} ({e:?})"),
     }
-    ok
 }
 fn py(code: &str) -> Command {
     let mut c = Command::new("python");
@@ -2089,7 +2111,7 @@ fn server_selftest_passes() {
     if !python() {
         return;
     }
-    let out = Command::new("python")
+    let out = python_command()
         .arg("-I")
         .arg(server_script())
         .arg("selftest")
@@ -2098,7 +2120,9 @@ fn server_selftest_passes() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && stdout.trim() == "PASS",
-        "{stdout}\n{}",
+        "{:?} (code {:#x})\n{stdout}\n{}",
+        out.status,
+        out.status.code().unwrap_or(0) as u32,
         String::from_utf8_lossy(&out.stderr)
     );
     // The server allows each connection as long as the longest ssh timeout.
