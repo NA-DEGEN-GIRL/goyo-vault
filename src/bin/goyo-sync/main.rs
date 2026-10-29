@@ -24,6 +24,8 @@ mod gui;
 #[allow(dead_code)]
 #[path = "../../i18n.rs"]
 mod i18n;
+#[cfg(feature = "security-key")]
+mod keys_gui;
 mod msg;
 mod setup;
 mod sys;
@@ -218,6 +220,8 @@ fn state_message(state: SyncState) -> Msg {
         SyncState::Update => Msg::StateUpdate,
         SyncState::OldServer => Msg::StateOldServer,
         SyncState::KeyFile => Msg::StateKeyFile,
+        #[cfg(feature = "security-key")]
+        SyncState::NoKeys => Msg::StateNoKeys,
         SyncState::Config => Msg::PassUnusable,
         SyncState::Ok | SyncState::Idle | SyncState::Server => Msg::StateServer,
     }

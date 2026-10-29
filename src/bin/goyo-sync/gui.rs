@@ -2107,6 +2107,8 @@ fn state_text(state: SyncState, server: u64) -> (String, Tone) {
         SyncState::Update => t("새 형식 · 고요 금고를 업데이트하세요", Tone::Danger),
         SyncState::OldServer => t("서버 스크립트 업데이트 필요", Tone::Danger),
         SyncState::KeyFile => t("열쇠 파일 갱신 필요", Tone::Danger),
+        #[cfg(feature = "security-key")]
+        SyncState::NoKeys => (crate::keys_gui::no_keys().to_owned(), Tone::Danger),
     }
 }
 fn outcome_text(outcome: &Outcome, live: Live) -> (String, Tone) {

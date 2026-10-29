@@ -1638,6 +1638,16 @@ pub(crate) mod tests {
                 .unwrap();
         assert_eq!(SERVER_SCRIPT, shipped.as_slice());
         assert!(!SERVER_SCRIPT.contains(&b'\r'));
+        // Both builds embed the script, and the default goyo-sync.exe must
+        // not hold the key channel's magics (spec §12, inspect_pe.py): the
+        // script never spells one whole, in any case, as ASCII or UTF-16LE.
+        let lower = SERVER_SCRIPT.to_ascii_lowercase();
+        for tail in ["o2", "i2", "r1"] {
+            let magic = format!("goyosk{tail}");
+            let wide: Vec<u8> = magic.bytes().flat_map(|b| [b, 0]).collect();
+            assert!(!lower.windows(8).any(|w| w == magic.as_bytes()), "{magic}");
+            assert!(!lower.windows(16).any(|w| w == wide.as_slice()), "{magic}");
+        }
     }
 
     /// Host key refusals lead to the right next step, and only a first

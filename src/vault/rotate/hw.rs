@@ -52,9 +52,6 @@ pub const NOT_PLANNED: &str =
 /// S-REMOVE-UNDONE, filled with the removed keys' numbers: a removal that
 /// never landed (spec §5.2 step 7, §5.6 C0b-C3).
 pub const REMOVE_UNDONE: &str = "지난번 보안 키 {list} 제거가 저장 중에 끊겨 끝나지 않았습니다. 이 PC는 아직 보호되지 않습니다. [다시 하기]로 같은 내용으로 다시 하세요.";
-/// Keys off of a GOYOKS01 key file, which needs the key-file sync off
-/// sequence of a later stage first (spec §7.16).
-pub const KEYSOFF_SYNCED: &str = "열쇠 파일 동기화를 쓰는 열쇠 파일에서는 아직 보안 키를 끌 수 없습니다. 아무것도 바뀌지 않았습니다.";
 
 /// The touched key of a Reauth of a key file with security keys (spec
 /// §5.3): S, the key's output for its seed (`H_a`, which opens its pair
@@ -66,8 +63,15 @@ pub(super) struct Authorizer {
     credhash: [u8; 16],
     number: u8,
     reach: Vec<u8>,
+    /// The touch's transport, which assertions from version 4 on state
+    /// (spec §7.9: key-file sync needs it).
+    transport: Option<u32>,
 }
 impl Reauth {
+    /// The transport the Reauth's touch stated (USB or NFC), or None.
+    pub fn transport(&self) -> Option<u32> {
+        self.keys.as_ref().and_then(|k| k.transport)
+    }
     /// The keys a write authorized by this Reauth's key reaches through
     /// its own pair records, itself included, as numbers (spec §5.3,
     /// S45-2 #6): the flow compares them with its plan.
@@ -341,6 +345,15 @@ pub(in crate::vault) struct Landing {
     fixed: Vec<([u8; 4], [u8; 4])>,
     /// A fork union's option (spec §5.8).
     opt: Option<u8>,
+    /// `ks` of this write (spec §7.16 "Which writes set `ks`"); None copies
+    /// the confirmed line's.
+    pub(super) ks: Option<anchor::Ks>,
+    /// `clears=g`: an off clears a pending gate unconditionally (S6R1 #2),
+    /// an accept the gate of the file it takes.
+    pub(super) clear_gate: bool,
+    /// The server file this write merges in, takes or clears the gate of
+    /// (`merged`, spec §5.5 S0).
+    pub(super) merged: Option<(u64, [u8; 16])>,
 }
 impl Landing {
     /// The entry `p` of the state `kh` written over this PC's key file
@@ -358,7 +371,14 @@ impl Landing {
         p.state.flags.t = true;
         p.opt = self.opt;
         p.state.flags.p =
-            p.state.magic == *Magic::Ks01.bytes() && matches!(p.kind, 2 | 3 | 4 | 5 | 8);
+            p.state.magic == *Magic::Ks01.bytes() && matches!(p.kind, 2 | 3 | 4 | 5 | 6 | 8);
+        if let Some(ks) = self.ks {
+            p.state.ks = ks;
+        }
+        p.clears.g |= self.clear_gate;
+        if self.merged.is_some() {
+            p.merged = self.merged;
+        }
         for t in &mut p.state.tombs {
             if self.removed.iter().any(|(_, c)| *c == t.credhash) {
                 t.origin = anchor::Origin::Own;
@@ -891,6 +911,7 @@ impl Session {
             credhash: slot.credhash,
             number: slot.number,
             reach,
+            transport: touch.transport,
         }))
     }
     /// Spec §5.2 step 9(c): after an unlock, the pair records of the key it
@@ -1202,9 +1223,17 @@ impl Session {
                 NOT_PLANNED
             });
         }
-        // W2.
+        // W2: for a GOYOKS01 result also above the server's file this PC
+        // holds or the cut's floor, each within its bound (spec §5.5).
+        let ks01 = match &change {
+            Change::KeySyncOn => true,
+            Change::KeySyncOff | Change::KeysOff | Change::KeysOn { .. } => false,
+            _ => own.as_ref().is_some_and(|h| h.magic == Magic::Ks01),
+        };
+        let server = if ks01 { self.server_epoch() } else { 0 };
         let epoch = self
             .max_epoch
+            .max(server)
             .checked_add(1)
             .filter(|e| *e <= EPOCH_MAX)
             .ok_or(EPOCH_LIMIT)?;
@@ -1403,6 +1432,37 @@ impl Session {
                             return Err(NOT_PLANNED);
                         }
                         t.kind = Kind::Pair;
+                    }
+                    // Key-file sync on, or the re-upload after a cut (spec
+                    // §7.9): R0 is §7.9's preconditions in their order, the
+                    // transport the Reauth's touch stated; the same keyset
+                    // and data key, `ks = on.<seq>`.
+                    Change::KeySyncOn => {
+                        if !extra.is_empty() {
+                            return Err(NOT_PLANNED);
+                        }
+                        let floor = self.keysync_on_check()?;
+                        if a.transport.is_none() {
+                            return Err(super::super::keysync::KEYSYNC_NOTRANSPORT);
+                        }
+                        if epoch <= floor {
+                            return Err(super::super::keysync::KEYSYNC_FLOOR);
+                        }
+                        t.landing.ks = Some(self.on_ks()?);
+                        (t.kind, t.sync, t.pin) = (Kind::SyncOn, true, true);
+                    }
+                    // Key-file sync off (spec §7.16): GOYOKH01 under a new
+                    // data key; `kreq` and `kview` deleted first, the S0
+                    // entry carries the snapshot's `ks` and clears a pending
+                    // gate.
+                    Change::KeySyncOff => {
+                        if h.magic != Magic::Ks01 || !extra.is_empty() {
+                            return Err(super::super::keysync::KEYSYNC_NOT_ON);
+                        }
+                        let ks = self.off_snapshot();
+                        self.off_delete();
+                        (t.landing.ks, t.landing.clear_gate) = (Some(ks), true);
+                        (t.kind, t.rotate, t.sync) = (Kind::SyncOff, true, false);
                     }
                     Change::ReSeed(keys) => {
                         if !extra.is_empty()
@@ -1720,12 +1780,11 @@ impl Session {
 
     /// Keys off (spec §5.5): GOYOKE03 under a new data key, every former
     /// slot tombstoned at the new epoch, sealed with the current password.
-    /// A GOYOKS01 key file needs the off sequence of key-file sync first
-    /// (§7.16, a later stage).
+    /// A GOYOKS01 key file goes through the off sequence of key-file sync
+    /// (§7.16): `kreq` and `kview` deleted first, the S0 entry with the
+    /// snapshot's `ks`, a pending gate cleared.
     fn keys_off(&mut self, r: Reauth, h: &KeyHeader, epoch: u64) -> Result<Rekeyed> {
-        if h.magic != Magic::Kh01 {
-            return Err(KEYSOFF_SYNCED);
-        }
+        let synced = h.magic == Magic::Ks01;
         if h.tombstones.len() + h.slots.len() > TOMB_MAX {
             return Err(TOMBSTONES_FULL);
         }
@@ -1753,9 +1812,15 @@ impl Session {
         let (bytes, writer) = keyfile::seal(&spec, &bundle, &r.password, Plan::PasswordOnly)?;
         let mut built = self.built(bytes, &writer, &spec, &bundle, Some(probe))?;
         drop(writer);
+        let ks = synced.then(|| self.off_snapshot());
+        if synced {
+            self.off_delete();
+        }
         built.landing = Landing {
             strict: true,
             removed: h.slots.iter().map(|s| (s.number, s.credhash)).collect(),
+            ks,
+            clear_gate: synced,
             ..Landing::default()
         };
         let rekeyed = self.land(built, anchor::Src::Other, None);
@@ -1800,7 +1865,7 @@ pub(super) struct UnionPlan {
     suspended: Vec<[u8; 16]>,
     tombstones: Vec<Tombstone>,
     next: u8,
-    sync: bool,
+    pub(super) sync: bool,
     pin: bool,
     /// This PC's keys whose number the other file took: (old, new)
     /// (S-ADOPT-RENUMBER).
@@ -1814,7 +1879,7 @@ pub(super) struct UnionPlan {
     /// The same keys by credential, for S-SUSPEND's names and its extra
     /// touches (spec §7.15a: this PC names them by its own numbers).
     pub unreached_keys: Vec<[u8; 16]>,
-    landing: Landing,
+    pub(super) landing: Landing,
 }
 impl UnionPlan {
     /// Keys the result leaves suspended, by number.
@@ -2250,12 +2315,6 @@ impl Session {
                     && slots.iter().all(SlotPublic::pin)
             }
         };
-        // Key-file sync turned on by an adopt needs S-KEYSYNC-ON's consent
-        // and the transport check (spec §5.8, §7.9), which arrive with
-        // key-file sync: until then such a union is not written.
-        if sync && own.is_none_or(|h| h.magic != Magic::Ks01) {
-            return Err(NOT_PLANNED);
-        }
         Ok(UnionPlan {
             authorizer: authorizer.unwrap_or_default(),
             slots,
@@ -2328,6 +2387,9 @@ impl Session {
             built.landing = Landing {
                 strict: true,
                 opt: plan.landing.opt,
+                ks: plan.landing.ks,
+                clear_gate: plan.landing.clear_gate,
+                merged: plan.landing.merged,
                 ..Landing::default()
             };
             let rekeyed = self.land(built, anchor::Src::Adopt, pw);
@@ -2442,7 +2504,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::super::super::{
-        CRASH, KeyNotice, SIMULATED_CRASH, THEN, anchor::Origin, decode_data, keyfile::parse,
+        CRASH, KeyNotice, SIMULATED_CRASH, THEN,
+        anchor::{Ks, Origin},
+        decode_data,
+        keyfile::parse,
         not_a_failure, prepare, prepare_restore, refusal_values,
     };
     use super::super::tests::{
@@ -3770,6 +3835,12 @@ mod tests {
         Pair,
         ReSeed,
         KeysOff,
+        /// Key-file sync turned on (PIN keys, a server view of nothing).
+        KeySyncOn,
+        /// Key-file sync turned off, and keys off, of a GOYOKS01 key file
+        /// whose record (1) is the server's top.
+        KeySyncOff,
+        KeysOffKs,
     }
     impl What {
         /// The change sets the password NEW.
@@ -3781,7 +3852,14 @@ mod tests {
         }
         /// The change keeps the data key: no V_probe, no S1.
         fn keeps(self) -> bool {
-            matches!(self, Self::AddKey | Self::AddKeyAlone | Self::Pair)
+            matches!(
+                self,
+                Self::AddKey | Self::AddKeyAlone | Self::Pair | Self::KeySyncOn
+            )
+        }
+        /// A key-file sync row: PIN keys, sync on and a server view.
+        fn keysync(self) -> bool {
+            matches!(self, Self::KeySyncOn | Self::KeySyncOff | Self::KeysOffKs)
         }
         /// The keys a removal takes out, by number.
         fn removes(self) -> &'static [u8] {
@@ -3863,12 +3941,69 @@ mod tests {
                 plan.confirm(&t).unwrap();
                 (r, Vec::new(), Change::ReSeed(plan.finish().unwrap()))
             }
-            What::KeysOff => (
+            What::KeysOff | What::KeysOffKs => (
                 reauth(s, OLD, codes, keys, 1).unwrap(),
                 Vec::new(),
                 Change::KeysOff,
             ),
+            What::KeySyncOn => (
+                reauth(s, OLD, codes, keys, 1).unwrap(),
+                Vec::new(),
+                Change::KeySyncOn,
+            ),
+            What::KeySyncOff => (
+                reauth(s, OLD, codes, keys, 1).unwrap(),
+                Vec::new(),
+                Change::KeySyncOff,
+            ),
         }
+    }
+    /// `kview` as goyo-sync writes it: `seq` with its record, and the
+    /// request it answered.
+    fn plant_view(pc: &Pc, seq: u64, record: Vec<u8>, answered: Option<[u8; 32]>) {
+        let dir = syncfile::sync_dir(&pc.vault()).unwrap();
+        let view = syncfile::KeyView {
+            seq,
+            record,
+            answered,
+            outcome: if answered.is_some() {
+                syncfile::KeyOutcome::Applied
+            } else {
+                syncfile::KeyOutcome::None
+            },
+            ..syncfile::KeyView::default()
+        };
+        fs::write(
+            dir.join(syncfile::KEY_VIEW),
+            syncfile::render_key_view(&view),
+        )
+        .unwrap();
+    }
+    /// A key-file sync row's state before its change: a server view of no
+    /// record; for an off, key-file sync turned on and its record landed
+    /// (record 1, this PC's own: Equal).
+    fn keysync_setup(what: What, pc: &Pc, s: &mut Session, codes: &mut Codes, keys: &Keys) {
+        plant_view(pc, 0, Vec::new(), None);
+        s.poll_sync();
+        if what == What::KeySyncOn {
+            return;
+        }
+        let r = reauth(s, OLD, codes, keys, 1).unwrap();
+        let on = s.rekey(r, Vec::new(), Change::KeySyncOn, Consent::default(), true);
+        assert_eq!(on, Ok(Rekeyed::Done));
+        let dir = syncfile::sync_dir(&pc.vault()).unwrap();
+        let req = fs::read(dir.join(syncfile::KEY_REQUEST)).unwrap();
+        let file = fs::read(pc.key()).unwrap();
+        let epoch = header(pc).epoch;
+        let mut record =
+            syncfile::render_record_header(syncfile::RecordKind::Key, false, 0, epoch).to_vec();
+        record.extend_from_slice(&file);
+        plant_view(pc, 1, record, Some(super::super::super::sha256(&req)));
+        for _ in 0..3 {
+            s.poll_sync();
+        }
+        assert_eq!(s.server_class(), Some(super::super::super::KeyClass::Equal));
+        assert!(!dir.join(syncfile::KEY_REQUEST).exists());
     }
     /// A change with keys killed at `point`, then unlocked again (spec §5.6,
     /// §14.5): I1 to I6, I15 and I16.
@@ -3878,10 +4013,15 @@ mod tests {
         let (mut s, mut codes, mut keys) = if what == What::KeysOn {
             let (s, codes) = setup(&pc, true, with_otp, sync);
             (s, codes, Keys::new())
+        } else if what.keysync() {
+            create_with(&pc, 3, with_otp, sync, true)
         } else {
             create(&pc, 3, with_otp, sync)
         };
         let id = s.id;
+        if what.keysync() {
+            keysync_setup(what, &pc, &mut s, &mut codes, &keys);
+        }
         let before = secrets(&s);
         let old_key = fs::read(pc.key()).unwrap();
         let had_anchor = !pc.anchor().is_empty();
@@ -3969,6 +4109,45 @@ mod tests {
         assert_eq!(line.vkey, Some(k.current_key_id()), "{case}");
         assert_eq!(line.state.hardware(), !k.slots.is_empty(), "{case}");
         assert!(anchor_doc(&pc).is_clean(), "{case}");
+        // C-Q, C10, C12 and I10 (spec §5.6, §14.5): key-file sync's `ks`
+        // and `kreq` after the recovery unlock and its first poll.
+        if what.keysync() {
+            s.poll_sync();
+            let dir = syncfile::sync_dir(&pc.vault()).unwrap();
+            let req = fs::read(dir.join(syncfile::KEY_REQUEST)).ok();
+            let req = req
+                .as_deref()
+                .map(|b| syncfile::parse_key_request(b, &id).unwrap());
+            let ks = pc.lines(&id).vault.unwrap().state.ks;
+            let on = what == What::KeySyncOn;
+            match (on, landed) {
+                // C12: the PUT on the view's record (0), the `p` flag.
+                (true, true) => {
+                    assert_eq!(k.magic, Magic::Ks01, "{case}");
+                    assert_eq!(ks, Ks::On(0), "{case}");
+                    let req = req.expect("the PUT");
+                    assert_eq!((req.op, req.base), (syncfile::KeyOp::Put, 0), "{case}");
+                    assert!(pc.lines(&id).vault.unwrap().state.flags.p, "{case}");
+                }
+                (true, false) => {
+                    assert_eq!(k.magic, Magic::Kh01, "{case}");
+                    assert_eq!((ks, req.is_none()), (Ks::None, true), "{case}");
+                }
+                // C10: CUT(L) of the record the view showed.
+                (false, true) => {
+                    assert_ne!(k.magic, Magic::Ks01, "{case}");
+                    assert_eq!(ks, Ks::Off(1), "{case}");
+                    let req = req.expect("the CUT");
+                    assert_eq!((req.op, req.base), (syncfile::KeyOp::Cut, 1), "{case}");
+                }
+                // C-Q: all or nothing; no CUT for an off that never landed.
+                (false, false) => {
+                    assert_eq!(k.magic, Magic::Ks01, "{case}");
+                    assert_eq!(ks, Ks::None, "{case}");
+                    assert!(req.is_none_or(|r| r.op != syncfile::KeyOp::Cut), "{case}");
+                }
+            }
+        }
         // I4: a landed change of the data key leaves the old key file with
         // its old factors unable to open the vault file.
         if landed && !what.keeps() {
@@ -4030,9 +4209,16 @@ mod tests {
             What::Pair,
             What::ReSeed,
             What::KeysOff,
+            What::KeySyncOn,
+            What::KeySyncOff,
+            What::KeysOffKs,
         ] {
             for with_otp in [false, true] {
                 for sync in [false, true] {
+                    // Key-file sync needs vault sync.
+                    if what.keysync() && !sync {
+                        continue;
+                    }
                     for point in POINTS {
                         if what.keeps() && point.starts_with("S1") {
                             continue;
@@ -4228,6 +4414,7 @@ mod tests {
         };
         use super::super::super::adopt::{ADOPT_STALE, NOT_THIS_VAULT};
         use super::*;
+        mod keysync;
 
         /// A second PC with copies of `a`'s vault file and key file. Its
         /// first unlock (with key `number`) is a bootstrap, confirmed with
@@ -4285,6 +4472,7 @@ mod tests {
                 },
                 both_passwords: p.both_passwords,
                 fork_option: option,
+                keysync_on: p.keysync_on,
             }
         }
         /// The whole adopt of `other` with keys as the flow runs it (spec

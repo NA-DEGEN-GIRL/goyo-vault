@@ -2,7 +2,14 @@
 //! ssh child's stdin, one response on its stdout, then EOF. Little endian.
 //! Both directions carry the exact blob length and its SHA-256, so a cut
 //! stream, a line-ending translation or shell output cannot pass as data.
-//! Only the helper and tests use this; goyo-vault.exe never calls it.
+//! Only the helper and tests use this; goyo-vault.exe never calls it. The
+//! key ops (PUTKEY, GETKEY, CUTKEY and PRUNE, spec v3 §7.13) exist only in
+//! the security-key build: the default helper cannot encode one.
+#[cfg(feature = "security-key")]
+use crate::{
+    syncfile::{MAX_RECORD, RECORD_HEADER, RecordKind, parse_record, parse_record_header},
+    vault::keyfile::{EPOCH_MAX, KEY_FILE_LIMIT, is_sync_key_file},
+};
 use crate::{
     syncfile::{decimal, is_sync_vault, newer_vault_format, parse_hex},
     vault::MAX_FILE,
@@ -41,9 +48,34 @@ pub enum Op {
     Put = 3,
     List = 4,
     Fetch = 5,
+    /// Store a GOYOKS01 key file as the record after `base` (the record CAS).
+    #[cfg(feature = "security-key")]
+    PutKey = 6,
+    /// The server's top key record, never an older one.
+    #[cfg(feature = "security-key")]
+    GetKey = 7,
+    /// End the generation that holds record `base`.
+    #[cfg(feature = "security-key")]
+    CutKey = 8,
+    /// Drop the stored vault versions below an epoch.
+    #[cfg(feature = "security-key")]
+    Prune = 9,
 }
 impl Op {
+    #[cfg(not(feature = "security-key"))]
     pub const ALL: [Op; 5] = [Op::Hello, Op::Get, Op::Put, Op::List, Op::Fetch];
+    #[cfg(feature = "security-key")]
+    pub const ALL: [Op; 9] = [
+        Op::Hello,
+        Op::Get,
+        Op::Put,
+        Op::List,
+        Op::Fetch,
+        Op::PutKey,
+        Op::GetKey,
+        Op::CutKey,
+        Op::Prune,
+    ];
     pub fn code(self) -> u8 {
         self as u8
     }
@@ -115,6 +147,11 @@ pub enum WireError {
     Echo,
     /// The version breaks the rule for this reply.
     Version,
+    /// A key record or record header outside the server's grammar for this
+    /// vault (spec v3 §7.13), or a CUTKEY answer that does not end the
+    /// generation asked for.
+    #[cfg(feature = "security-key")]
+    Record,
 }
 impl WireError {
     /// Fixed English text for the helper's log.
@@ -131,6 +168,8 @@ impl WireError {
             Self::NewerFormat => "vault from a newer version",
             Self::Echo => "binary echo differs",
             Self::Version => "unexpected version",
+            #[cfg(feature = "security-key")]
+            Self::Record => "not a key record of this vault",
         }
     }
 }
@@ -219,6 +258,61 @@ impl<'a> Request<'a> {
             blob: &[],
         }
     }
+    /// PUTKEY: the record CAS onto record `base`. Refuses anything but a
+    /// GOYOKS01 key file of `id`, and a `base` above `EPOCH_MAX`.
+    #[cfg(feature = "security-key")]
+    pub fn put_key(id: [u8; 16], base: u64, key_file: &'a [u8]) -> Result<Self, WireError> {
+        if base > EPOCH_MAX || is_sync_key_file(key_file, &id).is_none() {
+            return Err(WireError::Record);
+        }
+        Ok(Self {
+            op: Op::PutKey,
+            vault_id: id,
+            version: base,
+            blob_sha: sha256(key_file),
+            blob: key_file,
+        })
+    }
+    /// GETKEY: `have` and `have_sha` are the record number and the SHA-256
+    /// of the record already held (0 and None for none).
+    #[cfg(feature = "security-key")]
+    pub fn get_key(id: [u8; 16], have: u64, have_sha: Option<[u8; 32]>) -> Self {
+        Self {
+            op: Op::GetKey,
+            vault_id: id,
+            version: have,
+            blob_sha: have_sha.unwrap_or([0; 32]),
+            blob: &[],
+        }
+    }
+    /// CUTKEY: end the generation that holds record `base`.
+    #[cfg(feature = "security-key")]
+    pub fn cut_key(id: [u8; 16], base: u64) -> Result<Self, WireError> {
+        if base > EPOCH_MAX {
+            return Err(WireError::Version);
+        }
+        Ok(Self {
+            op: Op::CutKey,
+            vault_id: id,
+            version: base,
+            blob_sha: [0; 32],
+            blob: &[],
+        })
+    }
+    /// PRUNE: drop the stored versions whose header epoch is below `epoch`.
+    #[cfg(feature = "security-key")]
+    pub fn prune(id: [u8; 16], epoch: u64) -> Result<Self, WireError> {
+        if !(1..=EPOCH_MAX).contains(&epoch) {
+            return Err(WireError::Version);
+        }
+        Ok(Self {
+            op: Op::Prune,
+            vault_id: id,
+            version: epoch,
+            blob_sha: [0; 32],
+            blob: &[],
+        })
+    }
     /// Header and blob, exactly as given (tests build invalid frames too).
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(REQUEST_HEADER + self.blob.len());
@@ -234,8 +328,10 @@ impl<'a> Request<'a> {
     /// The server's frame rules: magic at offset 0, a known op, a zero ID
     /// for HELLO and LIST and a nonzero one otherwise, HELLO version 1 and
     /// LIST version 0, `blob_len` exactly what follows (HELLO 512, PUT up to
-    /// 8 MiB, none otherwise) and a matching SHA. Whether a PUT blob is a
-    /// vault is the server's BAD_BLOB check.
+    /// 8 MiB, PUTKEY up to 32 KiB, none otherwise) and a matching SHA (GET
+    /// and GETKEY carry `have_sha` there); CUTKEY's version at most
+    /// `EPOCH_MAX` and PRUNE's at least 1. Whether a PUT or PUTKEY blob is a
+    /// vault or a key file is the server's BAD_BLOB check.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, WireError> {
         if bytes.len() < REQUEST_HEADER {
             return Err(WireError::Truncated);
@@ -258,6 +354,10 @@ impl<'a> Request<'a> {
             Op::Hello => len == HELLO_ECHO.len(),
             Op::Put => len <= MAX_FILE,
             Op::Get | Op::List | Op::Fetch => len == 0,
+            #[cfg(feature = "security-key")]
+            Op::PutKey => len <= KEY_FILE_LIMIT,
+            #[cfg(feature = "security-key")]
+            Op::GetKey | Op::CutKey | Op::Prune => len == 0,
         };
         if !fits || blob.len() != len {
             return Err(WireError::Length);
@@ -266,6 +366,12 @@ impl<'a> Request<'a> {
             Op::Hello | Op::Put => sha256(blob) == blob_sha,
             Op::Get => true,
             Op::List | Op::Fetch => blob_sha == [0; 32],
+            #[cfg(feature = "security-key")]
+            Op::PutKey => sha256(blob) == blob_sha,
+            #[cfg(feature = "security-key")]
+            Op::GetKey => true,
+            #[cfg(feature = "security-key")]
+            Op::CutKey | Op::Prune => blob_sha == [0; 32],
         };
         if !sha_ok {
             return Err(WireError::Sha);
@@ -274,6 +380,12 @@ impl<'a> Request<'a> {
             Op::Hello => version == PROTOCOL,
             Op::List => version == 0,
             Op::Get | Op::Put | Op::Fetch => true,
+            #[cfg(feature = "security-key")]
+            Op::PutKey | Op::GetKey => true,
+            #[cfg(feature = "security-key")]
+            Op::CutKey => version <= EPOCH_MAX,
+            #[cfg(feature = "security-key")]
+            Op::Prune => version >= 1,
         };
         if !version_fits {
             return Err(WireError::Version);
@@ -295,6 +407,12 @@ enum Body {
     Vault,
     Echo,
     List,
+    /// A key record as served, numbered by the reply's version.
+    #[cfg(feature = "security-key")]
+    Record,
+    /// Exactly the 32-byte header of the key record a PUTKEY made.
+    #[cfg(feature = "security-key")]
+    RecordHeader,
 }
 /// The replies each op accepts. Any op may get BAD_REQUEST (the server could
 /// not read the frame, so it may not know the op) or SERVER_ERROR.
@@ -308,10 +426,20 @@ fn body(op: Op, status: Status) -> Option<Body> {
         | (Op::Put, S::Ok | S::Empty | S::BadBlob | S::TooLarge | S::Limit | S::KeyBehind)
         | (Op::Fetch, S::NotFound) => Body::Nothing,
         (Op::List, S::Ok) => Body::List,
+        #[cfg(feature = "security-key")]
+        (Op::PutKey, S::Ok) => Body::RecordHeader,
+        #[cfg(feature = "security-key")]
+        (Op::PutKey, S::Conflict) | (Op::GetKey | Op::CutKey, S::Ok) => Body::Record,
+        #[cfg(feature = "security-key")]
+        (Op::PutKey, S::Empty | S::BadBlob | S::TooLarge | S::Limit)
+        | (Op::GetKey, S::NotModified | S::Empty)
+        | (Op::CutKey, S::Limit)
+        | (Op::Prune, S::Ok | S::NotFound) => Body::Nothing,
         _ => return None,
     })
 }
-/// `have` is the request's version field: GET have, PUT expected, FETCH N.
+/// `have` is the request's version field: GET have, PUT expected, FETCH N;
+/// PUTKEY and CUTKEY `base`, GETKEY have, PRUNE the epoch.
 fn version_ok(op: Op, status: Status, version: u64, have: u64) -> bool {
     match (op, status) {
         (Op::Hello, Status::Ok) => version == PROTOCOL,
@@ -323,6 +451,18 @@ fn version_ok(op: Op, status: Status, version: u64, have: u64) -> bool {
         (Op::Put, Status::Empty) => have >= 1 && version == 0,
         (Op::Put, Status::Ok) => have.checked_add(1) == Some(version),
         (Op::Fetch, Status::Ok) => version >= 1 && (have == 0 || version == have),
+        // Record numbers run from 1 to EPOCH_MAX (spec v3 §7.13): PUTKEY's
+        // CAS makes base + 1, and EMPTY carries 0 for any base.
+        #[cfg(feature = "security-key")]
+        (Op::PutKey, Status::Ok) => have.checked_add(1) == Some(version) && version <= EPOCH_MAX,
+        #[cfg(feature = "security-key")]
+        (Op::PutKey, Status::Conflict) | (Op::GetKey | Op::CutKey, Status::Ok) => {
+            (1..=EPOCH_MAX).contains(&version)
+        }
+        #[cfg(feature = "security-key")]
+        (Op::GetKey, Status::NotModified) => (1..=EPOCH_MAX).contains(&have) && version == have,
+        #[cfg(feature = "security-key")]
+        (Op::PutKey | Op::GetKey, Status::Empty) | (Op::Prune, Status::NotFound) => version == 0,
         // LIST's count is checked against its lines; errors carry no version.
         _ => true,
     }
@@ -361,7 +501,11 @@ impl<'a> Response<'a> {
     /// banner bytes skipped before it, for the log. The reply must be one
     /// the op allows, with exactly `blob_len` bytes after the header, a
     /// matching SHA-256 and a blob only where one belongs; a vault blob must
-    /// pass [`check_vault_blob`]. Anything else is a protocol error.
+    /// pass [`check_vault_blob`]. A key record must be one of `id` numbered
+    /// by the reply's version, and CUTKEY's a cut or a key record of a later
+    /// generation than `have`; PUTKEY OK carries exactly a key-record header
+    /// (its `floor` is the uploaded file's epoch, which the caller checks).
+    /// Anything else is a protocol error.
     pub fn decode(
         bytes: &'a [u8],
         op: Op,
@@ -389,6 +533,10 @@ impl<'a> Response<'a> {
             Body::Vault => MAX_FILE,
             Body::Echo => HELLO_ECHO.len(),
             Body::List => MAX_LIST,
+            #[cfg(feature = "security-key")]
+            Body::Record => MAX_RECORD,
+            #[cfg(feature = "security-key")]
+            Body::RecordHeader => RECORD_HEADER,
         };
         if len > limit || blob.len() != len {
             return Err(WireError::Length);
@@ -405,6 +553,22 @@ impl<'a> Response<'a> {
                     return Err(WireError::Version);
                 }
             }
+            #[cfg(feature = "security-key")]
+            Body::Record => {
+                let record = parse_record(blob, version, id).ok_or(WireError::Record)?;
+                // A CUTKEY that left the generation it was asked to end on
+                // top would leave the off pending for good.
+                let ended = record.kind == RecordKind::Cut || record.generation > have;
+                if op == Op::CutKey && !ended {
+                    return Err(WireError::Record);
+                }
+            }
+            #[cfg(feature = "security-key")]
+            Body::RecordHeader => match parse_record_header(blob) {
+                Some((RecordKind::Key, false, generation, _))
+                    if blob.len() == RECORD_HEADER && generation < version => {}
+                _ => return Err(WireError::Record),
+            },
             _ => {}
         }
         if !version_ok(op, status, version, have) {
@@ -469,6 +633,8 @@ mod tests {
     const ID: [u8; 16] = [0x3F; 16];
     /// The request's version field in reply tests.
     const HAVE: u64 = 4;
+    /// The vault ops, which both builds have.
+    const VAULT_OPS: [Op; 5] = [Op::Hello, Op::Get, Op::Put, Op::List, Op::Fetch];
     /// Blob kinds, indexes into `blobs()`.
     const NOTHING: usize = 0;
     const VAULT: usize = 1;
@@ -562,7 +728,10 @@ mod tests {
         let codes: Vec<u8> = Status::ALL.iter().map(|s| s.code()).collect();
         assert_eq!(codes, [0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20]);
         let ops: Vec<u8> = Op::ALL.iter().map(|o| o.code()).collect();
+        #[cfg(not(feature = "security-key"))]
         assert_eq!(ops, [1, 2, 3, 4, 5]);
+        #[cfg(feature = "security-key")]
+        assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
     #[test]
     fn every_frame_round_trips() {
@@ -602,7 +771,7 @@ mod tests {
     #[test]
     fn only_listed_replies_are_accepted() {
         let blobs = blobs();
-        for op in Op::ALL {
+        for op in VAULT_OPS {
             for status in Status::ALL {
                 for (kind, blob) in blobs.iter().enumerate() {
                     let bytes = reply(status, good_version(op, status), blob);
@@ -819,7 +988,13 @@ mod tests {
         let mut bad = put.clone();
         bad[0] = b'X';
         assert_eq!(Request::decode(&bad), Err(WireError::Magic));
-        for op in [0, 6, 255] {
+        // The key ops (6 to 9) exist only in the security-key build.
+        let unknown = if cfg!(feature = "security-key") {
+            10
+        } else {
+            6
+        };
+        for op in [0, unknown, 255] {
             let mut bad = Request::list().encode();
             bad[8] = op;
             assert_eq!(Request::decode(&bad), Err(WireError::Code));
@@ -931,6 +1106,380 @@ mod tests {
             assert!(Request::put(ID, 0, &blob).is_ok());
         }
     }
+    /// The key ops (spec v3 §7.13), in the security-key build only.
+    #[cfg(feature = "security-key")]
+    mod keys {
+        use super::*;
+        use crate::syncfile::render_record_header;
+        /// The GOYOKS01 fixture: vault 3a3b…49, epoch 9.
+        const KS: &[u8] = include_bytes!("../tests/fixtures/goyoks01.goyokey");
+        fn id() -> [u8; 16] {
+            KS[8..24].try_into().unwrap()
+        }
+        fn ks(epoch: u64) -> Vec<u8> {
+            let mut f = KS.to_vec();
+            f[24..32].copy_from_slice(&epoch.to_le_bytes());
+            f
+        }
+        fn key_record(generation: u64, epoch: u64) -> Vec<u8> {
+            let mut r = render_record_header(RecordKind::Key, false, generation, epoch).to_vec();
+            r.extend_from_slice(&ks(epoch));
+            r
+        }
+        fn cut(number: u64, floor: u64) -> Vec<u8> {
+            render_record_header(RecordKind::Cut, false, number, floor).to_vec()
+        }
+        fn decode(bytes: &[u8], op: Op, have: u64) -> Result<Response<'_>, WireError> {
+            Response::decode(bytes, op, &id(), have).map(|(r, _)| r)
+        }
+        fn reply(status: Status, version: u64, blob: &[u8]) -> Vec<u8> {
+            Response::new(status, version, blob).encode()
+        }
+
+        #[test]
+        fn key_requests_follow_the_server_rules() {
+            let id = id();
+            let file = ks(12);
+            let requests = [
+                Request::put_key(id, 0, &file).unwrap(),
+                Request::put_key(id, EPOCH_MAX, &file).unwrap(),
+                Request::get_key(id, 0, None),
+                Request::get_key(id, 5, Some([7; 32])),
+                Request::cut_key(id, 0).unwrap(),
+                Request::cut_key(id, EPOCH_MAX).unwrap(),
+                Request::prune(id, 1).unwrap(),
+                Request::prune(id, EPOCH_MAX).unwrap(),
+            ];
+            for r in requests {
+                let bytes = r.encode();
+                assert_eq!(bytes[8], r.op.code());
+                assert_eq!(Request::decode(&bytes), Ok(r), "{:?}", r.op);
+            }
+            assert_eq!(requests[0].blob_sha, sha256(&file));
+            // Only a GOYOKS01 file of this vault is put, and every number
+            // stays within EPOCH_MAX (prune's epoch from 1).
+            let mut kh = file.clone();
+            kh[..8].copy_from_slice(b"GOYOKH01");
+            let mut vault = file.clone();
+            vault[..8].copy_from_slice(b"GOYOVA04");
+            for bad in [&kh, &vault, &ks(EPOCH_MAX + 1), &file[..488].to_vec()] {
+                assert_eq!(Request::put_key(id, 0, bad), Err(WireError::Record));
+            }
+            assert_eq!(
+                Request::put_key([0x40; 16], 0, &file),
+                Err(WireError::Record)
+            );
+            assert_eq!(
+                Request::put_key(id, EPOCH_MAX + 1, &file),
+                Err(WireError::Record)
+            );
+            assert_eq!(Request::cut_key(id, EPOCH_MAX + 1), Err(WireError::Version));
+            assert_eq!(Request::prune(id, 0), Err(WireError::Version));
+            assert_eq!(Request::prune(id, EPOCH_MAX + 1), Err(WireError::Version));
+            // The server's frame rules for ops 6 to 9.
+            let with = |r: Request, f: &dyn Fn(&mut Vec<u8>)| {
+                let mut b = r.encode();
+                f(&mut b);
+                Request::decode(&b).map(|_| ())
+            };
+            let cut = Request::cut_key(id, 3).unwrap();
+            let prune = Request::prune(id, 3).unwrap();
+            assert_eq!(with(cut, &|b| b[37] = 1), Err(WireError::Sha));
+            assert_eq!(with(prune, &|b| b[37] = 1), Err(WireError::Sha));
+            assert_eq!(
+                with(cut, &|b| b[25..33]
+                    .copy_from_slice(&(EPOCH_MAX + 1).to_le_bytes())),
+                Err(WireError::Version)
+            );
+            assert_eq!(with(prune, &|b| b[25..33].fill(0)), Err(WireError::Version));
+            assert_eq!(with(cut, &|b| b[9..25].fill(0)), Err(WireError::Id));
+            for r in [cut, prune, Request::get_key(id, 1, None)] {
+                let with_blob = Request {
+                    blob: b"x",
+                    blob_sha: sha256(b"x"),
+                    ..r
+                };
+                assert_eq!(Request::decode(&with_blob.encode()), Err(WireError::Length));
+            }
+            let put = Request::put_key(id, 1, &file).unwrap();
+            assert_eq!(
+                with(put, &|b| *b.last_mut().unwrap() ^= 1),
+                Err(WireError::Sha)
+            );
+            let big = vec![0u8; KEY_FILE_LIMIT + 1];
+            let huge = Request {
+                blob: &big,
+                blob_sha: sha256(&big),
+                ..put
+            };
+            assert_eq!(Request::decode(&huge.encode()), Err(WireError::Length));
+        }
+
+        /// The answer rules of ops 6-9 (spec v3 §7.13, S6-2 #20): each op
+        /// gets only its own statuses, with the version and the record each
+        /// one carries.
+        #[test]
+        fn key_replies_follow_the_answer_rules() {
+            let base = 4;
+            let header = render_record_header(RecordKind::Key, false, 2, 12);
+            // (op, status, version, blob, the request's version)
+            let good: Vec<(Op, Status, u64, Vec<u8>, u64)> = vec![
+                (Op::PutKey, Status::Ok, base + 1, header.to_vec(), base),
+                (Op::PutKey, Status::Conflict, 7, key_record(3, 12), base),
+                (Op::PutKey, Status::Conflict, 7, cut(7, 12), base),
+                (Op::PutKey, Status::Empty, 0, vec![], base),
+                (Op::PutKey, Status::Empty, 0, vec![], 0),
+                (Op::PutKey, Status::BadBlob, 0, vec![], base),
+                (Op::PutKey, Status::TooLarge, 0, vec![], base),
+                (Op::PutKey, Status::Limit, 0, vec![], base),
+                (Op::GetKey, Status::Ok, 7, key_record(3, 12), 0),
+                (Op::GetKey, Status::Ok, 2, key_record(1, 12), 7), // went back
+                (
+                    Op::GetKey,
+                    Status::Ok,
+                    7,
+                    render_record_header(RecordKind::Cut, true, 7, 4).to_vec(),
+                    7,
+                ),
+                (Op::GetKey, Status::NotModified, 7, vec![], 7),
+                (Op::GetKey, Status::Empty, 0, vec![], 7),
+                (Op::CutKey, Status::Ok, 5, cut(5, 12), base),
+                (Op::CutKey, Status::Ok, 3, cut(3, 12), base), // numbers went back
+                (Op::CutKey, Status::Ok, 9, key_record(base + 1, 12), base),
+                (Op::CutKey, Status::Limit, 0, vec![], base),
+                (Op::Prune, Status::Ok, 3, vec![], 5),
+                (Op::Prune, Status::NotFound, 0, vec![], 5),
+            ];
+            for (op, status, version, blob, have) in &good {
+                let bytes = reply(*status, *version, blob);
+                let r = decode(&bytes, *op, *have);
+                assert_eq!(
+                    r.map(|r| (r.status, r.version)),
+                    Ok((*status, *version)),
+                    "{op:?} {status:?}"
+                );
+            }
+            for op in [Op::PutKey, Op::GetKey, Op::CutKey, Op::Prune] {
+                for status in [Status::BadRequest, Status::ServerError] {
+                    assert!(decode(&reply(status, 0, &[]), op, 1).is_ok());
+                }
+                // Every other status of the op, and a vault blob anywhere.
+                for status in Status::ALL {
+                    let listed = good.iter().any(|g| (g.0, g.1) == (op, status))
+                        || matches!(status, Status::BadRequest | Status::ServerError);
+                    if !listed {
+                        assert_eq!(
+                            decode(&reply(status, 1, &[]), op, 1).err(),
+                            Some(WireError::Code),
+                            "{op:?} {status:?}"
+                        );
+                    }
+                }
+            }
+            let vault = {
+                let mut v = Vec::from(*b"GOYOVA04");
+                v.extend_from_slice(&id());
+                v.resize(300, 1);
+                v
+            };
+            let bad = Err(WireError::Record);
+            // (op, status, version, blob, the request's version, the verdict)
+            type Case = (Op, Status, u64, Vec<u8>, u64, Result<(), WireError>);
+            let cases: Vec<Case> = vec![
+                // CUTKEY's EMPTY is gone (S6R2 #4).
+                (
+                    Op::CutKey,
+                    Status::Empty,
+                    0,
+                    vec![],
+                    base,
+                    Err(WireError::Code),
+                ),
+                // A CUTKEY answer that leaves the generation it ends on top.
+                (Op::CutKey, Status::Ok, 9, key_record(base, 12), base, bad),
+                (Op::CutKey, Status::Ok, 9, key_record(1, 12), base, bad),
+                // Records outside the grammar, numbered by the version.
+                (Op::GetKey, Status::Ok, 3, key_record(3, 12), 0, bad),
+                (Op::GetKey, Status::Ok, 4, cut(3, 12), 0, bad),
+                (Op::GetKey, Status::Ok, 0, cut(0, 12), 0, bad),
+                (
+                    Op::GetKey,
+                    Status::Ok,
+                    EPOCH_MAX + 1,
+                    cut(EPOCH_MAX + 1, 12),
+                    0,
+                    bad,
+                ),
+                (
+                    Op::GetKey,
+                    Status::Ok,
+                    3,
+                    render_record_header(RecordKind::Key, false, 1, 13)
+                        .iter()
+                        .chain(&ks(12))
+                        .copied()
+                        .collect(),
+                    0,
+                    bad,
+                ),
+                (
+                    Op::GetKey,
+                    Status::Ok,
+                    3,
+                    render_record_header(RecordKind::Key, false, 1, 12)
+                        .iter()
+                        .chain(&vault)
+                        .copied()
+                        .collect(),
+                    0,
+                    bad,
+                ),
+                (
+                    Op::GetKey,
+                    Status::Ok,
+                    3,
+                    render_record_header(RecordKind::Cut, false, 3, EPOCH_MAX + 1).to_vec(),
+                    0,
+                    bad,
+                ),
+                (Op::GetKey, Status::Ok, 3, vault.clone(), 0, bad),
+                (Op::PutKey, Status::Conflict, 3, vault.clone(), base, bad),
+                // PUTKEY OK: exactly a key-record header, numbered base + 1.
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    base + 1,
+                    key_record(2, 12),
+                    base,
+                    Err(WireError::Length),
+                ),
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    base + 1,
+                    cut(base + 1, 12),
+                    base,
+                    bad,
+                ),
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    base + 1,
+                    render_record_header(RecordKind::Key, false, base + 1, 12).to_vec(),
+                    base,
+                    bad,
+                ),
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    base + 1,
+                    render_record_header(RecordKind::Cut, true, 2, 12).to_vec(),
+                    base,
+                    bad,
+                ),
+                (Op::PutKey, Status::Ok, base + 1, vec![], base, bad),
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    base + 2,
+                    header.to_vec(),
+                    base,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::PutKey,
+                    Status::Ok,
+                    EPOCH_MAX + 1,
+                    header.to_vec(),
+                    EPOCH_MAX,
+                    Err(WireError::Version),
+                ),
+                // Versions of the blob-less answers.
+                (
+                    Op::PutKey,
+                    Status::Empty,
+                    1,
+                    vec![],
+                    base,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::GetKey,
+                    Status::Empty,
+                    1,
+                    vec![],
+                    base,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::GetKey,
+                    Status::NotModified,
+                    6,
+                    vec![],
+                    7,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::GetKey,
+                    Status::NotModified,
+                    0,
+                    vec![],
+                    0,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::GetKey,
+                    Status::NotModified,
+                    EPOCH_MAX + 1,
+                    vec![],
+                    EPOCH_MAX + 1,
+                    Err(WireError::Version),
+                ),
+                (
+                    Op::Prune,
+                    Status::NotFound,
+                    2,
+                    vec![],
+                    5,
+                    Err(WireError::Version),
+                ),
+                // A blob where none belongs.
+                (
+                    Op::GetKey,
+                    Status::NotModified,
+                    7,
+                    cut(7, 1),
+                    7,
+                    Err(WireError::Blob),
+                ),
+                (
+                    Op::Prune,
+                    Status::Ok,
+                    1,
+                    b"1".to_vec(),
+                    5,
+                    Err(WireError::Blob),
+                ),
+            ];
+            for (i, (op, status, version, blob, have, want)) in cases.into_iter().enumerate() {
+                let got = decode(&reply(status, version, &blob), op, have).map(|_| ());
+                assert_eq!(got, want, "case {i}: {op:?} {status:?}");
+            }
+            // A record past the size limit.
+            let mut long = key_record(1, 12);
+            long.resize(MAX_RECORD + 1, 0);
+            assert_eq!(
+                decode(&reply(Status::Ok, 3, &long), Op::GetKey, 0).err(),
+                Some(WireError::Length)
+            );
+            // The vault ops never take a record.
+            assert_eq!(
+                decode(&reply(Status::Ok, 3, &cut(3, 1)), Op::Get, 0).err(),
+                Some(WireError::Vault)
+            );
+        }
+    }
+
     #[test]
     fn list_lines() {
         let entries = [

@@ -140,12 +140,63 @@ pub enum SyncNotice {
     /// unmerged (D2): a PC that has not taken the new key file wrote it, or
     /// someone with an old key copy.
     OldKeyReplaced,
+    /// The server sent a key file older than one this PC already saw:
+    /// not taken (spec v3 §7.4 KeyRollback).
+    #[cfg(feature = "security-key")]
+    KeyRollback,
+    /// The server's key file failed a public check: sync halts
+    /// (KeyFileRefused{reason}).
+    #[cfg(feature = "security-key")]
+    KeyFileRefused(&'static str),
+    /// The key view holds no readable key file: ignored.
+    #[cfg(feature = "security-key")]
+    BadKeyIncoming,
+    /// A server key file waits for its gate (GatePending): nothing is
+    /// uploaded or merged until it is answered.
+    #[cfg(feature = "security-key")]
+    GatePending,
+    /// The server holds no key file of this GOYOKS01 vault (KeySyncGone).
+    #[cfg(feature = "security-key")]
+    KeySyncGone,
+    /// A key change of another PC that needs no gate waits (KeyFileReady),
+    /// with its epoch.
+    #[cfg(feature = "security-key")]
+    KeyFileReady {
+        epoch: u64,
+    },
+    /// This PC's line serves no key ops for a GOYOKS01 vault (NoKeySync).
+    #[cfg(feature = "security-key")]
+    NoKeySync,
+    /// The server refused this PC's key file (S-KEYUP-REFUSED).
+    #[cfg(feature = "security-key")]
+    KeyUpRefused,
+    /// No helper with key-file sync answered within 10 minutes
+    /// (KeySyncHelper).
+    #[cfg(feature = "security-key")]
+    KeySyncHelper,
+    /// This PC's off was answered: the server's record `seq`; `admin`:
+    /// S-KEYSYNC-OFF-ADMIN follows, once (spec §7.16 step 7).
+    #[cfg(feature = "security-key")]
+    KeySyncDeleted {
+        seq: u64,
+        admin: bool,
+    },
 }
 impl SyncNotice {
     /// Lower wins when one event has several.
     fn rank(&self) -> u8 {
         match self {
             Self::Rollback => 0,
+            #[cfg(feature = "security-key")]
+            Self::KeyRollback => 0,
+            #[cfg(feature = "security-key")]
+            Self::KeyFileRefused(_) | Self::BadKeyIncoming | Self::GatePending => 1,
+            #[cfg(feature = "security-key")]
+            Self::KeySyncGone => 2,
+            #[cfg(feature = "security-key")]
+            Self::KeyFileReady { .. } | Self::KeySyncHelper | Self::KeySyncDeleted { .. } => 3,
+            #[cfg(feature = "security-key")]
+            Self::NoKeySync | Self::KeyUpRefused => 7,
             Self::BadIncoming
             | Self::ForeignIncoming
             | Self::KeyChanged { .. }
@@ -168,6 +219,24 @@ impl SyncNotice {
             Self::SyncOn => 9,
         }
     }
+    /// Whether the key view causes this notice (spec v3 §7.4).
+    #[cfg(feature = "security-key")]
+    fn is_key(&self) -> bool {
+        matches!(
+            self,
+            Self::KeyRollback
+                | Self::KeyFileRefused(_)
+                | Self::BadKeyIncoming
+                | Self::GatePending
+                | Self::KeySyncGone
+                | Self::KeyFileReady { .. }
+                | Self::NoKeySync
+                | Self::KeyUpRefused
+                | Self::KeySyncHelper
+                | Self::KeySyncDeleted { .. }
+                | Self::KeyFork
+        )
+    }
     /// Whether the helper's status file causes this notice.
     fn is_status(&self) -> bool {
         matches!(
@@ -184,7 +253,7 @@ impl SyncNotice {
     }
 }
 /// Keeps the higher-precedence notice of an event.
-fn offer(slot: &mut Option<SyncNotice>, notice: SyncNotice) {
+pub(super) fn offer(slot: &mut Option<SyncNotice>, notice: SyncNotice) {
     if slot.as_ref().is_none_or(|s| notice.rank() < s.rank()) {
         *slot = Some(notice);
     }
@@ -255,9 +324,9 @@ struct Halting {
 
 /// The session's link to an existing `<vault>.sync` folder.
 pub(crate) struct SyncLink {
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
     /// The incoming file last handled; another stamp means a new file.
-    in_stamp: Option<Stamp>,
+    pub(super) in_stamp: Option<Stamp>,
     /// Server version of the incoming last merged, repaired or pushed over,
     /// 0 for none: the base of the next upload.
     merged_version: u64,
@@ -300,13 +369,16 @@ pub(crate) struct SyncLink {
     /// steps add up, and the copy they lead to holds every one.
     losses: Option<(usize, Vec<u8>)>,
     /// The status file at its last read; None while it is missing.
-    status: Option<SyncStatus>,
+    pub(super) status: Option<SyncStatus>,
     /// The status notice last shown, so each is shown once per change.
     issue: Option<SyncNotice>,
     polls: u32,
     code_shown: bool,
     /// The badge after the last poll or edit, for `SyncEvent::badge_changed`.
     last_badge: Option<SyncBadge>,
+    /// The key view and request of key-file sync (spec v3 §7.11).
+    #[cfg(feature = "security-key")]
+    pub(super) keys: super::keysync::KeyLink,
 }
 pub(super) enum Attach {
     /// No usable folder: not set up, or not a plain directory.
@@ -350,9 +422,16 @@ impl SyncLink {
             polls: 0,
             code_shown: false,
             last_badge: None,
+            #[cfg(feature = "security-key")]
+            keys: super::keysync::KeyLink::default(),
         };
         link.read_status();
         Attach::Linked(Box::new(link))
+    }
+    /// A server copy halts sync (`key_halt`).
+    #[cfg(feature = "security-key")]
+    pub(super) fn halted_by_copy(&self) -> bool {
+        self.halt.is_some()
     }
     /// This PC's state is to be uploaded and no longer counts as verified.
     pub(super) fn mark_due(&mut self) {
@@ -449,6 +528,8 @@ impl SyncLink {
             Some(SyncNotice::KeyChanged { .. }) => self.key_changed_told = true,
             Some(SyncNotice::RollbackHeld) => self.rollback_told = true,
             Some(n) if n.is_status() => self.issue = Some(n.clone()),
+            #[cfg(feature = "security-key")]
+            Some(n) if n.is_key() => self.keys.told(n),
             _ => {}
         }
     }
@@ -490,9 +571,21 @@ impl SyncLink {
         got(version, own.judge(header, version, blob, local, now))
     }
 }
+/// Whether `kview` changed since this poll read it (security-key build): a
+/// copy read after it waits for the next poll, which reads the view first,
+/// so a cut that goyo-sync wrote before the copy is never missed (spec v3
+/// §7.12 order rule, S6R2 #1).
+#[cfg(feature = "security-key")]
+fn key_view_moved(link: &SyncLink) -> bool {
+    link.keys.moved(&link.dir)
+}
+#[cfg(not(feature = "security-key"))]
+fn key_view_moved(_: &SyncLink) -> bool {
+    false
+}
 /// Whether the key file is in `dir` or below it, comparing final paths
 /// without regard to case, as Windows does. None if `dir` cannot be resolved.
-fn key_inside(key_path: &Path, dir: &Path) -> Option<bool> {
+pub(super) fn key_inside(key_path: &Path, dir: &Path) -> Option<bool> {
     let dir = fs::canonicalize(dir).ok()?;
     let parent = key_path.parent().unwrap_or(key_path);
     let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
@@ -856,6 +949,10 @@ impl Session {
     fn poll_link(&mut self, link: &mut SyncLink, notice: &mut Option<SyncNotice>) -> bool {
         link.polls = link.polls.wrapping_add(1);
         let mut list_changed = false;
+        // The key view first (spec v3 §7.12 order rule): a copy that came
+        // with a cut or a gated change is held, not merged.
+        #[cfg(feature = "security-key")]
+        self.poll_keys(link, notice);
         if !link.halted {
             let mut upload = true;
             let stamp = syncfile::stamp(&link.dir, INCOMING);
@@ -877,8 +974,15 @@ impl Session {
             link.incoming_gone = gone && link.in_stamp.is_some();
             // New server copies are read during a halt too, so it lifts by
             // itself (spec v3 §7.2).
+            #[allow(unused_mut)]
+            let mut own = self.own();
+            #[cfg(feature = "security-key")]
+            {
+                own.hold |= link.keys.held;
+            }
             if let Some(stamp) = stamp.filter(|s| link.in_stamp != Some(*s))
-                && let Fetched::Got(arrival) = link.fetch(stamp, self.own(), self.data())
+                && let Fetched::Got(arrival) = link.fetch(stamp, own, self.data())
+                && !key_view_moved(link)
             {
                 match self.take(link, arrival, notice) {
                     Ok(taken) => list_changed = taken.list_changed,
@@ -1142,6 +1246,12 @@ impl Session {
         if self.unconfirmed() || self.gate_login.is_some() || self.anchor_failed {
             return;
         }
+        // Nor while the key channel holds it: a pending gate, a forked or
+        // refused server key file, or KeySyncGone (spec v3 §7.20).
+        #[cfg(feature = "security-key")]
+        if link.keys.held {
+            return;
+        }
         // The review's hold also takes back a copy written before the
         // removal, under a data key the removed key's holder knows: no
         // outgoing under an older key stays (spec §5.13, §14.5 I5).
@@ -1287,6 +1397,8 @@ impl Session {
         if let Some(link) = self.sync.as_mut() {
             (link.in_stamp, link.verified, link.incoming_gone) = (None, false, false);
             link.lift();
+            #[cfg(feature = "security-key")]
+            link.keys.again();
         }
     }
     /// After `enable_sync` saved the vault: link to the folder and, for a
@@ -1334,7 +1446,21 @@ impl Session {
         let mut wrote = false;
         if let Some(link) = pending.link {
             let mut link = (*link).start();
-            match pending.fetched {
+            // The key view before the copy (spec v3 §7.12): a hold of the key
+            // channel leaves the copy to the first poll after it lifts.
+            #[cfg(feature = "security-key")]
+            let fetched = {
+                self.read_keys(&mut link);
+                self.update_holds(&mut link);
+                if link.keys.held {
+                    None
+                } else {
+                    pending.fetched
+                }
+            };
+            #[cfg(not(feature = "security-key"))]
+            let fetched = pending.fetched;
+            match fetched {
                 // Offered at the first poll that finds none either: a listing
                 // made while the helper replaces incoming can show neither
                 // name.
@@ -2698,6 +2824,8 @@ mod tests {
             both_passwords: plan.preview().both_passwords,
             #[cfg(feature = "security-key")]
             fork_option: crate::vault::ForkOption::Both,
+            #[cfg(feature = "security-key")]
+            keysync_on: false,
         };
         s.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
             .unwrap()

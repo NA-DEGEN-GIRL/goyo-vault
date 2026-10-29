@@ -42,9 +42,8 @@ mod hw;
 pub use adopt::{ForkOption, KeyGates};
 #[cfg(feature = "security-key")]
 pub use hw::{
-    ANCHOR_FAILED, Exposure, KEYSOFF_SYNCED, KeyRow, KeysOverview, LossReport, NOT_PLANNED,
-    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow,
-    UNION_FULL, UNREACHABLE,
+    ANCHOR_FAILED, Exposure, KeyRow, KeysOverview, LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED,
+    REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow, UNION_FULL, UNREACHABLE,
 };
 #[cfg(feature = "security-key")]
 pub(super) use hw::{create_with_keys, probe_anchor};
@@ -180,9 +179,19 @@ pub enum Change {
     /// New seeds for every live key (`ReSeedPlan`).
     #[cfg(feature = "security-key")]
     ReSeed(Vec<hw::ReSeedKey>),
-    /// Back to a password-only key file (GOYOKE03), every key removed.
+    /// Back to a password-only key file (GOYOKE03), every key removed; for
+    /// a GOYOKS01 key file through the off sequence of key-file sync (spec
+    /// §7.16).
     #[cfg(feature = "security-key")]
     KeysOff,
+    /// Key-file sync on (GOYOKS01, the data key kept), or the re-upload of
+    /// a GOYOKS01 key file after the server's cut (spec §7.9).
+    #[cfg(feature = "security-key")]
+    KeySyncOn,
+    /// Key-file sync off (GOYOKH01 under a new data key), through the off
+    /// sequence of spec §7.16.
+    #[cfg(feature = "security-key")]
+    KeySyncOff,
 }
 /// The keys the user agreed to suspend (S-SUSPEND; security-key build).
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -218,6 +227,10 @@ pub enum Gate {
     StaleKeyFile,
     /// A synced vault not verified against the server (S-GATE-UNVERIFIED).
     Unverified,
+    /// A key change of another PC that needs no gate waits on the server
+    /// (spec §7.5 KeyFileReady).
+    #[cfg(feature = "security-key")]
+    KeyFileReady,
 }
 impl Gate {
     /// The question that lets the user go on anyway (danger, default No).
@@ -228,6 +241,8 @@ impl Gate {
             Self::KeyFork => GATE_FORK,
             Self::StaleKeyFile => GATE_STALE,
             Self::Unverified => GATE_UNVERIFIED,
+            #[cfg(feature = "security-key")]
+            Self::KeyFileReady => super::keysync::KEYFILE_READY,
         }
     }
 }
@@ -412,6 +427,13 @@ impl Session {
             return Err(super::gate::TOFU_HELD);
         }
         self.not_rolled_back()?;
+        // A server candidate waiting for its gate holds every key change
+        // but the lost-key flow and the off (spec §7.5 GatePending, no
+        // override).
+        #[cfg(feature = "security-key")]
+        if self.gate_waits() && !self.passes_gate_pending(change) {
+            return Err(super::keysync::GATE_PENDING);
+        }
         Ok(self.rekey_gate(change))
     }
     /// What holds every key change and adopt of this session (spec §5.5 R0,
@@ -469,13 +491,29 @@ impl Session {
             return None;
         }
         let _ = change;
+        #[cfg(feature = "security-key")]
+        let (key_halt, ready, unverified) = (
+            self.key_halt(),
+            self.successor_ready(),
+            self.keys_unverified(),
+        );
+        #[cfg(not(feature = "security-key"))]
+        let (key_halt, ready, unverified) = (None, false, false);
         if self.local_rollback {
             Some(Gate::LocalRollback)
-        } else if let Some(fork) = self.sync_halt() {
+        } else if let Some(fork) = self.sync_halt().or(key_halt) {
             Some(if fork { Gate::KeyFork } else { Gate::KeyHalt })
         } else if self.stale_key_file {
             Some(Gate::StaleKeyFile)
-        } else if self.sync_unverified() {
+        } else if ready {
+            // A waiting successor is the cause the user can act on; it
+            // also leaves a GOYOKS01 session unverified.
+            #[cfg(feature = "security-key")]
+            const READY: Option<Gate> = Some(Gate::KeyFileReady);
+            #[cfg(not(feature = "security-key"))]
+            const READY: Option<Gate> = None;
+            READY
+        } else if self.sync_unverified() || unverified {
             Some(Gate::Unverified)
         } else {
             None
@@ -746,6 +784,16 @@ impl Session {
         // Commit: the session takes the new keys. The key file is the state
         // the confirmed line becomes, so a local rollback is over (an adopt
         // takes only a file that descends from the confirmed state).
+        #[cfg(feature = "security-key")]
+        {
+            let dead = |f: &KeyFile| -> Vec<[u8; 16]> {
+                f.header()
+                    .map(|h| h.tombstones.iter().map(|t| t.credhash).collect())
+                    .unwrap_or_default()
+            };
+            let before = dead(&self.key_file);
+            self.tombs_added = dead(&file).iter().any(|c| !before.contains(c));
+        }
         self.keys = bundle;
         self.key_file = file;
         (self.key_state, self.max_epoch) = (state, epoch);
@@ -798,6 +846,10 @@ impl Session {
         // file), after the vault file. Not after a replace gap: the server
         // never holds content no vault file on disk holds.
         if vault != Rekeyed::GapKept {
+            // The key request first (spec §5.5 S4, §7.11), against the
+            // committed state: its `hist`, `merged` and `ks`.
+            #[cfg(feature = "security-key")]
+            self.keys_after_change(&pending);
             if let Some(link) = self.sync.as_mut() {
                 link.mark_due();
             }
@@ -1505,6 +1557,8 @@ mod tests {
             both_passwords: plan.preview().both_passwords,
             #[cfg(feature = "security-key")]
             fork_option: ForkOption::Both,
+            #[cfg(feature = "security-key")]
+            keysync_on: false,
         }
     }
     /// A key change killed at `point`, then unlocked again (spec §5.6,

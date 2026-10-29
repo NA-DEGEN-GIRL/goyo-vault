@@ -3,30 +3,55 @@
 
 One run per SSH connection, like git-upload-pack: one request frame on stdin,
 one response frame on stdout, then exit. No daemon, no port, no shell, no eval
-and nothing outside the Python 3.8+ standard library. It never sees a key
-file, a password or plaintext: it stores only GOYOVA02 and GOYOVA04 files
-(the synced vault formats, the second under a 0.9 key file) whose header
-names the requested vault, so every key file (GOYOK...) is refused before
-anything is written.
+and nothing outside the Python 3.8+ standard library. It never sees a
+password or plaintext. The vault channel stores only GOYOVA02 and GOYOVA04
+files (the synced vault formats, the second under a 0.9 key file) whose
+header names the requested vault, so a key file (GOYOK...) is never a vault
+upload.
 
-  python3 -I goyo-sync-server.py serve [--root DIR]   answer one request
+  python3 -I goyo-sync-server.py serve [--root DIR] [--key-sync=ID[,ID...]]
+                                                      answer one request
   python3 -I goyo-sync-server.py selftest            test this copy; prints PASS
 
 Install, the forced-command key and uninstalling: docs/SYNC.md.
+
+Key-file sync (experimental, security-key builds only) is off unless the
+forced command names a vault in --key-sync=<32 hex>[,<32 hex>...] (at most
+64). Only for a named vault does this connection answer PUTKEY, GETKEY,
+CUTKEY and PRUNE; it then stores GOYOKS01 key files (they open only with the
+password and a registered security key) and nothing password-only or local
+(GOYOKE*, GOYOKH*). Without the flag every key op is BAD_REQUEST and no key
+file is ever stored. Once a vault has k/, every connection checks its vault
+uploads against the stored key record (KEY_BEHIND), with or without the
+flag. The admin may remove data/<id>/k/ only while no PC syncs that vault.
 
 Storage, under <script dir>/data (--root DIR is for tests), 0700/0600:
   <32 hex of the raw vault id>/v/000000000001.goyo   immutable versions;
                                                       head = highest number
   <32 hex of the raw vault id>/tmp-<pid>-<ns>-<n>    a PUT in progress
+  <32 hex of the raw vault id>/k/<n>-<floor>.rec      key records (20 digits
+                                                      each): the newest one,
+                                                      and the key file before
+                                                      it in its generation
+  <32 hex of the raw vault id>/k/tombs                the removed keys' IDs of
+                                                      the last key record a
+                                                      cut ended (never served)
+  <32 hex of the raw vault id>/lock                   the vault lock: key ops,
+                                                      and vault PUTs once k/
+                                                      exists (flock)
   slot-0 .. slot-7                                    empty lock files, one per
                                                       running connection (POSIX)
 """
-import errno, hashlib, itertools, os, re, signal, stat, struct, sys, time
+import contextlib, errno, hashlib, hmac, itertools, os, re, signal, stat, struct, sys, time
 import io, shutil, subprocess, tempfile, threading  # selftest only
 try:
     import fcntl
 except ImportError:  # Windows, which runs this script only for tests
     fcntl = None
+try:
+    import msvcrt  # Windows: the vault lock of the selftest
+except ImportError:
+    msvcrt = None
 
 # Frames are little endian. A request is the header, blob_len bytes, then EOF;
 # a response is the header, its blob, then EOF. blob_sha is the SHA-256 of the
@@ -41,8 +66,11 @@ REQUEST_MAGIC, RESPONSE_MAGIC = b'GOYOSRQ1', b'GOYOSRS1'
 # GOYOVA01/03 (sync off), newer formats and every key file.
 VAULT_MAGICS = {b'GOYOVA02': 96, b'GOYOVA04': 140}
 HELLO, GET, PUT, LIST, FETCH = 1, 2, 3, 4, 5
+# The key ops: served only for a vault the connection's --key-sync names.
+PUTKEY, GETKEY, CUTKEY, PRUNE = 6, 7, 8, 9
+KEY_OPS = (PUTKEY, GETKEY, CUTKEY, PRUNE)
 OK, NOT_MODIFIED, CONFLICT, EMPTY, NOT_FOUND = 0, 1, 2, 3, 4
-BAD_REQUEST, BAD_BLOB, TOO_LARGE, LIMIT, SERVER_ERROR = 10, 11, 12, 13, 20
+BAD_REQUEST, BAD_BLOB, TOO_LARGE, LIMIT, KEY_BEHIND, SERVER_ERROR = 10, 11, 12, 13, 14, 20
 PROTOCOL = 1
 HELLO_LEN = 512                # 00..FF twice: proves the SSH channel is binary-transparent
 MIN_BLOB = 96                  # the smallest synced vault file (GOYOVA02)
@@ -60,6 +88,26 @@ HEADER_TIMEOUT = 30            # seconds for the 69-byte header to arrive
 TIMEOUT = 600                  # seconds while a PUT blob arrives or a blob is sent: the helper's
                                # longest ssh timeout, so a slow line is never cut short here
 REPLY_TIMEOUT = 60             # seconds to send a reply without a blob
+LOCK_WAIT = 20                 # seconds a request waits for a vault lock; then SERVER_ERROR "busy"
+LOCK_POLL = 0.05               # seconds between two tries for it
+
+# The one key file a server may hold: GOYOKS01 (keys with key-file sync),
+# 489 bytes at least. Its grammar is the strict parse of the vault app
+# (keyfile.rs is_sync_key_file), ported line by line in key_syntax below.
+KEY_MAGIC = b'GOYOKS01'
+MIN_KEY_FILE, MAX_KEY_FILE = 489, 32768
+EPOCH_MAX = 2 ** 48 - 1        # a tombstone keeps its epoch in 48 bits
+EPOCH_WINDOW = 2 ** 16         # how far above the stored floor a new key file may lie
+MAX_KEYS, TOMB_MAX, MAX_SLOTS, MAX_CRED_ID = 64, 480, 8, 1023
+KEY_KINDS = (2, 3, 4, 5, 6, 8, 9)  # the kinds a GOYOKS01 file may carry
+WRAP, SEAL_BLOCK = 104, 88     # a committing wrap; the seal block
+# A record in k/: a 32-byte header (magic, type, 7 zero bytes, gen, floor),
+# then the key file as uploaded (type 1) or nothing (type 2, a cut). The
+# magic is spelled in two parts: goyo-sync.exe embeds this script, and its
+# release build must not hold the key channel's magics (inspect_pe.py).
+RECORD = struct.Struct('<8sB7sQQ')
+RECORD_MAGIC = b'GOYOS' b'KR1'
+KEY_RECORD, CUT = 1, 2
 
 # Shims, so the Rust tests on Windows run this same file. Without O_BINARY,
 # Windows would turn every \n written into \r\n.
@@ -67,11 +115,18 @@ O_BINARY = getattr(os, 'O_BINARY', 0)
 O_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
 O_CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
 O_DIRECTORY = getattr(os, 'O_DIRECTORY', 0)
+O_NONBLOCK = getattr(os, 'O_NONBLOCK', 0)
 REPARSE_POINT = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
 # [0-9], not \d: \d also matches non-ASCII digits.
 VERSION_NAME = re.compile(r'[0-9]{12}\.goyo')
 VAULT_NAME = re.compile(r'[0-9a-f]{32}')
 TMP_NAME = re.compile(r'tmp-[0-9]+-[0-9]+-[0-9]+')
+RECORD_NAME = re.compile(r'([0-9]{20})-([0-9]{20})\.rec')
+# k/tombs: the credhashes (16 bytes each, at most TOMB_MAX) of the
+# tombstones of the last key record a CUTKEY ended. Never served; above a
+# cut, PUTKEY's honest-server checks run against it, so a cut does not let
+# a removed key's holder with a sync SSH key plant a file it authorizes.
+TOMBS_NAME = 'tombs'
 # Part of temp names, so two PUTs in one process (the selftest) never collide
 # even when the clock has not moved.
 SEQUENCE = itertools.count()
@@ -180,6 +235,276 @@ def mismatch(versions_dir):
     return (CONFLICT, head, blob) if head else (EMPTY, 0, b'')
 
 
+def version_epoch(path):
+    """The key-file epoch in a stored version's header: 0 for GOYOVA02, None
+    for anything that is not a plain file starting like GOYOVA02/04."""
+    fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        head = os.read(fd, 48)
+    finally:
+        os.close(fd)
+    if head[:8] == b'GOYOVA02':
+        return 0
+    return struct.unpack('<Q', head[40:48])[0] if head[:8] == b'GOYOVA04' and len(head) == 48 else None
+
+
+# ---- the grammar of GOYOKS01 (gate 3; spec v3 sections 4.1, 4.6, 7.13) ----
+
+def ks_id_zero(vid):
+    """The keyset ID of an all-zero keyset secret: HKDF-SHA256 with salt
+    goyo-vault/v2/ks-id over 32 zero bytes and info = the vault ID. Public,
+    so every parser refuses a file that carries it."""
+    prk = hmac.new(b'goyo-vault/v2/ks-id', bytes(32), hashlib.sha256).digest()
+    return hmac.new(prk, vid + b'\x01', hashlib.sha256).digest()[:16]
+
+
+def credhash(cred_id):
+    return hashlib.sha256(b'goyo-vault/v2/cred\0' + cred_id).digest()[:16]
+
+
+def state_tag(region):
+    """The state tag of a key file from its bytes [0, W)."""
+    return hashlib.sha256(b'goyo-vault/v2/state\0' + hashlib.sha256(region).digest()).digest()[:16]
+
+
+class Short(Exception):
+    """A field read past the end of a key file."""
+
+
+class Fields:
+    """Reads a key file's fields in order; past its end is Short."""
+
+    def __init__(self, data, at):
+        self.data, self.at = data, at
+
+    def take(self, size):
+        if self.at + size > len(self.data):
+            raise Short()
+        part = self.data[self.at:self.at + size]
+        self.at += size
+        return part
+
+    def u8(self):
+        return self.take(1)[0]
+
+    def u16(self):
+        return struct.unpack('<H', self.take(2))[0]
+
+    def u64(self):
+        return struct.unpack('<Q', self.take(8))[0]
+
+
+class KeySyntax:
+    """What the server uses of a GOYOKS01 file that passed key_syntax."""
+
+    def __init__(self, epoch, w, key_id, authorizer, tombs, live):
+        self.epoch = epoch            # the file's epoch
+        self.w = w                    # where its seal block starts: the tag covers [0, W)
+        self.key_id = key_id          # key_ids[0], the current data key's ID
+        self.authorizer = authorizer  # the credhash of the authorizing key
+        self.tombs = tombs            # the credhashes of its tombstones (a frozenset)
+        self.live = live              # the credhashes of its live keys
+
+
+def key_syntax(blob, vid):
+    """KeySyntax when blob is a GOYOKS01 key file of vault vid by every rule
+    of the strict parse (keyfile.rs parse restricted by is_sync_key_file),
+    else None. Public bytes only; the bound sizes are checked before any
+    list is read, and the file must end exactly where its layout does."""
+    if blob[:8] != KEY_MAGIC or not MIN_KEY_FILE <= len(blob) <= MAX_KEY_FILE or blob[8:24] != vid:
+        return None
+    try:
+        return parse_key(blob, vid)
+    except Short:
+        return None
+
+
+def parse_key(blob, vid):
+    r = Fields(blob, 24)
+    epoch, flags, k, n, nxt, count = r.u64(), r.u8(), r.u8(), r.u8(), r.u8(), r.u16()
+    kind, authorizer, present, suspended, p = r.u8(), r.u8(), r.u8(), r.u8(), r.u8()
+    reserved, ks_id, pw_id = r.take(5), r.take(16), r.take(16)
+    r.take(16)  # written and loss: display only
+    # GOYOKS01 is always PIN mode (flags bit1); bit0 is the OTP vault.
+    if not (1 <= epoch <= EPOCH_MAX and flags in (2, 3) and 1 <= k <= MAX_KEYS and nxt >= 1
+            and count <= TOMB_MAX and kind in KEY_KINDS and reserved == bytes(5) and pw_id != bytes(16)):
+        return None
+    if not (1 <= n <= MAX_SLOTS and p <= n * (n - 1) and (present | suspended) >> n == 0
+            and present & suspended == 0 and authorizer < n and present >> authorizer & 1
+            and ks_id != bytes(16) and ks_id != ks_id_zero(vid)):
+        return None
+    key_ids = [r.take(16) for _ in range(k)]
+    if len(set(key_ids)) != k:
+        return None
+    stones = [(r.take(16), r.u64()) for _ in range(count)]
+    order = [(removed & EPOCH_MAX, ch) for ch, removed in stones]
+    if (len({ch for ch, _ in stones}) != count or any(a >= b for a, b in zip(order, order[1:]))
+            or not all(1 <= removed_at <= epoch for removed_at, _ in order)):
+        return None
+    slots = []  # (number, added_epoch, added_by, cred_id, credhash)
+    for _ in range(n):
+        slot_kind, slot_flags, number, slot_reserved = r.u8(), r.u8(), r.u8(), r.u8()
+        r.u64()  # registered: display only
+        added_epoch, added_by = r.u64(), r.take(16)
+        r.take(32)  # the hmac seed
+        c = r.u16()
+        # Every slot of a PIN-mode file is a PIN slot (flags 3).
+        if not (slot_kind == 1 and slot_flags == 3 and slot_reserved == 0
+                and number > (slots[-1][0] if slots else 0) and 1 <= c <= MAX_CRED_ID
+                and 1 <= added_epoch <= epoch):
+            return None
+        cred_id = r.take(c)
+        slots.append((number, added_epoch, added_by, cred_id, credhash(cred_id)))
+    dead = {ch for ch, _ in stones}
+    hashes = {s[4] for s in slots}
+    if len({s[3] for s in slots}) != n or len(hashes) != n or hashes & dead:
+        return None
+    # Which slots this write added, by the kind of the write.
+    new = [i for i in range(n) if slots[i][1] == epoch]
+    if kind == 8:    # a re-seed: every key present, none suspended, none new
+        ok = present == (1 << n) - 1 and suspended == 0 and not new
+    elif kind == 3:  # an addition: exactly one new key, present, added by the authorizer
+        ok = len(new) == 1 and present >> new[0] & 1 and slots[authorizer][4] == slots[new[0]][2]
+    elif kind == 5:  # pairing: at least two keys present, none new
+        ok = bin(present).count('1') >= 2 and not new
+    else:
+        ok = not new
+    if not ok:
+        return None
+    pairs = []
+    for _ in range(p):
+        owner, target, pair_reserved = r.u8(), r.u8(), r.take(2)
+        if not (pair_reserved == bytes(2) and owner != target and owner < n and target < n):
+            return None
+        r.take(WRAP)
+        pairs.append((owner, target))
+    if any(a >= b for a, b in zip(pairs, pairs[1:])):
+        return None
+    # One S-wrap per live slot that is not suspended, in slot order: through
+    # the key itself when it was touched, else through the authorizer and
+    # its pair record.
+    for j in range(n):
+        if suspended >> j & 1:
+            continue
+        recipient, via = r.u8(), r.u8()
+        if recipient != j or not (via == j if present >> j & 1 else
+                                  via == authorizer and (authorizer, j) in pairs):
+            return None
+        r.take(WRAP)
+    w = r.at
+    r.take(SEAL_BLOCK)
+    r.take(32 + 32 * k + (20 if flags & 1 else 0) + 16)  # C_body, then the body and its tag
+    r.take(32 * k)  # the chain
+    if r.at != len(blob):
+        return None
+    return KeySyntax(epoch, w, key_ids[0], slots[authorizer][4], frozenset(dead), tuple(s[4] for s in slots))
+
+
+def honest(new, tombs):
+    """The honest-server checks of a new key file against the tombstones of
+    the stored latest one (or, above a cut, of the last key record a cut
+    ended): it keeps every tombstone, lists no tombstoned key live and is
+    not authorized by one. Hygiene only; every PC runs them too."""
+    return tombs <= new.tombs and not tombs & set(new.live) and new.authorizer not in tombs
+
+
+class Record:
+    """A record of k/ as read_state reads it; served is what a reply carries."""
+
+    def __init__(self, number, kind, gen, floor, served, syntax=None, damaged=False):
+        self.number, self.kind, self.gen, self.floor = number, kind, gen, floor
+        self.served, self.syntax, self.damaged = served, syntax, damaged
+
+
+def record_header(kind, gen, floor, damaged=False):
+    return RECORD.pack(RECORD_MAGIC, kind, bytes([damaged]) + bytes(6), gen, floor)
+
+
+def parse_record(data, number, floor, vid):
+    """The record named <number>-<floor>.rec, or None when its contents break
+    the grammar: the header (its floor equal to the name's), and a key file
+    of this vault at that epoch below its own number, or a bare cut that
+    carries its own number."""
+    if len(data) < RECORD.size:
+        return None
+    magic, kind, reserved, gen, head_floor = RECORD.unpack_from(data)
+    if magic != RECORD_MAGIC or reserved != bytes(7) or head_floor != floor:
+        return None
+    if kind == KEY_RECORD:
+        syntax = key_syntax(data[RECORD.size:], vid)
+        if syntax is None or syntax.epoch != floor or gen >= number:
+            return None
+        return Record(number, KEY_RECORD, gen, floor, data, syntax)
+    if kind == CUT and len(data) == RECORD.size and gen == number:
+        return Record(number, CUT, gen, floor, data)
+    return None
+
+
+class Namespace:
+    """What read_state found in k/: the records as sorted (number, floor,
+    name, regular file), the temps, the top record T (None for none) and
+    whether the record below it is kept (the previous key file of T's
+    generation)."""
+
+    def __init__(self, records=(), temps=(), top=None, keep=False):
+        self.records, self.temps, self.top, self.keep = list(records), list(temps), top, keep
+
+
+def try_lock(fd):
+    """Takes the exclusive lock of fd without waiting; False while another
+    descriptor holds it. POSIX: flock, which belongs to the open file
+    description, so two descriptors conflict even in one process. Windows
+    (the selftest only): one byte with LockFile through msvcrt, which a
+    second handle conflicts with too."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        except OSError as e:
+            if e.errno in (errno.ENOLCK, errno.EOPNOTSUPP, getattr(errno, 'ENOTSUP', errno.EOPNOTSUPP)):
+                raise Refused(SERVER_ERROR, 'no file locking here')
+            raise
+        return True
+    if msvcrt is not None:
+        os.lseek(fd, 0, 0)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    raise Refused(SERVER_ERROR, 'no file locking here')
+
+
+class VaultLock:
+    """A held vault lock. Released by release() (or leaving a with block),
+    and by the kernel when the process dies: no owner record, no takeover."""
+
+    def __init__(self, fd):
+        self.fd = fd
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    def release(self):
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
+        try:
+            if fcntl is None and msvcrt is not None:
+                os.lseek(fd, 0, 0)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass  # closing releases it as well
+        finally:
+            os.close(fd)
+
+
 class Store:
     """Every vault under one root.
 
@@ -187,12 +512,22 @@ class Store:
     version name. link never replaces an existing name, so of two PUTs with
     the same expected version exactly one wins, with no HEAD file and no lock
     on the commit. Version files are never modified, so readers cannot see a
-    torn file. flock (POSIX) is used only while a new vault folder is counted
-    and made, and for the connection slots."""
+    torn file. flock (POSIX) is used while a new vault folder is counted and
+    made, for the connection slots, and as the vault lock: every key op runs
+    under it, and so does a vault PUT once the vault has k/. Lock order:
+    slot, root (released before the next step), one vault lock."""
 
-    def __init__(self, root):
+    def __init__(self, root, key_sync=()):
         self.root = root
         self.slot = None  # the fd holding this process's slot, closed at exit
+        self.key_sync = frozenset(key_sync)  # raw IDs of the vaults --key-sync names
+        self.lock_wait = LOCK_WAIT
+        self.note = None  # a line for stderr beside an answer that is not a refusal
+
+    def step(self, name):
+        """A named point of a key op (folder, locking, temp, link, unlinked,
+        commit): nothing here; the selftest stops (a simulated kill) or
+        pauses an op at one."""
 
     def take_slot(self, count=SLOTS):
         """Hold one of count lock files in the root until this process ends;
@@ -299,11 +634,23 @@ class Store:
             self.new_vault(vault)
         make_dir(vault)
         make_dir(versions_dir)
-        found = list_versions(versions_dir)
-        if (found[-1] if found else 0) != expected:
-            return mismatch(versions_dir)
-        if expected >= MAX_VERSION:
-            raise Refused(LIMIT, 'version numbers exhausted')
+
+        def behind():
+            """The answer when expected is not the head, else None."""
+            found = list_versions(versions_dir)
+            if (found[-1] if found else 0) != expected:
+                return mismatch(versions_dir)
+            if expected >= MAX_VERSION:
+                raise Refused(LIMIT, 'version numbers exhausted')
+            return None
+        # Once the vault has k/ (key-file sync named it on some line), the
+        # floor, the head check and the link run under its vault lock, on
+        # every connection, after the temp is written. Without k/ nothing
+        # changes: no lock and no lock file.
+        keyed = os.path.lexists(os.path.join(vault, 'k'))
+        answer = None if keyed else behind()
+        if answer:
+            return answer
         tmp = os.path.join(vault, 'tmp-%d-%d-%d' % (os.getpid(), time.time_ns(), next(SEQUENCE)))
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | O_NOFOLLOW | O_CLOEXEC, 0o600)
         try:
@@ -314,10 +661,16 @@ class Store:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            try:
-                self.link(tmp, version_path(versions_dir, expected + 1))
-            except FileExistsError:
-                return mismatch(versions_dir)  # another PUT linked this version first
+            with self.vault_lock(vid) if keyed else contextlib.nullcontext():
+                if keyed:
+                    self.floor(vid, blob)
+                    answer = behind()
+                    if answer:
+                        return answer
+                try:
+                    self.link(tmp, version_path(versions_dir, expected + 1))
+                except FileExistsError:
+                    return mismatch(versions_dir)  # another PUT linked this version first
         finally:
             remove(tmp)
         fsync_dir(versions_dir)
@@ -385,6 +738,397 @@ class Store:
         except FileNotFoundError:
             return NOT_FOUND, 0, b''
 
+    # ---- key-file sync: the vault lock, k/ and ops 6-9 (spec v3 section 7.13) ----
+
+    def vault_lock(self, vid):
+        """Holds data/<id>/lock (made if missing; the vault folder must
+        exist), polling every LOCK_POLL seconds for at most lock_wait, then
+        SERVER_ERROR "busy". A lock file that is a link, has a second name
+        or is not a plain file is refused."""
+        path = os.path.join(self.paths(vid)[0], 'lock')
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | O_BINARY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise Refused(SERVER_ERROR, 'vault lock is a link or not a plain file')
+            raise
+        try:
+            # After the open, which may have made the file: the name must
+            # still be this very file.
+            info, named = os.fstat(fd), os.lstat(path)
+            if not (stat.S_ISREG(info.st_mode) and stat.S_ISREG(named.st_mode) and info.st_nlink == 1
+                    and not getattr(named, 'st_file_attributes', 0) & REPARSE_POINT
+                    and (info.st_dev, info.st_ino) == (named.st_dev, named.st_ino)):
+                raise Refused(SERVER_ERROR, 'vault lock is a link or not a plain file')
+            start = time.monotonic()
+            while not try_lock(fd):
+                if time.monotonic() - start >= self.lock_wait:
+                    raise Refused(SERVER_ERROR, 'busy: vault lock held')
+                time.sleep(LOCK_POLL)
+        except BaseException:
+            os.close(fd)
+            raise
+        return VaultLock(fd)
+
+    def key_folder(self, vid):
+        """(vault folder, k/, whether k/ exists). A vault folder or a k/
+        that is a link or not a directory is refused."""
+        vault = self.paths(vid)[0]
+        keys = os.path.join(vault, 'k')
+        for path in (vault, keys):
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                return vault, keys, False
+            if not plain_dir(info):
+                raise Refused(SERVER_ERROR, 'k/ or its vault folder is a link or not a directory')
+        return vault, keys, True
+
+    def make_vault(self, vault):
+        """The vault folder, made as a vault PUT makes it when it is missing
+        (the 64-vault limit applies)."""
+        self.step('folder')
+        if not os.path.lexists(vault):
+            make_dir(self.root)
+            self.new_vault(vault)
+        make_dir(vault)
+
+    def scan_keys(self, keys):
+        """The records of k/ as sorted (number, floor, name, regular file)
+        and the names of the temps. A record name that is a link or a
+        directory, or a file with a second name, is refused (the one second
+        name allowed is a temp of k/: a key op killed between its link and
+        its temp's removal); so are two names with one number. Any other
+        name is ignored, a record name numbered 0 or past EPOCH_MAX
+        included, so no answer carries such a number."""
+        with os.scandir(keys) as entries:
+            names = [e.name for e in entries]
+        temps, inodes = [], {}
+        for name in names:
+            if TMP_NAME.fullmatch(name):
+                temps.append(name)
+                try:
+                    info = os.lstat(os.path.join(keys, name))
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    inode = (info.st_dev, info.st_ino)
+                    inodes[inode] = inodes.get(inode, 0) + 1
+        records = []
+        for name in names:
+            match = RECORD_NAME.fullmatch(name)
+            if not match:
+                continue
+            number, floor = int(match.group(1)), int(match.group(2))
+            if not (1 <= number <= EPOCH_MAX and floor <= EPOCH_MAX):
+                continue
+            info = os.lstat(os.path.join(keys, name))
+            regular = stat.S_ISREG(info.st_mode)
+            if (stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode)
+                    or getattr(info, 'st_file_attributes', 0) & REPARSE_POINT
+                    or regular and info.st_nlink - 1 != inodes.get((info.st_dev, info.st_ino), 0)):
+                raise Refused(SERVER_ERROR, 'link in k/')
+            records.append((number, floor, name, regular))
+        records.sort()
+        if any(a[0] == b[0] for a, b in zip(records, records[1:])):
+            raise Refused(SERVER_ERROR, 'duplicate record')
+        return records, temps
+
+    def read_record(self, path):
+        """A record's bytes (at most one byte past the largest record, which
+        then fails the grammar), or None when it is not a plain file."""
+        fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            limit, parts, size = RECORD.size + MAX_KEY_FILE + 1, [], 0
+            while size < limit:
+                chunk = os.read(fd, limit - size)
+                if not chunk:
+                    break
+                parts.append(chunk)
+                size += len(chunk)
+            return b''.join(parts)
+        finally:
+            os.close(fd)
+
+    def load(self, vid, keys, entry):
+        """One record; a damaged one (not a plain file, or its contents break
+        the grammar) reads as a cut at its own number, flagged damaged
+        (header byte 9 = 1), with the floor in its name. Other read errors
+        are raised."""
+        number, floor, name, regular = entry
+        data = self.read_record(os.path.join(keys, name)) if regular else None
+        record = parse_record(data, number, floor, vid) if data is not None else None
+        if record is None:
+            record = Record(number, CUT, number, floor, record_header(CUT, number, floor, True), damaged=True)
+        return record
+
+    def read_state(self, vid, keys, exists, previous=True):
+        """The namespace of k/ under the vault lock: its top record T as
+        served; with previous, whether tidy() keeps the record below it.
+        Writes nothing. A top that cannot be read for another reason than
+        damage (EIO, EACCES, ...) is SERVER_ERROR: read as damage it would
+        begin a new generation."""
+        if not exists:
+            return Namespace()
+        records, temps = self.scan_keys(keys)
+        if not records:
+            return Namespace(records, temps)
+        try:
+            top = self.load(vid, keys, records[-1])
+        except OSError as e:
+            raise Refused(SERVER_ERROR, 'cannot read the top key record (%s)' % type(e).__name__)
+        if top.damaged:
+            self.note = 'damaged key record read as a cut'
+        keep = False
+        if previous and top.kind == KEY_RECORD and len(records) > 1 and records[-2][0] == top.number - 1:
+            try:
+                below = self.load(vid, keys, records[-2])
+            except OSError:
+                below = None  # never served: it only goes
+            keep = below is not None and below.kind == KEY_RECORD and below.gen == top.gen
+        return Namespace(records, temps, top, keep)
+
+    def tidy(self, keys, state):
+        """Removes every temp of k/ (the lock proves its writer is gone) and
+        every record but the top and, while both are key records of one
+        generation, the one below it (the previous key file). It removes
+        only what read_state ignores and never the top name, so it changes
+        no answer and record numbers are never reused."""
+        kept = {state.records[-1][2]} if state.records else set()
+        if state.keep:
+            kept.add(state.records[-2][2])
+        gone = [name for name in state.temps] + [r[2] for r in state.records if r[2] not in kept]
+        removed = False
+        for name in gone:
+            try:
+                os.unlink(os.path.join(keys, name))
+                removed = True
+            except OSError:
+                pass  # best effort: no answer reads it
+        if removed:
+            fsync_dir(keys)
+
+    def read_tombs(self, keys):
+        """The tombstones k/tombs keeps (a frozenset); none when it is
+        missing, not a plain file or malformed (hygiene only: every PC runs
+        the same checks)."""
+        try:
+            fd = os.open(os.path.join(keys, TOMBS_NAME), os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        except OSError:
+            return frozenset()
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return frozenset()
+            data = os.read(fd, 16 * TOMB_MAX + 1)
+        except OSError:
+            return frozenset()
+        finally:
+            os.close(fd)
+        if len(data) % 16 or len(data) > 16 * TOMB_MAX:
+            return frozenset()
+        return frozenset(data[i:i + 16] for i in range(0, len(data), 16))
+
+    def write_tombs(self, keys, tombs):
+        """Replaces k/tombs with tombs, durably: a temp of k/ (which tidy()
+        removes after a kill), fsync, one rename, fsync of k/."""
+        tmp = os.path.join(keys, 'tmp-%d-%d-%d' % (os.getpid(), time.time_ns(), next(SEQUENCE)))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        try:
+            try:
+                view = memoryview(b''.join(sorted(tombs)))
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, os.path.join(keys, TOMBS_NAME))
+        except BaseException:
+            remove(tmp)
+            raise
+        fsync_dir(keys)
+
+    def tidy_after(self, vid, keys):
+        """tidy() after a commit, best effort: the record is committed."""
+        try:
+            self.tidy(keys, self.read_state(vid, keys, True))
+        except (OSError, Refused):
+            pass
+
+    def append(self, keys, number, floor, record):
+        """Commits a record as <number>-<floor>.rec: a temp in k/, fsync, one
+        os.link (the commit point), the temp's removal, fsync of k/. A kill
+        before the link leaves the before-state and a temp that the next key
+        op's tidy() removes; one after it, the after-state."""
+        if number > EPOCH_MAX:
+            raise Refused(SERVER_ERROR, 'record numbers exhausted')
+        tmp = os.path.join(keys, 'tmp-%d-%d-%d' % (os.getpid(), time.time_ns(), next(SEQUENCE)))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        try:
+            try:
+                view = memoryview(record)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self.step('temp')
+            try:
+                self.link(tmp, os.path.join(keys, '%020d-%020d.rec' % (number, floor)))
+            except FileExistsError:  # cannot happen under the lock
+                raise Refused(SERVER_ERROR, 'internal: record name taken')
+            self.step('link')
+        except Exception:
+            remove(tmp)
+            raise
+        remove(tmp)
+        self.step('unlinked')
+        fsync_dir(keys)
+        self.step('commit')
+
+    def make_keys(self, vault, keys):
+        """k/, made inside the lock, and its name made durable together with
+        the vault folder's, which this op may have made."""
+        make_dir(keys)
+        fsync_dir(vault)
+        fsync_dir(self.root)
+        fsync_dir(os.path.dirname(self.root))
+
+    def floor(self, vid, blob):
+        """The vault floor, under the vault lock (KEY_BEHIND): below a key
+        record a vault upload must be GOYOVA04 with that key file's epoch,
+        current key ID and state tag; below a cut (a damaged top included)
+        any GOYOVA04; a k/ with no record is no floor."""
+        top = self.read_state(vid, *self.key_folder(vid)[1:], previous=False).top
+        if top is None:
+            return
+        if top.kind == KEY_RECORD:
+            payload = top.served[RECORD.size:]
+            ok = (blob[:8] == b'GOYOVA04' and blob[40:48] == struct.pack('<Q', top.floor)
+                  and blob[24:40] == top.syntax.key_id and blob[48:64] == state_tag(payload[:top.syntax.w]))
+        else:
+            ok = blob[:8] == b'GOYOVA04'
+        if not ok:
+            raise Refused(KEY_BEHIND, 'vault file does not match the stored key file')
+
+    def put_key(self, vid, base, blob, sha):
+        """PUTKEY: stores a GOYOKS01 file as record base + 1 when base is the
+        top record (the epoch CAS) and its epoch lies above the top's floor
+        by at most EPOCH_WINDOW."""
+        if hashlib.sha256(blob).digest() != sha:
+            raise Refused(BAD_BLOB, 'blob checksum mismatch')
+        new = key_syntax(blob, vid)
+        if new is None:
+            raise Refused(BAD_BLOB, 'not a GOYOKS01 key file of this vault')
+        vault, keys, exists = self.key_folder(vid)
+        if not exists and base != 0:
+            return EMPTY, 0, b''  # nothing created, no lock
+        free = self.free_space()
+        if free is not None and free - len(blob) < RESERVE:
+            raise Refused(LIMIT, 'less than 256 MiB would stay free on the server disk')
+        self.make_vault(vault)
+        self.step('locking')
+        with self.vault_lock(vid):
+            vault, keys, exists = self.key_folder(vid)
+            state = self.read_state(vid, keys, exists)
+            self.tidy(keys, state)
+            top = state.top
+            number = top.number if top else 0
+            if number == 0 and base != 0:
+                return EMPTY, 0, b''
+            if number != base:
+                return CONFLICT, number, top.served
+            floor = top.floor if top else 0
+            if not floor < new.epoch <= floor + EPOCH_WINDOW:
+                raise Refused(BAD_BLOB, 'epoch window')
+            # Above a cut (a damaged top included), against the tombstones of
+            # the last key record a cut ended.
+            if top and not honest(new, top.syntax.tombs if top.kind == KEY_RECORD else self.read_tombs(keys)):
+                raise Refused(BAD_BLOB, 'tombstone or authorizer check')
+            # A generation is named by the cut that began it (0 before any).
+            header = record_header(KEY_RECORD, top.gen if top and top.kind == KEY_RECORD else number, new.epoch)
+            if not exists:
+                self.make_keys(vault, keys)
+            self.append(keys, number + 1, new.epoch, header + blob)
+            self.tidy_after(vid, keys)
+        return OK, number + 1, header
+
+    def get_key(self, vid, have, have_sha):
+        """GETKEY: the top record as served, never an older one."""
+        if not self.key_folder(vid)[2]:
+            return EMPTY, 0, b''  # no lock
+        with self.vault_lock(vid):
+            vault, keys, exists = self.key_folder(vid)
+            state = self.read_state(vid, keys, exists)
+            self.tidy(keys, state)
+        top = state.top
+        if top is None:
+            return EMPTY, 0, b''
+        if have == top.number and hashlib.sha256(top.served).digest() == have_sha:
+            return NOT_MODIFIED, have, b''
+        return OK, top.number, top.served
+
+    def cut_key(self, vid, base):
+        """CUTKEY: ends the generation that holds record base. A no-op when
+        the top is an undamaged cut numbered above base, or a key record of a
+        later generation; otherwise a cut is appended (on the cut numbered
+        base, or on nothing, a fence that a PUTKEY built on base meets as
+        CONFLICT)."""
+        vault = self.key_folder(vid)[0]
+        self.make_vault(vault)
+        self.step('locking')
+        with self.vault_lock(vid):
+            vault, keys, exists = self.key_folder(vid)
+            if not exists:
+                self.make_keys(vault, keys)
+            state = self.read_state(vid, keys, True)
+            self.tidy(keys, state)
+            top = state.top
+            if top and not top.damaged and (top.number > base if top.kind == CUT else top.gen > base):
+                return OK, top.number, top.served
+            number, floor = (top.number, top.floor) if top else (0, 0)
+            # The ended key file's tombstones stay for PUTKEY's checks above
+            # the cut; a cut on a cut (or on a damaged top) keeps them.
+            if top and top.kind == KEY_RECORD and not top.damaged:
+                self.write_tombs(keys, top.syntax.tombs)
+            cut = record_header(CUT, number + 1, floor)
+            self.append(keys, number + 1, floor, cut)
+            self.tidy_after(vid, keys)
+        return OK, number + 1, cut
+
+    def prune_below(self, vid, epoch):
+        """PRUNE: removes the stored versions whose header epoch is below
+        epoch (GOYOVA02 counts as 0), never the head; NOT_FOUND while the
+        head is below it. Takes no lock and never reads k/."""
+        versions_dir = self.paths(vid)[1]
+        for _ in range(3):
+            found = list_versions(versions_dir)
+            if not found:
+                return NOT_FOUND, 0, b''
+            try:
+                head = version_epoch(version_path(versions_dir, found[-1]))
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            raise Refused(SERVER_ERROR, 'head version keeps disappearing')
+        if head is None or head < epoch:
+            return NOT_FOUND, 0, b''
+        count = 0
+        for number in found[:-1]:
+            path = version_path(versions_dir, number)
+            try:
+                old = version_epoch(path)
+                if old is not None and old < epoch:
+                    os.unlink(path)
+                    count += 1
+            except FileNotFoundError:  # pruned meanwhile by a PUT's retention
+                continue
+        if count:
+            fsync_dir(versions_dir)
+        return OK, count, b''
+
 
 def read_exact(stream, size):
     """Exactly size bytes, or None if the stream ends first."""
@@ -411,6 +1155,12 @@ def handle(inp, store, deadline, slots):
     zero_id, zero_sha = not any(vid), not any(sha)
     if magic != REQUEST_MAGIC:
         raise Refused(BAD_REQUEST, 'not a goyo-sync request')
+    # The key ops exist only for the vaults this connection's --key-sync
+    # names; for any other vault they create nothing.
+    if op in KEY_OPS and not store.key_sync:
+        raise Refused(BAD_REQUEST, 'key sync is off on this server')
+    if op in KEY_OPS and vid not in store.key_sync:
+        raise Refused(BAD_REQUEST, 'key sync is off for this vault on this connection')
     # Every field must be exactly what the op uses: a mismatch means a broken
     # client or a mangled stream, never something to guess about.
     if op == HELLO:
@@ -425,11 +1175,21 @@ def handle(inp, store, deadline, slots):
         valid = zero_id and version == 0 and length == 0 and zero_sha
     elif op == FETCH:
         valid = not zero_id and length == 0 and zero_sha
+    elif op == PUTKEY:  # version: the record this upload builds on
+        valid = not zero_id
+        if valid and length > MAX_KEY_FILE:
+            raise Refused(TOO_LARGE, 'key file over 32 KiB')  # answered unread
+    elif op == GETKEY:  # version and sha: the record held and its SHA-256
+        valid = not zero_id and length == 0
+    elif op == CUTKEY:  # version: the record whose generation to end
+        valid = not zero_id and length == 0 and zero_sha and version <= EPOCH_MAX
+    elif op == PRUNE:   # version: the lowest epoch to keep
+        valid = not zero_id and length == 0 and zero_sha and version >= 1
     else:
         valid = False
     if not valid:
         raise Refused(BAD_REQUEST, 'invalid request header')
-    if op == PUT:
+    if op in (PUT, PUTKEY):
         deadline(TIMEOUT)  # up to 8 MiB on a slow line
     blob = read_exact(inp, length)
     if blob is None:
@@ -447,7 +1207,15 @@ def handle(inp, store, deadline, slots):
         return store.put(vid, version, blob, sha)
     if op == LIST:
         return store.listing()
-    return store.fetch(vid, version)
+    if op == FETCH:
+        return store.fetch(vid, version)
+    if op == PUTKEY:
+        return store.put_key(vid, version, blob, sha)
+    if op == GETKEY:
+        return store.get_key(vid, version, sha)
+    if op == CUTKEY:
+        return store.cut_key(vid, version)
+    return store.prune_below(vid, version)
 
 
 def send(out, status, version, blob):
@@ -463,14 +1231,16 @@ def no_deadline(seconds):
 
 
 def serve(inp, out, store, err, deadline=no_deadline, slots=0):
-    """Answer one request; returns the exit code. err gets one short line per
-    refusal and never any blob bytes. A real run passes signal.alarm as
+    """Answer one request; returns the exit code. err gets at most one short
+    line (a refusal's reason, or a note such as a damaged key record read as
+    a cut) and never any blob bytes. A real run passes signal.alarm as
     deadline (seconds, 0 = none), whose signal ends the process, and SLOTS
     as slots (0 = no cap, as in the selftest)."""
     deadline(HEADER_TIMEOUT)
+    store.note = None
     try:
         status, version, blob = handle(inp, store, deadline, slots)
-        note = None
+        note = store.note  # at most one line: a refusal's own note replaces it
     except Refused as e:
         note = str(e)
         status, version, blob = e.status, 0, b''
@@ -500,13 +1270,14 @@ def check(condition, what):
 def request(op, vid=bytes(16), version=0, blob=b'', sha=None, length=None):
     """A request frame as goyo-sync.exe builds it; sha and length can be forged."""
     if sha is None:
-        sha = hashlib.sha256(blob).digest() if op in (HELLO, PUT) else bytes(32)
+        sha = hashlib.sha256(blob).digest() if op in (HELLO, PUT, PUTKEY) else bytes(32)
     return REQUEST.pack(REQUEST_MAGIC, op, vid, version, len(blob) if length is None else length, sha) + blob
 
 
-def call(store, data, deadline=no_deadline, slots=0):
+def call(store, data, deadline=no_deadline, slots=0, notes=None):
     """serve() on raw stdin bytes, checking the response the way the client
-    does; returns (status, version, blob, exit code)."""
+    does; returns (status, version, blob, exit code), and appends what went
+    to stderr to notes when given."""
     out, err = io.BytesIO(), io.StringIO()
     code = serve(io.BytesIO(data), out, store, err, deadline, slots)
     frame = out.getvalue()
@@ -518,6 +1289,8 @@ def call(store, data, deadline=no_deadline, slots=0):
     text = err.getvalue()
     check(len(text) < 200 and all(32 <= ord(c) < 127 for c in text.rstrip('\n')),
           'stderr is one short ASCII line')
+    if notes is not None:
+        notes.append(text)
     return status, version, blob, code
 
 
@@ -549,15 +1322,6 @@ def selftest_root(root, base):
 
     def fetch(vid, number):
         return call(store, request(FETCH, vid, number))
-
-    def tree(path):
-        """Every name with its size and time, to prove nothing was written."""
-        found = []
-        for folder, dirs, files in os.walk(path):
-            for name in dirs + files:
-                info = os.lstat(os.path.join(folder, name))
-                found.append((os.path.relpath(os.path.join(folder, name), path), info.st_size, info.st_mtime_ns))
-        return sorted(found)
 
     def stored(vid, number):
         with open(version_path(store.paths(vid)[1], number), 'rb') as f:
@@ -913,11 +1677,916 @@ def selftest_root(root, base):
                     os.close(h.slot)
 
 
+def filler(seed, size):
+    """Deterministic bytes for what no grammar reads (wraps, the seal block,
+    the body, the chain) and for the contents of test vault files."""
+    block = hashlib.sha256(b'goyo selftest filler ' + seed).digest()
+    return (block * (size // 32 + 1))[:size]
+
+
+class KeyFile(bytes):
+    """A key file the selftest built; w is where its seal block starts."""
+
+
+def key_fields(vid, epoch, tag=0):
+    """The fields of a GOYOKS01 file (kind 6) with three keys numbered 1, 2
+    and 4: the first present and the authorizer, the second reached through
+    the first's pair record, the third suspended; two tombstones, one with a
+    loss mark. tag varies the data key and the keyset ID."""
+    def h(text):
+        return hashlib.sha256(text).digest()
+    slots = [{'kind': 1, 'flags': 3, 'number': number, 'reserved': 0, 'registered': 1767225600 + number,
+              'added_epoch': 1, 'added_by': bytes(16), 'seed': h(b'seed %d' % number),
+              'cred': b'credential %d' % number} for number in (1, 2, 4)]
+    tombs = sorted([(credhash(b'gone 1'), 1), (credhash(b'gone 2'), 1 | 9 << 48)],
+                   key=lambda t: (t[1] & EPOCH_MAX, t[0]))
+    return {'magic': KEY_MAGIC, 'vid': vid, 'epoch': epoch, 'flags': 2, 'next': 5, 'kind': 6,
+            'keys': [h(b'data key %d' % tag)[:16], h(b'id key')[:16]], 'tombs': tombs,
+            'authorizer': 0, 'present': 0b001, 'suspended': 0b100, 'reserved': bytes(5),
+            'ks_id': h(b'keyset %d' % tag)[:16], 'pw_id': h(b'password')[:16],
+            'written': 1767225600, 'loss': 0, 'slots': slots,
+            'pairs': [(0, 1, bytes(2)), (1, 0, bytes(2))], 'wraps': [(0, 0), (1, 0)], 'extra': b''}
+
+
+def build_key(f):
+    """The file the fields describe, in the layout of spec v3 section 4.1;
+    k, n, the tombstone count and p come from the lists unless set."""
+    k, otp = len(f['keys']), f['flags'] & 1
+    out = f['magic'] + f['vid'] + struct.pack(
+        '<QBBBBHBBBBB', f['epoch'], f['flags'], f.get('k', k), f.get('n', len(f['slots'])), f['next'],
+        f.get('count', len(f['tombs'])), f['kind'], f['authorizer'], f['present'], f['suspended'],
+        f.get('p', len(f['pairs'])))
+    out += f['reserved'] + f['ks_id'] + f['pw_id'] + struct.pack('<QQ', f['written'], f['loss'])
+    out += b''.join(f['keys']) + b''.join(ch + struct.pack('<Q', removed) for ch, removed in f['tombs'])
+    for s in f['slots']:
+        out += struct.pack('<BBBBQQ', s['kind'], s['flags'], s['number'], s['reserved'], s['registered'],
+                           s['added_epoch'])
+        out += s['added_by'] + s['seed'] + struct.pack('<H', len(s['cred'])) + s['cred']
+    for owner, target, reserved in f['pairs']:
+        out += bytes([owner, target]) + reserved + filler(b'pair', WRAP)
+    for recipient, via in f['wraps']:
+        out += bytes([recipient, via]) + filler(b'wrap', WRAP)
+    w = len(out)
+    out += filler(b'tail', SEAL_BLOCK + 32 + 32 * k + 20 * otp + 16 + 32 * k) + f['extra']
+    built = KeyFile(out)
+    built.w = w
+    return built
+
+
+def key_cases(vid):
+    """(name, file, valid) for gate 3's grammar: a valid file of each kind
+    and of each size bound, then each syntax rule broken once on a valid
+    base. The script runs alone on the server (setup.rs), so its table
+    lives here; the Rust side is held to it by a differential test."""
+    def h(text):
+        return hashlib.sha256(text).digest()
+
+    def by_order(tombs):
+        return sorted(tombs, key=lambda t: (t[1] & EPOCH_MAX, t[0]))
+
+    def base(**changes):
+        f = key_fields(vid, 10)
+        f.update(changes)
+        return f
+
+    def kind3():
+        f = base(kind=3, present=0b011, wraps=[(0, 0), (1, 1)])
+        f['slots'][1].update(added_epoch=10, added_by=credhash(f['slots'][0]['cred']))
+        return f
+
+    def kind5():
+        return base(kind=5, present=0b011, wraps=[(0, 0), (1, 1)])
+
+    def kind8():
+        return base(kind=8, present=0b111, suspended=0, wraps=[(0, 0), (1, 1), (2, 2)])
+
+    def smallest():
+        f = base(keys=[h(b'only key')[:16]], tombs=[], pairs=[], wraps=[(0, 0)], suspended=0)
+        f['slots'] = [dict(f['slots'][0], cred=b'x')]
+        return f
+
+    def largest():
+        f = base(flags=3, kind=8, present=0xFF, suspended=0, keys=[h(b'key %d' % i)[:16] for i in range(MAX_KEYS)],
+                 tombs=by_order((h(b'gone %d' % i)[:16], 1 + i % 10) for i in range(TOMB_MAX)),
+                 pairs=[(o, t, bytes(2)) for o in range(8) for t in range(8) if o != t],
+                 wraps=[(j, j) for j in range(8)])
+        f['slots'] = [dict(f['slots'][0], number=j + 1, cred=bytes([j]) * MAX_CRED_ID) for j in range(8)]
+        return f
+
+    def eight():
+        f = base(present=0b1, suspended=0b11111110, pairs=[], wraps=[(0, 0)])
+        f['slots'] = [dict(f['slots'][0], number=j + 1, cred=b'key %d' % j) for j in range(8)]
+        return f
+
+    def ninth(f):
+        """A ninth key, past what the masks can address."""
+        f['slots'].append(dict(f['slots'][0], number=9, cred=b'key 8'))
+        f.update(pairs=[(0, 8, bytes(2))], wraps=[(0, 0), (8, 0)])
+
+    def upd(**changes):
+        return lambda f: f.update(changes)
+
+    def slot(i, **changes):
+        return lambda f: f['slots'][i].update(changes)
+
+    def tomb(i, removed):
+        return lambda f: f['tombs'].__setitem__(i, (f['tombs'][i][0], removed))
+
+    def pair(i, record):
+        return lambda f: f['pairs'].__setitem__(i, record)
+
+    def wrap(i, record):
+        return lambda f: f['wraps'].__setitem__(i, record)
+
+    valid = [('kind 6: a key through a pair record, a suspended key', base()),
+             ('kind 2', base(kind=2)), ('kind 4', base(kind=4)), ('kind 9', base(kind=9)),
+             ('kind 3', kind3()), ('kind 5', kind5()), ('kind 8', kind8()), ('an OTP vault', base(flags=3)),
+             ('eight keys', eight()), ('the smallest file', smallest()), ('the largest file', largest())]
+    rules = [
+        (base, 'magic GOYOKS02', upd(magic=b'GOYOKS02')), (base, 'magic GOYOKH01', upd(magic=b'GOYOKH01')),
+        (base, 'magic GOYOKE03', upd(magic=b'GOYOKE03')), (base, 'magic GOYOKE01', upd(magic=b'GOYOKE01')),
+        (base, 'magic GOYOVA04', upd(magic=b'GOYOVA04')), (base, 'another vault', upd(vid=h(b'another')[:16])),
+        (base, 'epoch 0', upd(epoch=0)), (base, 'epoch 2^48', upd(epoch=EPOCH_MAX + 1)),
+        (base, 'epoch 2^48 + 1', upd(epoch=EPOCH_MAX + 2)), (base, 'epoch 2^64 - 1', upd(epoch=2 ** 64 - 1)),
+        (base, 'flags 0: not PIN mode', upd(flags=0)), (base, 'flags 1', upd(flags=1)),
+        (base, 'flag bit 2', upd(flags=6)), (base, 'flag bit 7', upd(flags=0x82)),
+        (base, 'no data key', upd(keys=[])), (base, '65 data keys', upd(keys=[h(b'key %d' % i)[:16] for i in range(65)])),
+        (base, 'next 0', upd(next=0)),
+        (base, '481 tombstones', upd(tombs=by_order((h(b'gone %d' % i)[:16], 1) for i in range(TOMB_MAX + 1)))),
+        (base, 'kind 0', upd(kind=0)), (base, 'kind 1', upd(kind=1)), (base, 'kind 7', upd(kind=7)),
+        (base, 'kind 10', upd(kind=10)), (base, 'kind 11', upd(kind=11)),
+        (base, 'authorizer at n', upd(authorizer=3)),
+        (base, 'authorizer outside the present mask', upd(present=0b010, suspended=0b101, wraps=[(1, 1)])),
+        (base, 'a suspended authorizer', upd(present=0b010, suspended=0b001, wraps=[(1, 1), (2, 0)])),
+        (base, 'present bit at n', upd(present=0b1001)), (base, 'suspended bit at n', upd(suspended=0b1100)),
+        (base, 'present and suspended', upd(present=0b101)),
+        (base, 'p above n(n-1)', upd(pairs=[(o, t, bytes(2)) for o in range(3) for t in range(3) if o != t]
+                                     + [(2, 1, bytes(2))])),
+    ] + [(base, 'reserved byte %d' % (43 + i), upd(reserved=bytes(i) + b'\x01' + bytes(4 - i))) for i in range(5)] + [
+        (base, 'ks_id zero', upd(ks_id=bytes(16))), (base, 'ks_id of an all-zero secret', upd(ks_id=ks_id_zero(vid))),
+        (base, 'pw_id zero', upd(pw_id=bytes(16))),
+        (base, 'duplicate data key IDs', lambda f: f['keys'].__setitem__(1, f['keys'][0])),
+        (base, 'tombstones out of order', lambda f: f['tombs'].reverse()),
+        (base, 'duplicate tombstone', lambda f: f['tombs'].__setitem__(1, (f['tombs'][0][0], 2))),
+        (base, 'tombstone at epoch 0', tomb(0, 0)), (base, 'tombstone at epoch 0 with a loss mark', tomb(0, 1 << 48)),
+        (base, 'tombstone above the epoch', tomb(1, 11 | 1 << 48)),
+        (base, 'a live key tombstoned', lambda f: f.update(tombs=by_order(f['tombs'] + [(credhash(b'credential 2'), 2)]))),
+        (base, 'slot kind 0', slot(1, kind=0)), (base, 'slot kind 2', slot(1, kind=2)),
+        (base, 'slot flags 2: not a PIN slot', slot(1, flags=2)), (base, 'slot flags 1', slot(1, flags=1)),
+        (base, 'slot flags 4', slot(1, flags=4)), (base, 'slot reserved byte', slot(1, reserved=1)),
+        (base, 'key number 0', slot(0, number=0)), (base, 'key numbers out of order', slot(1, number=9)),
+        (base, 'duplicate key number', slot(1, number=1)), (base, 'empty credential ID', slot(1, cred=b'')),
+        (base, 'credential ID of 1024 bytes', slot(1, cred=b'\x22' * 1024)),
+        (base, 'duplicate credential ID', slot(1, cred=b'credential 1')),
+        (base, 'added at epoch 0', slot(1, added_epoch=0)), (base, 'added above the epoch', slot(1, added_epoch=11)),
+        (base, 'a key added in a write of kind 6', slot(1, added_epoch=10)),
+        (base, 'no key', upd(slots=[], present=0, suspended=0, pairs=[], wraps=[])),
+        (eight, 'nine keys', ninth),
+        (kind8, 'kind 8 with a key not present', upd(present=0b011)),
+        (kind8, 'kind 8 with a suspended key', upd(present=0b011, suspended=0b100, wraps=[(0, 0), (1, 1)])),
+        (kind8, 'kind 8 with a new key', slot(1, added_epoch=10)),
+        (kind3, 'kind 3 with no new key', slot(1, added_epoch=1)),
+        (kind3, 'kind 3 with two new keys', slot(0, added_epoch=10)),
+        (kind3, 'kind 3 whose new key is not present', upd(present=0b001, wraps=[(0, 0), (1, 0)])),
+        (kind3, 'kind 3 not added by its authorizer', slot(1, added_by=credhash(b'credential 4'))),
+        (kind5, 'kind 5 with one key present', upd(present=0b001, wraps=[(0, 0), (1, 0)])),
+        (base, 'pair records out of order', lambda f: f['pairs'].reverse()),
+        (base, 'duplicate pair record', lambda f: f['pairs'].insert(0, (0, 1, bytes(2)))),
+        (base, 'pair record to itself', lambda f: f['pairs'].append((2, 2, bytes(2)))),
+        (base, 'pair record owner at n', lambda f: f['pairs'].append((3, 0, bytes(2)))),
+        (base, 'pair record target at n', lambda f: f['pairs'].append((2, 3, bytes(2)))),
+        (base, 'pair record reserved byte 2', pair(1, (1, 0, b'\x01\x00'))),
+        (base, 'pair record reserved byte 3', pair(1, (1, 0, b'\x00\x01'))),
+        (base, 'missing S-wrap', lambda f: f['wraps'].pop()),
+        (base, 'S-wrap for a suspended key', lambda f: f['wraps'].append((2, 0))),
+        (base, 'S-wraps out of order', lambda f: f['wraps'].reverse()),
+        (base, 'via neither recipient nor authorizer', wrap(1, (1, 2))),
+        (base, 'via without its pair record', lambda f: f['pairs'].pop(0)),
+        (base, 'a key not present through itself', wrap(1, (1, 1))),
+        (kind5, 'a present key through the authorizer', wrap(1, (1, 0))),
+        (base, 'one byte appended', upd(extra=b'\x00')),
+    ]
+    cases = [(name, build_key(f), True) for name, f in valid]
+    for make, name, change in rules:
+        f = make()
+        check(key_syntax(build_key(f), vid) is not None, 'the base of %s is valid' % name)
+        change(f)
+        cases.append((name, build_key(f), False))
+    file = build_key(base())
+    largest_file = build_key(largest())
+    check((len(build_key(smallest())), len(largest_file)) == (MIN_KEY_FILE, 32532), 'the bounds of the layout')
+    cases += [('one byte short', file[:-1], False),
+              ('the OTP bit without an OTP secret', file[:32] + b'\x03' + file[33:], False),
+              ('32769 bytes', largest_file + bytes(MAX_KEY_FILE + 1 - len(largest_file)), False),
+              ('GOYOVA02', b'GOYOVA02' + vid + filler(b'vault', 72), False)]
+    return cases
+
+
+def tree(path):
+    """Every name with its size and time, to prove nothing was written."""
+    found = []
+    for folder, dirs, files in os.walk(path):
+        for name in dirs + files:
+            info = os.lstat(os.path.join(folder, name))
+            found.append((os.path.relpath(os.path.join(folder, name), path), info.st_size, info.st_mtime_ns))
+    return sorted(found)
+
+
+# The child of selftest row 4 (b): holds a vault lock until it is killed.
+HOLDER = ('import importlib.util, sys, time\n'
+          'spec = importlib.util.spec_from_file_location("goyo_sync_server", sys.argv[1])\n'
+          'server = importlib.util.module_from_spec(spec)\n'
+          'spec.loader.exec_module(server)\n'
+          'held = server.Store(sys.argv[2]).vault_lock(bytes.fromhex(sys.argv[3]))\n'
+          'print("held", flush=True)\n'
+          'time.sleep(600)\n')
+
+
+class Killed(BaseException):
+    """A simulated kill at a point of a key op: no cleanup of the op runs,
+    only the lock's release (the kernel's, on a real kill)."""
+
+
+def selftest_keys(base):
+    """Key-file sync (spec v3 section 7.13, selftest rows 1-12), each case
+    on a fresh root under base."""
+    ids = [hashlib.sha256(b'goyo key selftest %d' % n).digest()[:16] for n in range(80)]
+    a, b, c = ids[:3]
+    roots, scanned = itertools.count(), []
+    bad = (BAD_REQUEST, 0, b'', 1)
+
+    class Roomy(Store):
+        """The root lies in the temp folder, which may be a small tmpfs."""
+
+        def free_space(self):
+            return None
+
+    class Paused(Roomy):
+        """Stops a key op at one of its points until go is set."""
+
+        def __init__(self, root, named, at):
+            Roomy.__init__(self, root, named)
+            self.at, self.inside, self.go = at, threading.Event(), threading.Event()
+
+        def step(self, name):
+            if name == self.at:
+                self.inside.set()
+                self.go.wait(60)
+
+    class Rival(Roomy):
+        """Runs another request once, at a point of this op before its lock."""
+        point, data, answer = 'locking', None, None
+
+        def step(self, name):
+            if name == self.point and self.answer is None:
+                self.answer = call(Roomy(self.root, self.key_sync), self.data)
+
+    class Crashing(Roomy):
+        at = None
+
+        def step(self, name):
+            if name == self.at:
+                raise Killed(name)
+
+    class Unreadable(Roomy):
+        """Reading the top record fails with error (not damage)."""
+        error, top = None, None
+
+        def read_record(self, path):
+            if os.path.basename(path) == self.top:
+                raise self.error
+            return Roomy.read_record(self, path)
+
+    def fresh(*named):
+        store = Roomy(os.path.join(base, 'keys-%d' % next(roots)), named)
+        scanned.append(store)
+        return store
+
+    def ks(vid, epoch, tag=0, **changes):
+        f = key_fields(vid, epoch, tag)
+        f.update(changes)
+        return build_key(f)
+
+    def key(gen, data):
+        """The key record of data in generation gen."""
+        return record_header(KEY_RECORD, gen, struct.unpack('<Q', data[24:32])[0]) + data
+
+    def sealed(vid, key_file, seed, epoch=None, key_id=None, state=None):
+        """A GOYOVA04 file written under key_file's state, or with one field
+        of its header changed."""
+        epoch = struct.unpack('<Q', key_file[24:32])[0] if epoch is None else epoch
+        head = (b'GOYOVA04' + vid + (key_file[96:112] if key_id is None else key_id) + struct.pack('<Q', epoch)
+                + (state_tag(key_file[:key_file.w]) if state is None else state) + b'\x03\x00\x00\x00')
+        return head + filler(b'vault %d' % seed, 140 - len(head))
+
+    def anywhere(vid, seed, epoch):
+        """A GOYOVA04 file under some key state at epoch."""
+        return sealed(vid, ks(vid, 2, 1000 + seed), seed, epoch=epoch)
+
+    def plain(vid, seed):
+        return b'GOYOVA02' + vid + filler(b'vault %d' % seed, 72)
+
+    def in_thread(run):
+        got = []
+        worker = threading.Thread(target=lambda: got.append(run()))
+        worker.start()
+        return worker, got
+
+    def putkey(store, vid, on, data, **forged):
+        return call(store, request(PUTKEY, vid, on, data, **forged))
+
+    def getkey(store, vid, have=0, have_sha=bytes(32)):
+        return call(store, request(GETKEY, vid, have, sha=have_sha))
+
+    def cutkey(store, vid, on):
+        return call(store, request(CUTKEY, vid, on))
+
+    def put(store, vid, expected, data):
+        return call(store, request(PUT, vid, expected, data))
+
+    def noted(store, data, want, words):
+        """The answer, with exactly one stderr line holding words."""
+        notes = []
+        answer = call(store, data, notes=notes)
+        return answer == want and len(notes[0].splitlines()) == 1 and words in notes[0]
+
+    def kdir(store, vid):
+        return os.path.join(store.paths(vid)[0], 'k')
+
+    def numbers(store, vid):
+        """The record numbers in k/, and whether a temp is there."""
+        names = os.listdir(kdir(store, vid))
+        return sorted(int(n[:20]) for n in names if RECORD_NAME.fullmatch(n)), any(TMP_NAME.fullmatch(n) for n in names)
+
+    def payloads(store, vid):
+        """How many records in k/ carry a key file."""
+        count = 0
+        for name in os.listdir(kdir(store, vid)):
+            if RECORD_NAME.fullmatch(name):
+                with open(os.path.join(kdir(store, vid), name), 'rb') as f:
+                    count += f.read(9)[8:9] == bytes([KEY_RECORD])
+        return count
+
+    def record_path(store, vid, number):
+        names = [n for n in os.listdir(kdir(store, vid)) if n.startswith('%020d-' % number)]
+        check(len(names) == 1, 'one record numbered %d' % number)
+        return os.path.join(kdir(store, vid), names[0])
+
+    f2, f3, f4 = ks(a, 2, 1), ks(a, 3, 2), ks(a, 4, 3)
+
+    # Row 1: without --key-sync every key op is BAD_REQUEST and creates
+    # nothing; a vault without k/ takes GOYOVA04 at any epoch and gets no
+    # lock file.
+    store = fresh()
+    for data in (request(PUTKEY, a, 0, f2), request(GETKEY, a), request(CUTKEY, a, 0), request(PRUNE, a, 1)):
+        check(noted(store, data, bad, 'key sync is off on this server'), 'key ops without --key-sync')
+    check(not os.path.lexists(store.root), 'key ops without --key-sync create nothing')
+    check(put(store, a, 0, anywhere(a, 1, 7)) == (OK, 1, b'', 0) and put(store, a, 1, anywhere(a, 2, 3)) == (OK, 2, b'', 0)
+          and put(store, a, 2, plain(a, 3)) == (OK, 3, b'', 0), 'a vault without k/ has no floor')
+    check(sorted(os.listdir(store.paths(a)[0])) == ['v'], 'a vault without k/ gets no lock file and no k/')
+    # With --key-sync=<A>, the key ops of vault B create nothing.
+    store = fresh(a)
+    for data in (request(PUTKEY, b, 0, ks(b, 2)), request(GETKEY, b), request(CUTKEY, b, 0), request(PRUNE, b, 1)):
+        check(noted(store, data, bad, 'key sync is off for this vault on this connection'), 'key ops of an unnamed vault')
+    check(not os.path.lexists(store.paths(b)[0]), 'key ops of an unnamed vault create nothing')
+    # The floor binds every connection once k/ exists.
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1), 'PUTKEY(0) stores the first key file')
+    check(put(Roomy(store.root), a, 0, sealed(a, f2, 1)) == (OK, 1, b'', 0)
+          and put(Roomy(store.root), a, 1, anywhere(a, 2, 2)) == (KEY_BEHIND, 0, b'', 0)
+          and put(Roomy(store.root, (b,)), a, 1, anywhere(a, 3, 2)) == (KEY_BEHIND, 0, b'', 0),
+          'the floor applies on a connection without --key-sync, or naming another vault')
+    # A k/ holding nothing, or only a temp, is no floor.
+    store = fresh(c)
+    check(put(store, c, 0, plain(c, 1)) == (OK, 1, b'', 0), 'seed c')
+    os.mkdir(kdir(store, c))
+    check(put(store, c, 1, plain(c, 2)) == (OK, 2, b'', 0), 'an empty k/ is no floor')
+    check(putkey(store, c, 3, ks(c, 2)) == (EMPTY, 0, b'', 0), 'PUTKEY on a record of an empty k/: EMPTY')
+    with open(os.path.join(kdir(store, c), 'tmp-1-1-1'), 'wb') as f:
+        f.write(record_header(KEY_RECORD, 0, 2) + f2)
+    check(put(store, c, 2, plain(c, 3)) == (OK, 3, b'', 0), 'a k/ with only a temp is no floor')
+    os.unlink(os.path.join(kdir(store, c), 'tmp-1-1-1'))
+    # The command line: exactly serve [--root DIR] [--key-sync=ID[,ID...]].
+    r = os.path.join(base, 'r')
+    for argv in (['serve', '--key-sync'], ['serve', '--key-sync='], ['serve', '--key-sync', a.hex()],
+                 ['serve', '--key-sync=' + a.hex().upper()], ['serve', '--key-sync=' + a.hex()[:-1]],
+                 ['serve', '--key-sync=%s,%s' % (a.hex(), a.hex())], ['serve', '--key-sync=' + a.hex() + ','],
+                 ['serve', '--key-sync=' + ','.join(i.hex() for i in ids[:65])],
+                 ['serve', '--key-sync=' + a.hex(), '--root', r], ['serve', '--root', r, '--key-sync=' + a.hex(), 'x'],
+                 ['serve', '--root'], ['serve', '--root', ''], ['serve', '--keysync=' + a.hex()]):
+        check(serve_args(argv) is None, 'refused: %s' % ' '.join(argv)[:60])
+    check(serve_args(['serve']) == (None, ()) and serve_args(['serve', '--root', r]) == (r, ())
+          and serve_args(['serve', '--root', r, '--key-sync=%s,%s' % (a.hex(), b.hex())]) == (r, (a, b))
+          and serve_args(['serve', '--key-sync=' + ','.join(i.hex() for i in ids[:64])]) == (None, tuple(ids[:64])),
+          'the forms of serve')
+    script, r = os.path.abspath(__file__), os.path.join(base, 'keys-%d' % next(roots))
+    done = subprocess.run([sys.executable, '-I', script, 'serve', '--root', r, '--key-sync'],
+                          input=request(GETKEY, a), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    check(done.returncode == 2 and done.stdout == b'' and b'usage' in done.stderr, 'main() refuses a bare --key-sync')
+    done = subprocess.run([sys.executable, '-I', script, 'serve', '--root', r, '--key-sync=' + a.hex()],
+                          input=request(GETKEY, a), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    check(done.returncode == 0 and done.stdout == RESPONSE.pack(RESPONSE_MAGIC, EMPTY, 0, 0, bytes(32)),
+          'serve --key-sync=<id> answers a key op')
+
+    # Malformed key-op requests, and the deadlines of PUTKEY and GETKEY.
+    store = fresh(a)
+    for data, what in ((request(PUTKEY, bytes(16), 0, f2), 'PUTKEY without an id'),
+                       (request(GETKEY, a, 0, b'x'), 'GETKEY with a blob'),
+                       (request(CUTKEY, a, 0, sha=b'\1' * 32), 'CUTKEY with a sha'),
+                       (request(CUTKEY, a, 0, b'x'), 'CUTKEY with a blob'),
+                       (request(CUTKEY, a, EPOCH_MAX + 1), 'CUTKEY above EPOCH_MAX'),
+                       (request(PRUNE, a, 0), 'PRUNE of epoch 0'), (request(PRUNE, a, 1, b'x'), 'PRUNE with a blob'),
+                       (request(PRUNE, a, 1, sha=b'\1' * 32), 'PRUNE with a sha'),
+                       (request(PUTKEY, a, 0, f2)[:-1], 'short PUTKEY blob'), (request(10, a), 'op 10')):
+        check(call(store, data) == bad, 'BAD_REQUEST: ' + what)
+    check(call(store, request(PUTKEY, a, 0, length=MAX_KEY_FILE + 1)) == (TOO_LARGE, 0, b'', 1),
+          'TOO_LARGE answered without reading the key file')
+    check(putkey(store, a, 0, f2, sha=bytes(32)) == (BAD_BLOB, 0, b'', 0), 'BAD_BLOB: PUTKEY checksum')
+    check(getkey(store, a) == (EMPTY, 0, b'', 0) and putkey(store, a, 1, f2) == (EMPTY, 0, b'', 0)
+          and not os.path.lexists(store.root), 'GETKEY, and PUTKEY on a record, with nothing stored: EMPTY')
+    steps = []
+    check(call(store, request(PUTKEY, a, 0, f2), steps.append)[:2] == (OK, 1)
+          and steps == [HEADER_TIMEOUT, TIMEOUT, 0, TIMEOUT], 'deadlines: PUTKEY')
+    del steps[:]
+    check(call(store, request(GETKEY, a, 1, sha=hashlib.sha256(key(0, f2)).digest()), steps.append)
+          == (NOT_MODIFIED, 1, b'', 0) and steps == [HEADER_TIMEOUT, 0, REPLY_TIMEOUT], 'deadlines: GETKEY')
+
+    # Row 2: PUT takes no key file, also where a floor stands.
+    for data, what in ((f3, 'GOYOKS01'), (b'GOYOKH01' + f3[8:], 'GOYOKH01'), (b'GOYOKE03' + f3[8:], 'GOYOKE03'),
+                       (record_header(KEY_RECORD, 0, 3) + f3, 'a key record')):
+        check(put(store, a, 0, data) == (BAD_BLOB, 0, b'', 0), 'PUT refuses %s below a floor' % what)
+
+    # Row 3: gate 3's grammar. A valid file of each kind and size is stored;
+    # each rule broken once is BAD_BLOB with the grammar's reason, and
+    # writes nothing.
+    for name, data, valid in key_cases(a):
+        store = fresh(a)
+        if valid:
+            check(putkey(store, a, 0, data) == (OK, 1, record_header(KEY_RECORD, 0, 10), 0), 'stored: ' + name)
+            continue
+        check(key_syntax(data, a) is None, 'grammar: ' + name)
+        if len(data) > MAX_KEY_FILE:
+            refusal, words = (TOO_LARGE, 0, b'', 1), 'key file over 32 KiB'
+        else:
+            refusal, words = (BAD_BLOB, 0, b'', 0), 'not a GOYOKS01 key file of this vault'
+        check(noted(store, request(PUTKEY, a, 0, data), refusal, words) and not os.path.lexists(store.root),
+              'refused: ' + name)
+    key01 = b'GOYOKE01' + a + hashlib.sha256(b'key 1').digest() * 3 + b'\x01' * 28
+    key02 = b'GOYOKE02' + a + hashlib.sha256(b'key 2').digest() * 3 + b'\x02' * 8
+    store = fresh(a)
+    for data, what in ((key01, 'GOYOKE01'), (key02, 'GOYOKE02'), (anywhere(a, 1, 10), 'GOYOVA04'),
+                       (plain(a, 1), 'GOYOVA02'), (ks(b, 10), "another vault's GOYOKS01")):
+        check(noted(store, request(PUTKEY, a, 0, data), (BAD_BLOB, 0, b'', 0), 'not a GOYOKS01 key file'),
+              'PUTKEY refuses ' + what)
+    check(not os.path.lexists(store.root), 'refused key files wrote nothing')
+    check(noted(store, request(PUTKEY, a, 0, ks(a, EPOCH_MAX)), (BAD_BLOB, 0, b'', 0), 'epoch window')
+          and not os.path.lexists(kdir(store, a)), 'a valid file at EPOCH_MAX on an empty namespace is outside the window')
+    # The window and the honest-server checks against the stored key file.
+    store = fresh(a)
+    check(putkey(store, a, 0, ks(a, 10, 1))[:2] == (OK, 1), 'PUTKEY(0) at epoch 10')
+    for data, what in ((ks(a, 10, 2), 'the same epoch'), (ks(a, 9, 2), 'a lower epoch'),
+                       (ks(a, 10 + EPOCH_WINDOW + 1, 2), 'more than 2^16 above')):
+        check(noted(store, request(PUTKEY, a, 1, data), (BAD_BLOB, 0, b'', 0), 'epoch window'), 'window: ' + what)
+    tombs = key_fields(a, 11)['tombs']
+    relisted = key_fields(a, 11, 2)
+    relisted['slots'][1]['cred'], relisted['tombs'] = b'gone 1', [t for t in tombs if t[0] != credhash(b'gone 1')]
+    authorized = key_fields(a, 11, 2)
+    authorized['slots'][0]['cred'], authorized['tombs'] = b'gone 2', [t for t in tombs if t[0] != credhash(b'gone 2')]
+    for data, what in ((ks(a, 11, 2, tombs=tombs[:1]), 'drops a tombstone'),
+                       (build_key(relisted), 're-lists a tombstoned key'),
+                       (build_key(authorized), 'is authorized by a tombstoned key')):
+        check(noted(store, request(PUTKEY, a, 1, data), (BAD_BLOB, 0, b'', 0), 'tombstone or authorizer check'),
+              'honest-server check: ' + what)
+    top = 10 + EPOCH_WINDOW
+    check(putkey(store, a, 1, ks(a, top, 2)) == (OK, 2, record_header(KEY_RECORD, 0, top), 0),
+          'exactly 2^16 above is stored')
+    check(cutkey(store, a, 2) == (OK, 3, record_header(CUT, 3, top), 0), 'a cut keeps the floor')
+    for data, what in ((ks(a, top, 3), "the cut's floor"), (ks(a, top + EPOCH_WINDOW + 1, 3), 'more than 2^16 above it')):
+        check(noted(store, request(PUTKEY, a, 3, data), (BAD_BLOB, 0, b'', 0), 'epoch window'), 'window: ' + what)
+    check(putkey(store, a, 3, ks(a, top + 1, 3)) == (OK, 4, record_header(KEY_RECORD, 3, top + 1), 0),
+          'above the cut: a new generation')
+    # Above a cut the same checks run against the tombstones of the key
+    # record a cut ended (k/tombs, never served; a fence keeps them), so a
+    # removed key's holder with a sync SSH key cannot cut and then store a
+    # file that key authorizes.
+    store = fresh(a)
+    check(putkey(store, a, 0, ks(a, 10, 1))[:2] == (OK, 1) and cutkey(store, a, 1)[:2] == (OK, 2)
+          and cutkey(store, a, 2)[:2] == (OK, 3) and numbers(store, a) == ([3], False),
+          'seed: a key record ended by a cut, then a fence')
+    with open(os.path.join(kdir(store, a), TOMBS_NAME), 'rb') as f:
+        check(f.read() == b''.join(sorted(t[0] for t in tombs)), "k/tombs holds the ended file's tombstones")
+    for data, what in ((ks(a, 11, 2, tombs=tombs[:1]), 'drops a tombstone'),
+                       (build_key(relisted), 're-lists a tombstoned key'),
+                       (build_key(authorized), 'is authorized by a tombstoned key')):
+        check(noted(store, request(PUTKEY, a, 3, data), (BAD_BLOB, 0, b'', 0), 'tombstone or authorizer check'),
+              'honest-server check above a cut: ' + what)
+    check(putkey(store, a, 3, ks(a, 11, 2)) == (OK, 4, record_header(KEY_RECORD, 3, 11), 0)
+          and getkey(store, a) == (OK, 4, key(3, ks(a, 11, 2)), 0), 'above a cut a file that keeps them lands')
+
+    # Row 4 (a): mutual exclusion in one process.
+    store = fresh(a, c)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1) and put(store, a, 0, sealed(a, f2, 1)) == (OK, 1, b'', 0)
+          and put(store, c, 0, plain(c, 1)) == (OK, 1, b'', 0), 'seed the lock test')
+    holder, held, release = Roomy(store.root, (a,)), threading.Event(), threading.Event()
+
+    def keep():
+        with holder.vault_lock(a):
+            held.set()
+            release.wait(60)
+    worker = threading.Thread(target=keep)
+    worker.start()
+    try:
+        check(held.wait(60), 'a second Store holds the vault lock')
+        store.lock_wait = 0.2
+        for data, what in ((request(PUTKEY, a, 1, f3), 'PUTKEY'), (request(GETKEY, a), 'GETKEY'),
+                           (request(CUTKEY, a, 1), 'CUTKEY'), (request(PUT, a, 1, sealed(a, f2, 2)), 'vault PUT')):
+            started = time.monotonic()
+            check(noted(store, data, (SERVER_ERROR, 0, b'', 1), 'busy: vault lock held')
+                  and time.monotonic() - started < 10, 'busy while another holds the lock: ' + what)
+        check(put(store, c, 1, plain(c, 2)) == (OK, 2, b'', 0), 'a vault without k/ takes no lock')
+    finally:
+        release.set()
+        worker.join()
+    store.lock_wait = LOCK_WAIT
+    check(putkey(store, a, 1, f3)[:2] == (OK, 2) and getkey(store, a)[:2] == (OK, 2)
+          and put(store, a, 1, sealed(a, f3, 2)) == (OK, 2, b'', 0) and cutkey(store, a, 2)[:2] == (OK, 3),
+          'released, the same requests land')
+    check(sorted(os.listdir(store.paths(c)[0])) == ['v'], 'a vault without k/ has no lock file')
+    # (b) the kernel frees the lock of a killed process.
+    store = fresh(a)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1), 'seed the kill test')
+    child = subprocess.Popen([sys.executable, '-I', '-c', HOLDER, os.path.abspath(__file__), store.root, a.hex()],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        check(child.stdout.readline().strip() == b'held', 'a child process holds the vault lock')
+        store.lock_wait = 0.2
+        check(noted(store, request(GETKEY, a), (SERVER_ERROR, 0, b'', 1), 'busy'), 'busy while the child holds it')
+    finally:
+        child.kill()
+        child.wait()
+        child.stdout.close()
+    # Windows frees a dead process's range after a while: the full LOCK_WAIT.
+    store.lock_wait = LOCK_WAIT
+    check(putkey(store, a, 1, f3)[:2] == (OK, 2), "a killed process's lock is free again")
+    # (c) the record CAS: the second of two PUTKEYs on one base waits for the
+    # first, which holds the lock, and gets CONFLICT carrying the winner.
+    paused = Paused(store.root, (a,), 'temp')
+    first, won = in_thread(lambda: putkey(paused, a, 2, f4))
+    check(paused.inside.wait(60), 'the first PUTKEY holds the lock')
+    second, lost = in_thread(lambda: putkey(Roomy(store.root, (a,)), a, 2, ks(a, 4, 9)))
+    time.sleep(0.3)
+    waited = second.is_alive()
+    paused.go.set()
+    first.join()
+    second.join()
+    check(waited, 'the second PUTKEY waits for the lock')
+    check(won == [(OK, 3, record_header(KEY_RECORD, 0, 4), 0)] and lost == [(CONFLICT, 3, key(0, f4), 0)],
+          'CAS: one OK, one CONFLICT carrying the winner')
+    check(putkey(store, a, 2, f4) == (CONFLICT, 3, key(0, f4), 0), 'a resend of the winner gets its own file')
+    store = fresh(a)
+    check(putkey(store, a, 2, f4) == (EMPTY, 0, b'', 0) and not os.path.lexists(store.root),
+          'EMPTY(0) on an empty namespace creates neither the vault folder nor a lock file')
+
+    # Row 5: a kill at each point of PUTKEY and CUTKEY leaves the before- or
+    # the after-state; the next key op's tidy() leaves no temp and at most two
+    # key files; a resend after the link gets its own file, or its cut.
+    for point in ('temp', 'link', 'unlinked', 'commit'):
+        after = point != 'temp'
+        for op in (PUTKEY, CUTKEY):
+            store = fresh(a)
+            check(putkey(store, a, 0, f2)[:2] == (OK, 1) and putkey(store, a, 1, f3)[:2] == (OK, 2), 'seed')
+            crash = Crashing(store.root, (a,))
+            crash.at = point
+            data = request(PUTKEY, a, 2, f4) if op == PUTKEY else request(CUTKEY, a, 2)
+            try:
+                call(crash, data)
+                check(False, 'the kill at %s happened' % point)
+            except Killed:
+                pass
+            check(numbers(store, a)[1] == (point in ('temp', 'link')), 'a kill at %s leaves its temp' % point)
+            if point == 'link':
+                check(put(store, a, 0, sealed(a, f4, 1) if op == PUTKEY else anywhere(a, 1, 50)) == (OK, 1, b'', 0),
+                      'a record whose second name is its temp does not stop a vault PUT')
+            done = (key(0, f4) if op == PUTKEY else record_header(CUT, 3, 3)) if after else key(0, f3)
+            check(getkey(store, a) == (OK, 3 if after else 2, done, 0), 'GETKEY after a kill at %s' % point)
+            check(not numbers(store, a)[1] and payloads(store, a) <= 2, 'tidy() after a kill at %s' % point)
+            resent = call(store, data)
+            if op == PUTKEY:
+                check(resent == ((CONFLICT, 3, key(0, f4), 0) if after else (OK, 3, record_header(KEY_RECORD, 0, 4), 0)),
+                      'a resent PUTKEY after a kill at %s' % point)
+            else:
+                check(resent == (OK, 3, record_header(CUT, 3, 3), 0) and numbers(store, a) == ([3], False),
+                      'a resent CUTKEY after a kill at %s' % point)
+
+    # Row 6: retention.
+    store = fresh(a)
+    files = [ks(a, 2 + i, i) for i in range(3)]
+    for i, data in enumerate(files):
+        check(putkey(store, a, i, data) == (OK, i + 1, record_header(KEY_RECORD, 0, 2 + i), 0), 'PUTKEY %d' % i)
+    newest = key(0, files[2])
+    check(numbers(store, a) == ([2, 3], False), 'after 3 PUTKEYs records 2 and 3 remain')
+    check(getkey(store, a) == (OK, 3, newest, 0) and getkey(store, a, 2, hashlib.sha256(key(0, files[1])).digest())
+          == (OK, 3, newest, 0), 'GETKEY serves the newest record only')
+    check(getkey(store, a, 3, hashlib.sha256(newest).digest()) == (NOT_MODIFIED, 3, b'', 0)
+          and getkey(store, a, 3, bytes(32)) == (OK, 3, newest, 0), 'NOT_MODIFIED needs the number and the SHA-256')
+    check(cutkey(store, a, 3)[:2] == (OK, 4) and numbers(store, a) == ([4], False)
+          and putkey(store, a, 4, ks(a, 6, 4))[:2] == (OK, 5) and numbers(store, a) == ([5], False)
+          and putkey(store, a, 5, ks(a, 7, 5))[:2] == (OK, 6) and numbers(store, a) == ([5, 6], False),
+          'record numbers only grow')
+
+    # Row 7: the vault floor.
+    store = fresh(a)
+    f5 = ks(a, 5, 1)
+    check(putkey(store, a, 0, f5)[:2] == (OK, 1) and put(store, a, 0, sealed(a, f5, 1)) == (OK, 1, b'', 0),
+          "GOYOVA04 at the key record's epoch, key ID and state tag lands")
+    other = ks(a, 5, 2)
+    v = store.paths(a)[1]
+    for data, what in ((sealed(a, f5, 2, key_id=other[96:112]), 'another key ID'),
+                       (sealed(a, f5, 3, state=state_tag(other[:other.w])), 'another state tag'),
+                       (sealed(a, f5, 4, epoch=6), 'a higher epoch'), (sealed(a, f5, 5, epoch=4), 'a lower epoch'),
+                       (plain(a, 6), 'GOYOVA02')):
+        before = tree(v)
+        check(noted(store, request(PUT, a, 1, data), (KEY_BEHIND, 0, b'', 0), 'does not match the stored key file')
+              and tree(v) == before, 'KEY_BEHIND: ' + what)
+    check(put(store, a, 1, sealed(a, f5, 7)) == (OK, 2, b'', 0), 'the matching state lands again')
+    # Exactness: vault PUTs that wait for the lock while a PUTKEY commits
+    # see the new key state.
+    f6 = ks(a, 6, 2)
+    paused = Paused(store.root, (a,), 'temp')
+    first, landed = in_thread(lambda: putkey(paused, a, 1, f6))
+    check(paused.inside.wait(60), 'the PUTKEY holds the lock')
+    new, at_new = in_thread(lambda: put(Roomy(store.root), a, 2, sealed(a, f6, 8)))
+    old, at_old = in_thread(lambda: put(Roomy(store.root), a, 2, sealed(a, f5, 9)))
+    time.sleep(0.3)
+    waited = new.is_alive() and old.is_alive()
+    paused.go.set()
+    for worker in (first, new, old):
+        worker.join()
+    check(waited and landed[0][:2] == (OK, 2) and at_new == [(OK, 3, b'', 0)] and at_old == [(KEY_BEHIND, 0, b'', 0)],
+          'the floor is exact: a waiting vault PUT sees the key record committed before it')
+    check(cutkey(store, a, 2)[:2] == (OK, 3) and put(store, a, 3, anywhere(a, 10, 999)) == (OK, 4, b'', 0)
+          and put(store, a, 4, plain(a, 11)) == (KEY_BEHIND, 0, b'', 0), 'after a cut: any GOYOVA04, no GOYOVA02')
+
+    # Row 8: CUTKEY.
+    store = fresh(a)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1) and putkey(store, a, 1, f3)[:2] == (OK, 2), 'seed')
+    cut3 = record_header(CUT, 3, 3)
+    check(cutkey(store, a, 2) == (OK, 3, cut3, 0) and numbers(store, a) == ([3], False) and payloads(store, a) == 0
+          and getkey(store, a) == (OK, 3, cut3, 0), 'CUTKEY on a key record: a cut, and no key file left')
+    before = tree(kdir(store, a))
+    check(cutkey(store, a, 2) == (OK, 3, cut3, 0) and cutkey(store, a, 0) == (OK, 3, cut3, 0)
+          and tree(kdir(store, a)) == before, 'CUTKEY below a cut: no change')
+    cut4 = record_header(CUT, 4, 3)
+    check(cutkey(store, a, 3) == (OK, 4, cut4, 0) and numbers(store, a) == ([4], False), 'CUTKEY on its cut: a fence')
+    check(putkey(store, a, 3, ks(a, 4, 3)) == (CONFLICT, 4, cut4, 0), 'a PUTKEY built on the fenced cut: CONFLICT')
+    before = tree(kdir(store, a))
+    check(cutkey(store, a, 3) == (OK, 4, cut4, 0) and tree(kdir(store, a)) == before, 'a replayed CUTKEY: no change')
+    check(noted(store, request(PUTKEY, a, 4, ks(a, 3, 3)), (BAD_BLOB, 0, b'', 0), 'epoch window'),
+          "PUTKEY at the cut's floor")
+    f5 = ks(a, 5, 4)
+    check(putkey(store, a, 4, f5) == (OK, 5, record_header(KEY_RECORD, 4, 5), 0), 'PUTKEY above a cut: gen = the cut')
+    before = tree(kdir(store, a))
+    check(cutkey(store, a, 3) == (OK, 5, key(4, f5), 0) and cutkey(store, a, 2) == (OK, 5, key(4, f5), 0)
+          and tree(kdir(store, a)) == before, 'a CUTKEY replayed after a re-enable: no change')
+    check(cutkey(store, a, 4) == (OK, 6, record_header(CUT, 6, 5), 0) and payloads(store, a) == 0,
+          'CUTKEY of the later generation')
+    # A PUTKEY on the cut c lands first, then CUTKEY(c) ends it.
+    store = fresh(a)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1) and cutkey(store, a, 1)[:2] == (OK, 2)
+          and putkey(store, a, 2, f3) == (OK, 3, record_header(KEY_RECORD, 2, 3), 0)
+          and cutkey(store, a, 2) == (OK, 4, record_header(CUT, 4, 3), 0) and payloads(store, a) == 0,
+          'a PUTKEY on the cut, then CUTKEY on it: a cut on top and no key file')
+    # CUTKEY(0) in a vault folder without k/ makes k/ with cut 1.
+    store = fresh(a)
+    check(put(store, a, 0, plain(a, 1)) == (OK, 1, b'', 0), 'seed a vault folder')
+    cut1 = record_header(CUT, 1, 0)
+    check(cutkey(store, a, 0) == (OK, 1, cut1, 0) and numbers(store, a) == ([1], False)
+          and putkey(store, a, 0, f2) == (CONFLICT, 1, cut1, 0), 'CUTKEY(0) without k/: cut 1, then PUTKEY(0) CONFLICT')
+    # PUTKEY and CUTKEY in both orders.
+    for rival_op, want, rival_want in ((CUTKEY, (CONFLICT, 2, record_header(CUT, 2, 2), 0),
+                                        (OK, 2, record_header(CUT, 2, 2), 0)),
+                                       (PUTKEY, (OK, 3, record_header(CUT, 3, 3), 0),
+                                        (OK, 2, record_header(KEY_RECORD, 0, 3), 0))):
+        store = fresh(a)
+        check(putkey(store, a, 0, f2)[:2] == (OK, 1), 'seed')
+        rival = Rival(store.root, (a,))
+        rival.data = request(rival_op, a, 1, *([f3] if rival_op == PUTKEY else []))
+        mine = request(CUTKEY, a, 1) if rival_op == PUTKEY else request(PUTKEY, a, 1, f3)
+        check(call(rival, mine) == want and rival.answer == rival_want and payloads(store, a) == 0,
+              'PUTKEY and CUTKEY in either order: the cut ends on top')
+    # No vault folder: CUTKEY makes it, k/ and cut 1, also while a PUTKEY(0)
+    # that started first waits before it makes the folder.
+    store = fresh(a)
+    check(cutkey(store, a, 0) == (OK, 1, cut1, 0) and os.path.isdir(kdir(store, a))
+          and putkey(store, a, 0, f2) == (CONFLICT, 1, cut1, 0), 'CUTKEY with no vault folder makes it')
+    store = fresh(a)
+    rival = Rival(store.root, (a,))
+    rival.point, rival.data = 'folder', request(CUTKEY, a, 0)
+    check(call(rival, request(PUTKEY, a, 0, f2)) == (CONFLICT, 1, cut1, 0) and rival.answer == (OK, 1, cut1, 0)
+          and numbers(store, a) == ([1], False), 'a PUTKEY(0) held before its folder meets the cut')
+    # The 64-vault limit.
+    store = fresh(a)
+    os.mkdir(store.root)
+    for vid in ids[10:10 + MAX_VAULTS]:
+        os.mkdir(store.paths(vid)[0])
+    before = tree(store.root)
+    check(cutkey(store, a, 0) == (LIMIT, 0, b'', 0) and putkey(store, a, 0, f2) == (LIMIT, 0, b'', 0)
+          and tree(store.root) == before, 'no vault folder past the limit: LIMIT, nothing created')
+    scanned.remove(store)
+
+    # Row 9: PRUNE removes lower epochs only, never the head, and never
+    # touches k/.
+    store = fresh(a, c)
+    for i, data in enumerate((plain(c, 1), anywhere(c, 2, 3), anywhere(c, 3, 6), anywhere(c, 4, 4), anywhere(c, 5, 5))):
+        check(put(store, c, i, data) == (OK, i + 1, b'', 0), 'seed PRUNE %d' % i)
+    check(call(store, request(PRUNE, c, 6)) == (NOT_FOUND, 0, b'', 0)
+          and list_versions(store.paths(c)[1]) == [1, 2, 3, 4, 5], 'PRUNE above the head: NOT_FOUND')
+    check(call(store, request(PRUNE, c, 5)) == (OK, 3, b'', 0) and list_versions(store.paths(c)[1]) == [3, 5],
+          'PRUNE removes the lower epochs and keeps the head')
+    check(call(store, request(PRUNE, c, 5)) == (OK, 0, b'', 0) and call(store, request(PRUNE, a, 1)) == (NOT_FOUND, 0, b'', 0),
+          'PRUNE again, and of a vault with no versions')
+    check(put(store, a, 0, plain(a, 1)) == (OK, 1, b'', 0) and putkey(store, a, 0, f2)[:2] == (OK, 1)
+          and put(store, a, 1, sealed(a, f2, 2)) == (OK, 2, b'', 0), 'seed a vault with k/')
+    before = tree(kdir(store, a))
+    check(call(store, request(PRUNE, a, 2)) == (OK, 1, b'', 0) and tree(kdir(store, a)) == before
+          and sorted(os.listdir(store.paths(c)[0])) == ['v'], 'PRUNE never touches k/ or makes a lock file')
+
+    # Row 10: links in the key namespace are refused, as in v/.
+    outside = os.path.join(base, 'outside')
+    os.mkdir(outside)
+    with open(os.path.join(outside, 'file'), 'wb') as f:
+        f.write(key(0, f3))
+    store = fresh(a)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1) and put(store, a, 0, sealed(a, f2, 1)) == (OK, 1, b'', 0), 'seed')
+    k, lock = kdir(store, a), os.path.join(store.paths(a)[0], 'lock')
+    linked = '%020d-%020d.rec' % (2, 3)
+
+    def refused(what):
+        for data in (request(GETKEY, a), request(PUTKEY, a, 1, f3), request(CUTKEY, a, 1),
+                     request(PUT, a, 1, sealed(a, f2, 2))):
+            check(call(store, data)[0] == SERVER_ERROR, 'refused: ' + what)
+    for make, what in ((lambda: os.link(os.path.join(outside, 'file'), os.path.join(k, linked)), 'a hard-linked record'),
+                       (lambda: os.symlink(os.path.join(outside, 'file'), os.path.join(k, linked)), 'a symlinked record'),
+                       (lambda: os.mkdir(os.path.join(k, linked)), 'a directory with a record name')):
+        try:
+            make()
+        except (OSError, NotImplementedError):
+            check(what == 'a symlinked record', 'made ' + what)
+            continue
+        refused(what)
+        (os.rmdir if os.path.isdir(os.path.join(k, linked)) and not os.path.islink(os.path.join(k, linked))
+         else os.unlink)(os.path.join(k, linked))
+    check(getkey(store, a) == (OK, 1, key(0, f2), 0), 'the record links are gone')
+    twin = os.path.join(k, '%020d-%020d.rec' % (1, 9))
+    with open(twin, 'wb') as f:
+        f.write(key(0, f2))
+    check(noted(store, request(GETKEY, a), (SERVER_ERROR, 0, b'', 1), 'duplicate record'), 'two names with one number')
+    os.unlink(twin)
+    junk = ['%020d-%020d.rec' % (0, 2), '%020d-%020d.rec' % (EPOCH_MAX + 1, 2), '%020d-%020d.rec' % (2, EPOCH_MAX + 1),
+            '%019d-%020d.rec' % (2, 2), 'notes.txt']
+    for name in junk:
+        with open(os.path.join(k, name), 'wb') as f:
+            f.write(key(0, f3))
+    check(getkey(store, a) == (OK, 1, key(0, f2), 0) and putkey(store, a, 1, f3)[:2] == (OK, 2)
+          and all(os.path.exists(os.path.join(k, name)) for name in junk), 'other names in k/ are ignored and kept')
+    for name in junk:
+        os.unlink(os.path.join(k, name))
+    with open(os.path.join(outside, 'lock'), 'wb'):
+        pass
+    for make, what in ((lambda: os.link(os.path.join(outside, 'lock'), lock), 'a hard-linked lock'),
+                       (lambda: os.symlink(os.path.join(outside, 'lock'), lock), 'a symlinked lock')):
+        os.unlink(lock)
+        try:
+            make()
+        except (OSError, NotImplementedError):
+            check(what == 'a symlinked lock', 'made ' + what)
+            continue
+        refused(what)
+    if os.path.lexists(lock):
+        os.unlink(lock)
+    check(getkey(store, a) == (OK, 2, key(0, f3), 0), 'a plain lock file is made again')
+    store = fresh(a)
+    os.makedirs(store.paths(a)[0])
+    target = os.path.join(outside, 'k')
+    os.mkdir(target)
+    k = kdir(store, a)
+    try:
+        os.symlink(target, k, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        try:  # Windows without the symlink privilege: a junction needs none
+            import _winapi
+            _winapi.CreateJunction(target, k)
+        except (ImportError, AttributeError, OSError):
+            k = None
+    if k:
+        refused('a k/ that is a link')
+        check(os.listdir(target) == [], 'a linked k/ wrote nothing')
+    scanned.remove(store)
+
+    # Row 12: a damaged top reads as a cut at its own number, with the floor
+    # in its name; the vault floor is off; each op writes one stderr line.
+    for name, change in (('truncated to 0 bytes', lambda d: b''), ('truncated to 20 bytes', lambda d: d[:20]),
+                         ('a flipped payload byte', lambda d: d[:40] + bytes([d[40] ^ 1]) + d[41:]),
+                         ('a flipped header byte', lambda d: bytes([d[0] ^ 1]) + d[1:])):
+        for end in (PUTKEY, CUTKEY):
+            store = fresh(a)
+            f5, f7 = ks(a, 5, 1), ks(a, 7, 2)
+            check(putkey(store, a, 0, f5)[:2] == (OK, 1) and putkey(store, a, 1, f7)[:2] == (OK, 2)
+                  and put(store, a, 0, sealed(a, f7, 1)) == (OK, 1, b'', 0), 'seed')
+            path = record_path(store, a, 2)
+            with open(path, 'rb') as f:
+                data = f.read()
+            with open(path, 'wb') as f:
+                f.write(change(data))
+            flagged = record_header(CUT, 2, 7, True)
+            check(noted(store, request(GETKEY, a), (OK, 2, flagged, 0), 'damaged key record read as a cut'),
+                  'GETKEY of a damaged top: %s' % name)
+            check(noted(store, request(PUTKEY, a, 2, ks(a, 7, 3)), (BAD_BLOB, 0, b'', 0), 'epoch window')
+                  and noted(store, request(PUTKEY, a, 1, ks(a, 8, 3)), (CONFLICT, 2, flagged, 0), 'damaged'),
+                  'a damaged top keeps its floor: %s' % name)
+            check(put(store, a, 1, anywhere(a, 3, 99)) == (OK, 2, b'', 0) and
+                  noted(store, request(PUT, a, 2, plain(a, 4)), (KEY_BEHIND, 0, b'', 0), 'does not match'),
+                  'below a damaged top the floor is that of a cut: %s' % name)
+            before = tree(kdir(store, a))
+            check(put(Roomy(store.root), a, 2, anywhere(a, 5, 5)) == (OK, 3, b'', 0)
+                  and put(Roomy(store.root, (b,)), a, 3, anywhere(a, 6, 5)) == (OK, 4, b'', 0)
+                  and tree(kdir(store, a)) == before, 'connections without the capability leave k/ as it is')
+            if end == PUTKEY:
+                check(putkey(store, a, 2, ks(a, 8, 3)) == (OK, 3, record_header(KEY_RECORD, 2, 8), 0)
+                      and numbers(store, a) == ([3], False), 'PUTKEY on a damaged top: %s' % name)
+            else:
+                check(cutkey(store, a, 1) == (OK, 3, record_header(CUT, 3, 7), 0)
+                      and numbers(store, a) == ([3], False), 'CUTKEY on a damaged top: %s' % name)
+    # The first key record of a generation, damaged after tidy() removed the
+    # cut below it, keeps its floor through its name.
+    store = fresh(a)
+    check(putkey(store, a, 0, ks(a, 5, 1))[:2] == (OK, 1) and cutkey(store, a, 1)[:2] == (OK, 2)
+          and putkey(store, a, 2, ks(a, 7, 2))[:2] == (OK, 3) and numbers(store, a) == ([3], False), 'seed')
+    with open(record_path(store, a, 3), 'r+b') as f:
+        f.truncate(20)
+    check(getkey(store, a) == (OK, 3, record_header(CUT, 3, 7, True), 0), 'a damaged first key record')
+    for data in (ks(a, 5, 1), ks(a, 6, 3), ks(a, 7, 3)):
+        check(putkey(store, a, 3, data) == (BAD_BLOB, 0, b'', 0), 'no older key file below a damaged first record')
+    # A read error that is not damage is SERVER_ERROR and commits nothing.
+    store = fresh(a)
+    check(putkey(store, a, 0, f2)[:2] == (OK, 1) and putkey(store, a, 1, f3)[:2] == (OK, 2), 'seed')
+    for error in (OSError(errno.EIO, 'I/O error'), PermissionError(errno.EACCES, 'denied')):
+        broken = Unreadable(store.root, (a,))
+        broken.error, broken.top = error, os.path.basename(record_path(store, a, 2))
+        before = tree(store.root)
+        for data in (request(GETKEY, a), request(PUTKEY, a, 2, f4), request(CUTKEY, a, 2)):
+            check(noted(broken, data, (SERVER_ERROR, 0, b'', 1), 'cannot read the top key record'),
+                  'a read error on the top: %s' % type(error).__name__)
+        check(tree(store.root) == before, 'a read error commits nothing')
+
+    # Row 11: a final scan. No stored file is a password-only or local key
+    # file; GOYOKS01 lies only in k/; once a key op has tidied, a vault keeps
+    # at most two key files and none under a cut.
+    for store in scanned:
+        for folder, dirs, files in os.walk(store.root):
+            for name in files:
+                with open(os.path.join(folder, name), 'rb') as f:
+                    data = f.read()
+                check(not data.startswith((b'GOYOKE', b'GOYOKH')), 'no stored file starts like GOYOKE/GOYOKH')
+                check(KEY_MAGIC not in data or os.path.basename(folder) == 'k', 'GOYOKS01 only in k/')
+        for name in store.vault_names():
+            vid = bytes.fromhex(name)
+            if not os.path.isdir(os.path.join(store.root, name, 'k')):
+                continue
+            answer = getkey(Roomy(store.root, (vid,)), vid)
+            check(answer[0] in (OK, EMPTY), 'final scan: GETKEY')
+            check(not numbers(store, vid)[1] and payloads(store, vid) <= 2
+                  and (answer[2][8:10] != bytes([CUT, 0]) or payloads(store, vid) == 0), 'final scan: retention')
+
+
+def probe_data_root():
+    """Row 13: one exclusive flock on a probe file in the default data root
+    (POSIX), which every connection of the forced command uses; setup.rs
+    refuses the install on a root without working locks."""
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    try:
+        make_dir(root)
+        path = os.path.join(root, 'lockprobe-%d' % os.getpid())
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        try:
+            check(stat.S_ISREG(os.fstat(fd).st_mode), 'the lock probe is a plain file')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+            remove(path)
+    except (OSError, Refused) as e:
+        raise SelftestFailure('no working flock in the data root (%s)' % type(e).__name__)
+
+
 def selftest():
-    """Every rule against a temporary root; prints PASS, or FAIL: <check>."""
+    """Every rule against temporary roots, and where flock exists one lock
+    on the default data root; prints PASS, or FAIL: <check>."""
     base = tempfile.mkdtemp(prefix='goyo-sync-selftest-')
     try:
         selftest_root(os.path.join(base, 'data'), base)
+        selftest_keys(base)
+        if fcntl:
+            probe_data_root()
     except SelftestFailure as e:
         sys.stderr.write('FAIL: %s\n' % e)
         return 1
@@ -927,22 +2596,45 @@ def selftest():
     return 0
 
 
+def serve_args(argv):
+    """(root or None, the raw vault IDs of --key-sync) for exactly
+    serve [--root DIR] [--key-sync=ID[,ID...]], with 1 to 64 distinct IDs of
+    32 lower-case hex digits; None for anything else, a bare --key-sync
+    included."""
+    if argv[:1] != ['serve']:
+        return None
+    rest, root = argv[1:], None
+    if rest[:1] == ['--root']:
+        if len(rest) < 2 or not rest[1]:
+            return None
+        root, rest = rest[1], rest[2:]
+    if not rest:
+        return root, ()
+    if len(rest) != 1 or not rest[0].startswith('--key-sync='):
+        return None
+    names = rest[0][len('--key-sync='):].split(',')
+    if len(names) > MAX_VAULTS or len(set(names)) != len(names) or not all(VAULT_NAME.fullmatch(n) for n in names):
+        return None
+    return root, tuple(bytes.fromhex(n) for n in names)
+
+
 def main(argv):
     os.umask(0o077)
     if argv == ['selftest']:
         return selftest()
-    if argv[:1] == ['serve'] and (len(argv) == 1 or (len(argv) == 3 and argv[1] == '--root' and argv[2])):
+    args = serve_args(argv)
+    if args is not None:
         # A stalled client cannot keep this process alive (no SIGALRM on Windows).
         deadline = getattr(signal, 'alarm', no_deadline)
         here = os.path.dirname(os.path.abspath(__file__))
-        root = os.path.abspath(argv[2] if len(argv) == 3 else os.path.join(here, 'data'))
+        root = os.path.abspath(args[0] if args[0] is not None else os.path.join(here, 'data'))
         try:
-            return serve(sys.stdin.buffer, sys.stdout.buffer, Store(root), sys.stderr, deadline, SLOTS)
+            return serve(sys.stdin.buffer, sys.stdout.buffer, Store(root, args[1]), sys.stderr, deadline, SLOTS)
         except BrokenPipeError:
             # The client went away. Point stdout at devnull so the exit flush is quiet.
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
             return 1
-    sys.stderr.write('usage: goyo-sync-server.py serve [--root DIR] | selftest\n')
+    sys.stderr.write('usage: goyo-sync-server.py serve [--root DIR] [--key-sync=ID[,ID...]] | selftest\n')
     return 2
 
 

@@ -17,6 +17,8 @@ mod anchor;
 #[cfg(feature = "security-key")]
 mod gate;
 pub mod keyfile;
+#[cfg(feature = "security-key")]
+mod keysync;
 mod recover;
 #[cfg(feature = "security-key")]
 mod review;
@@ -40,6 +42,11 @@ use keyfile::{
     NEWER_KEY_FORMAT, NO_SECURITY_KEY_SUPPORT, NO_SECURITY_KEY_SUPPORT_DAMAGED, Touch, encode_key,
 };
 pub use keyfile::{KeyInfo, key_info};
+#[cfg(feature = "security-key")]
+pub use keysync::{
+    Deletion, GATE_PENDING, KEYSYNC_ASKING, KEYSYNC_NOHELPER, KEYSYNC_NOTRANSPORT,
+    KEYSYNC_OFF_PENDING, KeyClass, KeySyncView, NO_CANDIDATE, NOT_A_SUCCESSOR, OffRequest, Waiting,
+};
 pub use recover::Recovery;
 #[cfg(feature = "security-key")]
 pub use review::{ReviewChange, ReviewList, ReviewRow, day_of, shown_time};
@@ -52,9 +59,9 @@ pub use rotate::{
 };
 #[cfg(feature = "security-key")]
 pub use rotate::{
-    ANCHOR_FAILED, Exposure, ForkOption, KEYSOFF_SYNCED, KeyGates, KeyRow, KeysOverview,
-    LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey,
-    ReSeedPlan, Redo, RedoFlow, UNION_FULL, UNREACHABLE,
+    ANCHOR_FAILED, Exposure, ForkOption, KeyGates, KeyRow, KeysOverview, LossReport, NOT_PLANNED,
+    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow,
+    UNION_FULL, UNREACHABLE,
 };
 pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
@@ -1398,6 +1405,10 @@ pub struct Session {
     /// date: the vault outgoing waits until it is done.
     #[cfg(feature = "security-key")]
     review_due: Option<String>,
+    /// The last key change of this session added a tombstone (a removal,
+    /// or a union that removed a key here): S-PRUNE is asked (spec §7.19).
+    #[cfg(feature = "security-key")]
+    tombs_added: bool,
     /// A removal that never landed, as [다시 하기] reopens it (spec §9.2;
     /// S-REMOVE-UNDONE).
     #[cfg(feature = "security-key")]
@@ -1487,6 +1498,8 @@ impl Session {
             held_unconfirmed: false,
             #[cfg(feature = "security-key")]
             review_due: None,
+            #[cfg(feature = "security-key")]
+            tombs_added: false,
             #[cfg(feature = "security-key")]
             redo: None,
             #[cfg(feature = "security-key")]

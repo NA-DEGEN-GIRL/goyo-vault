@@ -1764,6 +1764,11 @@ pub const EN: &[(&str, &str)] = &[
 /// build compiles them, so the default exe holds none of them.
 #[cfg(feature = "security-key")]
 pub const EN_SK: &[(&str, &str)] = &[
+    // goyo-sync's window (bin/goyo-sync/keys_gui.rs).
+    (
+        "서버에서 열쇠 파일 동기화 꺼짐",
+        "Key-file sync off on the server",
+    ),
     (
         "이 열쇠 파일을 열 수 있는 보안 키가 보안 키 {n} 하나뿐입니다(나머지는 일시 정지). 이 키를 잃으면 이 금고를 열 수 없습니다. 다른 키와 '짝 맺기'를 하세요.",
         "Only security key {n} can open this key file (the others are suspended). If it is lost, this vault cannot be opened. Pair it with another key.",
@@ -2148,10 +2153,6 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "이 열쇠 변경은 지금 열쇠 파일과 맞지 않아 쓰지 않았습니다. 아무것도 바뀌지 않았습니다.",
         "This key change does not fit the key file as it is now, so nothing was written. Nothing changed.",
-    ),
-    (
-        "열쇠 파일 동기화를 쓰는 열쇠 파일에서는 아직 보안 키를 끌 수 없습니다. 아무것도 바뀌지 않았습니다.",
-        "Security keys cannot be turned off yet for a key file that uses key-file sync. Nothing changed.",
     ),
     (
         "뺀 보안 키가 다시 들어 있음",
@@ -2555,5 +2556,256 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "일시 정지된 키: 보안 키 {list} ('짝 맺기'로 다시 쓰게 하세요)",
         "Suspended keys: security key {list} (make them usable again with 'Pair keys')",
+    ),
+    // Key-file sync (spec v3 §7.8-§7.19, stage 6).
+    (
+        "PIN 없이 등록한 보안 키 {list}을(를) 빼고 PIN으로 다시 등록하세요(보안 키를 끄고 PIN 사용으로 다시 켜기).",
+        "Remove security key {list}, registered without a PIN, and register it again with a PIN (turn security keys off, then on again with PIN use).",
+    ),
+    (
+        "열쇠 파일 동기화는 이 금고의 동기화를 켠 뒤에만 켤 수 있습니다.",
+        "Key-file sync can be turned on only after sync is on for this vault.",
+    ),
+    (
+        "이 Windows에서는 보안 키의 연결 방식을 확인할 수 없어 열쇠 파일 동기화를 켤 수 없습니다. Windows를 업데이트하세요.",
+        "This Windows cannot tell how a security key is connected, so key-file sync cannot be turned on. Update Windows.",
+    ),
+    (
+        "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 최근 10분 동안 응답하지 않았습니다. 그 goyo-sync를 실행한 뒤 다시 하세요.",
+        "No goyo-sync with key-file sync (the security-key build) has answered in the last 10 minutes. Run that goyo-sync, then try again.",
+    ),
+    (
+        "서버의 열쇠 파일 삭제가 끝난 뒤 다시 켜세요. (goyo-sync(보안 키 빌드)가 실행 중이어야 하고, 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받아야 합니다.)",
+        "Turn it on again once the server has deleted the key file. (goyo-sync (the security-key build) must be running, and this PC's server connection must accept this vault's key-file requests.)",
+    ),
+    (
+        "서버에 이미 이 금고의 열쇠 파일이 있습니다(다른 PC에서 켬). 그 파일을 받으세요.",
+        "The server already has a key file of this vault (another PC turned it on). Take that file instead.",
+    ),
+    (
+        "서버가 이 PC의 연결에서 이 금고의 열쇠 파일 동기화를 허용하지 않습니다. 서버 관리자가 이 PC의 강제 명령에 serve --key-sync=<금고 ID>를 넣어야 합니다.",
+        "The server does not allow key-file sync for this vault on this PC's connection. The server administrator must add serve --key-sync=<vault ID> to this PC's forced command.",
+    ),
+    (
+        "goyo-sync가 아직 서버의 열쇠 파일을 확인하지 않았습니다. 잠시 뒤 다시 하세요.",
+        "goyo-sync has not checked the server's key file yet. Try again in a moment.",
+    ),
+    (
+        "서버의 열쇠 파일 기록이 비정상적으로 큽니다. 서버 관리자가 data/<id>/k/를 지워야 합니다. 이 PC의 동기화 폴더가 바뀌었을 수도 있습니다(그 폴더의 incoming.goyokeysync를 지우면 goyo-sync가 다시 받습니다).",
+        "The server's key-file record is abnormally large. The server administrator must delete data/<id>/k/. This PC's sync folder may also have been changed (delete incoming.goyokeysync in that folder and goyo-sync fetches it again).",
+    ),
+    (
+        "동기화가 멈춰 있거나 받을 열쇠 파일이 기다리고 있어 열쇠 파일 동기화를 켤 수 없습니다. 먼저 그것을 해결하세요.",
+        "Sync is halted or a key file waits to be taken, so key-file sync cannot be turned on. Resolve that first.",
+    ),
+    (
+        "이 열쇠 파일은 열쇠 파일 동기화를 쓰지 않습니다.",
+        "This key file does not use key-file sync.",
+    ),
+    (
+        "서버에 이 금고의 열쇠 파일이 있어 다시 올릴 필요가 없습니다.",
+        "The server has this vault's key file, so there is nothing to upload again.",
+    ),
+    ("사용자가 받지 않음", "not taken by the user"),
+    (
+        "받기 전에 확인할 열쇠 변경이 서버에 있습니다. 먼저 [받기…]로 잃어버린 키를 고르거나 코드를 입력하세요. 그 변경을 받지 않으려면 [받지 않기…]를 누르세요.",
+        "A key change to confirm waits on the server. First pick the lost keys or enter the code with [Receive…]. To not take that change, press [Don't take…].",
+    ),
+    (
+        "먼저 서버의 새 열쇠 파일을 받으세요. 그래도 바꾸면 두 열쇠 파일이 갈라집니다.",
+        "First take the server's new key file. If you change the keys anyway, the two key files fork.",
+    ),
+    (
+        "서버에 받을 열쇠 파일이 없습니다.",
+        "The server has no key file to take.",
+    ),
+    (
+        "서버의 열쇠 파일은 이 PC가 받거나 합칠 수 있는 파일이 아닙니다. 다른 PC에서 바꾼 것이 맞다면 그 PC의 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요.",
+        "The server's key file is not one this PC can take or join. If another PC really changed it, bring that PC's key file by USB and take it with 'Receive a new key file'.",
+    ),
+    ("열쇠 파일 동기화: 꺼짐", "Key-file sync: off"),
+    ("열쇠 파일 동기화: 켜짐", "Key-file sync: on"),
+    (
+        "열쇠 파일 동기화: 켜짐 · 서버에 없음",
+        "Key-file sync: on · not on the server",
+    ),
+    (
+        "서버에 새 열쇠 파일 있음 (수정 {e})",
+        "A new key file is on the server (revision {e})",
+    ),
+    (
+        "서버에 확인할 열쇠 변경 있음 (수정 {e})",
+        "A key change to confirm is on the server (revision {e})",
+    ),
+    (
+        "서버의 열쇠 파일과 갈라짐 (수정 {e}) · [받기…]로 합치세요",
+        "Forked from the server's key file (revision {e}) · join them with [Get…]",
+    ),
+    (
+        "확인을 기다리는 열쇠 변경(수정 {e})이 서버에 없습니다 · 받을 수 없으면 [받지 않기…]를 누르세요",
+        "The key change waiting for confirmation (revision {e}) is no longer on the server · if it cannot be taken, press [Don't take…]",
+    ),
+    (
+        "서버의 열쇠 파일 삭제: 대기 중 (goyo-sync가 처리합니다)",
+        "Deleting the server's key file: waiting (goyo-sync handles it)",
+    ),
+    (
+        "서버의 열쇠 파일 삭제: 대기 중 (goyo-sync가 서버를 확인하면, 이 PC가 잠금 해제되어 있을 때 요청합니다)",
+        "Deleting the server's key file: waiting (once goyo-sync has checked the server, it is requested while this PC is unlocked)",
+    ),
+    (
+        "서버의 열쇠 파일 삭제: 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받지 않습니다(--key-sync 목록에 없음). 다른 PC에서 이미 끄고 지웠다면 할 일이 없습니다.",
+        "Deleting the server's key file: this PC's server connection does not accept this vault's key-file requests (not in the --key-sync list). If another PC already turned it off and deleted it, there is nothing to do.",
+    ),
+    (
+        "서버의 열쇠 파일 삭제: 서버가 삭제했다고 응답함 (기록 {seq})",
+        "Deleting the server's key file: the server answered that it deleted it (record {seq})",
+    ),
+    ("열쇠 파일 동기화 켜기…", "Turn key-file sync on…"),
+    ("열쇠 파일 동기화 끄기…", "Turn key-file sync off…"),
+    ("열쇠 파일 다시 올리기", "Upload the key file again"),
+    ("받지 않기…", "Don't take…"),
+    (
+        "열쇠 파일 동기화를 켜면:\n1. 서버, 또는 동기화 SSH 키를 가진 사람이 열쇠 파일을 갖게 됩니다. 남는 장벽은 비밀번호와 보안 키(+PIN)뿐입니다.\n2. 올린 열쇠 파일은 그때 서버에 접근한 사람이 영원히 보관할 수 있습니다. 키 제거나 비밀번호 변경은 그 뒤에 저장하는 것만 보호합니다. 키를 잃었고 비밀번호가 알려졌을 수 있다면 비밀 자체를 바꾸세요.\n3. 해킹된 서버는 열쇠 변경을 어느 PC에 숨길 수 있습니다. 모든 PC가 받아야(잃어버린 키를 고르거나 코드를 입력해야) 열쇠 변경이 끝납니다. 키를 잃으면 모든 PC에서 '잃어버린 키 제거'를 하세요.\n4. 서버 사본은 백업이 아닙니다. USB 열쇠 백업과 2개 이상의 키가 여전히 필요하고, 복구 코드는 없습니다.\n5. PIN이 필수입니다: 6자 이상, 비밀번호와 다르게. 8번 틀리면 키가 잠기고, 초기화한 키로는 이 금고를 열 수 없습니다.\n6. 잃어버린 PC의 authorized_keys 줄은 바로 지우고, 사람마다 서버 계정을 따로 쓰세요.\n7. 휴대폰과 Windows Hello는 쓸 수 없고, USB나 NFC 보안 키만 씁니다.\n8. 더 쓰지 않는 키에서는 이 금고의 등록을 지우세요(제조사 도구, 예: 관리자 권한으로 ykman fido credentials delete; 키의 PIN 필요). FIDO 전체 초기화는 다른 곳에 쓰지 않는 키만 하세요.\n9. 열쇠 파일 사본이 각 PC의 동기화 폴더에 생깁니다.\n10. 열쇠를 바꾸면 다른 PC는 다음 잠금 해제 때 받습니다. 제거는 잃어버린 키를 고르고, 키 추가나 설정 변경은 바꾼 PC에 보이는 코드를 입력합니다. 보안 키를 끄면 열쇠 파일 동기화도 꺼지고, 다른 PC는 다시 USB로 열쇠 파일을 받아야 합니다.\n열쇠 파일 동기화를 켤까요?",
+        "If you turn key-file sync on:\n1. The server, or anyone with a sync SSH key, gets the key file. The barriers left are the password and a security key (+PIN).\n2. Every uploaded key file can be kept for good by whoever had server access then. Removing a key or changing the password protects only what is saved later. If a key was lost and the password may be known, change the secrets themselves.\n3. A hacked server can hide a key change from a PC. A key change is finished only when every PC has taken it (by picking the lost keys or entering the code). If a key is lost, run 'Remove a lost key' on every PC.\n4. The server copy is not a backup. USB key backups and 2 or more keys are still needed, and there is no recovery code.\n5. The PIN is mandatory: 6+ characters, different from the password. 8 wrong tries lock the key, and a reset key can no longer open this vault.\n6. Remove a lost PC's authorized_keys line at once, and use one server account per person.\n7. Phones and Windows Hello cannot be used; only USB or NFC security keys.\n8. On a key you no longer use, delete this vault's registration (the vendor's tool, e.g. ykman fido credentials delete from an administrator prompt; it needs the key's PIN). Do a full FIDO reset only on a key used nowhere else.\n9. A key-file copy appears in each PC's sync folder.\n10. After a key change, the other PCs take it at their next unlock. A removal asks for the lost keys, an addition or a setting change for the code the changing PC shows. Turning security keys off turns key-file sync off, and the other PCs then need the key file by USB again.\nTurn key-file sync on?",
+    ),
+    (
+        "서버에 이 금고의 열쇠 파일이 없습니다. 다른 PC에서 열쇠 파일 동기화를 끈 것이라면 다시 올리지 말고 그 PC의 열쇠 파일을 USB로 받으세요. 아무도 끄지 않았는데 지워진 것이 확실할 때만 다시 올리세요.\n이 PC의 열쇠 파일을 다시 올릴까요?",
+        "The server has no key file of this vault. If another PC turned key-file sync off, do not upload again: take that PC's key file by USB. Upload again only if you are sure it was deleted while nobody turned it off.\nUpload this PC's key file again?",
+    ),
+    (
+        "열쇠 파일 동기화를 켰습니다. goyo-sync가 서버에 열쇠 파일을 올립니다. 다른 PC는 다음 잠금 해제 때 이 PC의 열쇠 확인 코드를 입력해야 받습니다.",
+        "Key-file sync is on. goyo-sync uploads the key file to the server. The other PCs must enter this PC's key check code at their next unlock to take it.",
+    ),
+    (
+        "열쇠 파일을 다시 올리도록 했습니다. goyo-sync가 서버에 올립니다.",
+        "The key file is set to upload again. goyo-sync uploads it to the server.",
+    ),
+    (
+        "열쇠 파일 동기화를 끕니다. 서버에 열쇠 파일 삭제를 요청하고 데이터 키를 바꿉니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다. 계속할까요?",
+        "This turns key-file sync off. It asks the server to delete the key file and changes the data key. The other PCs halt sync and must take this key file by USB. Continue?",
+    ),
+    (
+        "이 열쇠 파일은 열쇠 파일 동기화를 씁니다. 보안 키를 끄면 열쇠 파일 동기화도 끄고, 서버에 열쇠 파일 삭제를 요청합니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다.",
+        "This key file uses key-file sync. Turning security keys off also turns key-file sync off and asks the server to delete the key file. The other PCs halt sync and must take this key file by USB.",
+    ),
+    (
+        "서버에 이 PC가 받지 않은 열쇠 파일(수정 {e})이 있습니다. 다른 PC의 변경일 수도, 위조된 파일일 수도 있습니다. 끄면 그 파일도 서버에서 지워지고, 다른 PC의 변경이라면 그 PC의 변경은 USB로 옮겨야 합니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남았던 열쇠 파일로 열리지 않습니다.",
+        "The server has a key file this PC has not taken (revision {e}). It may be another PC's change, or a forged file. Turning off deletes that file from the server too, and if it is another PC's change, that change must be carried by USB. Turning off still changes the data key, so entries saved from now on do not open with the key file that was on the server.",
+    ),
+    (
+        "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?",
+        "No goyo-sync with key-file sync (the security-key build) answers. Turning off happens now, but the server's key file is not deleted until that goyo-sync runs. Continue?",
+    ),
+    (
+        "이 PC에 서버 확인 기록이 없어, goyo-sync가 서버를 확인한 뒤 이 PC를 한 번 더 잠금 해제해야 삭제 요청이 나갑니다.",
+        "This PC has no record of the server, so the deletion is requested only after goyo-sync has checked the server and this PC is unlocked once more.",
+    ),
+    (
+        "이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받지 않아(서버 강제 명령에 --key-sync=<금고 ID> 없음) 서버의 열쇠 파일을 지울 수 없습니다.
+열쇠 파일 동기화를 쓰던 금고에서 서버가 이렇게 답한다면 서버 설정이 바뀌었거나 서버가 해킹되었을 수 있습니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남은 열쇠 파일로 열리지 않습니다. 다만 서버 관리자가 이 PC의 줄에 그 설정을 넣거나 data/<id>/k/를 지울 때까지 이 PC의 금고는 서버에 올라가지 않습니다(서버의 열쇠 파일이 다른 상태를 요구합니다). 끌까요?",
+        "This PC's server connection does not accept this vault's key-file requests (no --key-sync=<vault ID> in the server's forced command), so the server's key file cannot be deleted.
+If the server answers this way for a vault that used key-file sync, the server settings changed or the server may be hacked. Turning off still changes the data key, so entries saved from now on do not open with the key file left on the server. But until the server administrator adds that setting to this PC's line or deletes data/<id>/k/, this PC's vault is not uploaded (the server's key file asks for another state). Turn it off?",
+    ),
+    ("열쇠 파일 동기화를 껐습니다.", "Key-file sync is off."),
+    (
+        "서버에 열쇠 파일 삭제를 요청했습니다(해킹된 서버라면 이미 복사했을 수 있습니다).",
+        "The server was asked to delete the key file (a hacked server may already have copied it).",
+    ),
+    (
+        "goyo-sync가 서버를 확인하면 열쇠 파일 삭제를 요청합니다(이 PC를 잠금 해제한 상태에서).",
+        "Once goyo-sync has checked the server, the key file's deletion is requested (while this PC is unlocked).",
+    ),
+    (
+        "서버에는 지울 열쇠 파일이 없습니다(이미 다른 PC에서 껐거나 지워졌습니다).",
+        "The server has no key file to delete (another PC already turned it off, or it was deleted).",
+    ),
+    (
+        "다른 PC는 동기화를 멈추니 이 열쇠 파일을 USB로 옮겨 '새 열쇠 파일 받기'를 하세요. 더 쓰지 않는 보안 키는 그 키에서 이 금고의 등록을 지우세요(다른 곳에 쓰지 않는 키만 FIDO 초기화).",
+        "The other PCs halt sync: carry this key file by USB and run 'Receive a new key file' there. On a security key you no longer use, delete this vault's registration on that key (a FIDO reset only for a key used nowhere else).",
+    ),
+    (
+        "열쇠 파일 동기화를 끄지 못했습니다. 아무것도 바뀌지 않았습니다.",
+        "Key-file sync could not be turned off. Nothing changed.",
+    ),
+    (
+        "받은 결과는 열쇠 파일 동기화가 꺼진 열쇠 파일입니다.",
+        "The result is a key file with key-file sync off.",
+    ),
+    (
+        "서버의 열쇠 파일을 지우도록 요청합니다(해킹된 서버라면 이미 복사했을 수 있습니다).",
+        "It asks the server to delete its key file (a hacked server may already have copied it).",
+    ),
+    (
+        "서버의 열쇠 파일은 지우지 않습니다. 이미 다른 PC에서 끄고 지웠거나, 서버에 있는 것은 다른 PC가 나중에 정한 설정입니다(이 PC가 전에 쓰던 열쇠 파일이 서버에 남아 있으면 goyo-sync가 서버를 확인한 뒤 지우도록 요청합니다).",
+        "It does not delete the server's key file. Another PC already turned it off and deleted it, or the one on the server is a setting another PC chose later (if a key file this PC used before is still on the server, its deletion is requested once goyo-sync has checked the server).",
+    ),
+    (
+        "다른 PC는 이 열쇠 파일을 USB로 받아야 합니다.",
+        "The other PCs must take this key file by USB.",
+    ),
+    (
+        "이 열쇠 변경을 받지 않습니다. 다른 PC에서 실제로 바꾼 것이라면 이 PC는 동기화를 계속 멈춘 채로 남습니다(나중에 USB로 받을 수 있습니다). 위조된 것이 확실할 때만 누르세요. 그 PC를 더 쓸 수 없어서라면 받지 않기 대신 '다른 PC가 없어 이 PC 상태로 올리기'(그 버튼이 있을 때)나 '열쇠 파일 동기화 끄기'를 하세요.",
+        "This change is not taken. If another PC really made it, this PC stays halted (you can take it by USB later). Press this only if you are sure it is forged. If it is because that PC can no longer be used, use 'Upload this PC's state, no other PC' (when that button is shown) or 'Turn key-file sync off' instead.",
+    ),
+    (
+        "이 열쇠 변경을 받지 않았습니다. 서버에 다른 열쇠 파일이 올 때까지 동기화를 멈춥니다.",
+        "This key change was not taken. Sync stays halted until another key file arrives on the server.",
+    ),
+    (
+        "서버에 이 변경 전 금고 기록(최근 200개)이 남아 있습니다. 빠진 키와 예전 비밀번호를 가진 사람은 그 기록을 열 수 있습니다. 지울까요? 지우면 그 기록으로 되돌릴 수 없고, 해킹된 서버라면 이미 복사해 두었을 수 있습니다. 잃어버린 키와 비밀번호가 함께 노출되었을 수 있다면 금고 안의 비밀 자체를 바꾸세요.",
+        "The server still has the vault versions from before this change (the last 200). Someone with the removed key and the old password can open them. Delete them? Then you cannot go back to them, and a hacked server may already have copied them. If the lost key and the password may both be exposed, change the secrets in the vault themselves.",
+    ),
+    (
+        "서버에 이 변경 전 금고 기록을 지우도록 요청했습니다(goyo-sync가 보냅니다).",
+        "The server was asked to delete the vault versions from before this change (goyo-sync sends it).",
+    ),
+    (
+        "서버가 이 금고에서 이미 본 것보다 오래된 열쇠 파일을 보냈습니다. 받지 않았습니다.",
+        "The server sent an older key file than one this PC already saw for this vault. It was not taken.",
+    ),
+    (
+        "서버의 열쇠 파일을 받지 않고 동기화를 멈췄습니다({reason}). 다른 PC에서 바꾼 것이 맞다면 그 PC의 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 그런 일이 없었다면 서버가 위조했을 수 있습니다.",
+        "The server's key file was not taken and sync halted ({reason}). If another PC really changed it, bring that PC's key file by USB and take it with 'Receive a new key file'. If not, the server may have forged it.",
+    ),
+    (
+        "받아 둔 서버 열쇠 파일을 읽을 수 없습니다. 무시했습니다.",
+        "The server key file received cannot be read. It was ignored.",
+    ),
+    (
+        "다른 PC에서 보안 키 구성이나 설정을 바꾼 열쇠 파일이 서버에 있습니다. 받기 전에 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력해야 합니다('열쇠 관리'의 [받기…]). 그때까지 이 PC는 서버에 아무것도 올리지 않고 받은 사본도 합치지 않습니다. 키를 잃어버렸다면 '잃어버린 키 제거'를 이 PC에서도 하세요.",
+        "A key file in which another PC changed the security keys or a setting is on the server. Before taking it, pick the lost keys or enter the other PC's key check code ([Receive…] in 'Key management'). Until then this PC uploads nothing to the server and merges no copy it receives. If a key was lost, run 'Remove a lost key' on this PC too.",
+    ),
+    (
+        "서버에 이 금고의 열쇠 파일이 없습니다(다른 PC에서 열쇠 파일 동기화를 껐거나 서버에서 지움). 다른 PC에서 끈 것이라면 다시 올리지 말고 그 PC의 열쇠 파일을 USB로 받으세요. 아무도 끄지 않았는데 지워진 것이 확실할 때만 '열쇠 관리'에서 '열쇠 파일 다시 올리기'를 누르세요. 그때까지 이 PC는 서버 사본을 합치지도 올리지도 않습니다(변경은 이 PC에 저장됩니다).",
+        "The server has no key file of this vault (another PC turned key-file sync off, or it was deleted on the server). If another PC turned it off, do not upload again: take that PC's key file by USB. Press 'Upload the key file again' in 'Key management' only if you are sure it was deleted while nobody turned it off. Until then this PC neither merges nor uploads server copies (changes are saved on this PC).",
+    ),
+    (
+        "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.",
+        "A key file changed on another PC (revision {e}) is on the server. Press [Receive…] in 'Key management'.",
+    ),
+    (
+        "서버가 열쇠 파일 동기화를 받지 않습니다(강제 명령에 --key-sync 없음). docs/SECURITY_KEY.md를 보세요.",
+        "The server does not accept key-file sync (no --key-sync in the forced command). See docs/SECURITY_KEY.md.",
+    ),
+    (
+        "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.",
+        "goyo-sync or the server did not accept this PC's key file (format or size). Meanwhile this PC's vault is not uploaded. Update goyo-sync and the server script to the same version. After the update, it is uploaded again when goyo-sync restarts or you press 'Sync now'.",
+    ),
+    (
+        "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.",
+        "This vault uses key-file sync, but no goyo-sync with key-file sync (the security-key build) has answered in the last 10 minutes. Run that goyo-sync. Until then no key file moves, and after turning off the server's key file is not deleted either.",
+    ),
+    (
+        "열쇠 파일 동기화를 다시 켜지 않을 거라면, 모든 PC가 이 끄기를 받은 뒤(이 열쇠 파일을 USB로 받거나 그 PC에서 직접 끔) 서버 관리자에게 모든 PC의 강제 명령에서 이 금고 ID를 --key-sync 목록에서 빼 달라고 하세요. 빼지 않으면 그 줄의 동기화 키를 훔친 사람이 이 금고의 업로드를 막을 수 있습니다.",
+        "If you will not turn key-file sync on again: once every PC has taken this off (taken this key file by USB, or turned it off itself), ask the server administrator to remove this vault ID from the --key-sync list in every PC's forced command. Otherwise someone who steals that line's sync key can block this vault's uploads.",
+    ),
+    (
+        "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 한 PC에서 '열쇠 관리 › 새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받으세요. 보안 키 구성이 다르면 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력해야 합니다. 키를 잃어버렸다면 이 PC에서도 '잃어버린 키 제거'를 하세요. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.",
+        "Two PCs changed the keys apart, so the key files forked. Sync halted. On one PC, take the other PC's key file with 'Key management › Receive a new key file'. If the security keys differ, you must pick the lost keys or enter the other PC's key check code. If a key was lost, run 'Remove a lost key' on this PC too. If nothing like that happened, the server copy may be forged.",
+    ),
+    (
+        "정리 요청을 쓰지 못했습니다. 동기화 폴더를 확인하세요.",
+        "The prune request could not be written. Check the sync folder.",
     ),
 ];

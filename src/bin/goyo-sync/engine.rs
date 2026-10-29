@@ -8,7 +8,9 @@
 //! following links, a single-link regular file, wrapped `GOYOSOU1` around a
 //! `GOYOVA02` or `GOYOVA04` file of the pinned vault ID. A key file can fail
 //! every one of those checks; failing any one means no ssh process is
-//! started.
+//! started. The security-key build adds the key steps (`keys.rs`).
+#[cfg(feature = "security-key")]
+mod keys;
 use crate::{
     sys,
     transport::{Failure, Killed, Transport, classify, first_line},
@@ -22,6 +24,8 @@ use goyo_vault::{
         Op, RESPONSE_HEADER, Request, Response, Status, WireError, check_vault_blob, sha256,
     },
 };
+#[cfg(all(test, feature = "security-key"))]
+pub use keys::{BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, VIEW_STUCK, key_gate};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -140,6 +144,14 @@ fn op_name(op: Op) -> &'static str {
         Op::Put => "PUT",
         Op::List => "LIST",
         Op::Fetch => "FETCH",
+        #[cfg(feature = "security-key")]
+        Op::PutKey => "PUTKEY",
+        #[cfg(feature = "security-key")]
+        Op::GetKey => "GETKEY",
+        #[cfg(feature = "security-key")]
+        Op::CutKey => "CUTKEY",
+        #[cfg(feature = "security-key")]
+        Op::Prune => "PRUNE",
     }
 }
 fn status_name(status: Status) -> &'static str {
@@ -295,6 +307,9 @@ pub enum Refusal {
     Format,
     Id,
     Unreadable,
+    /// Gate 2: not a key request the app writes (spec v3 §7.12).
+    #[cfg(feature = "security-key")]
+    KeyFormat,
 }
 impl Refusal {
     fn as_str(self) -> &'static str {
@@ -306,6 +321,8 @@ impl Refusal {
             Self::Format => "not a GOYOSOU1-wrapped GOYOVA02/04 file",
             Self::Id => "a file of another vault",
             Self::Unreadable => "unreadable",
+            #[cfg(feature = "security-key")]
+            Self::KeyFormat => "not a GOYOSKO2 key request for a GOYOKS01 key file of this vault",
         }
     }
 }
@@ -317,38 +334,46 @@ pub enum Gate {
     Refused(Refusal, Option<[u8; 32]>),
     Ok(Gated),
 }
-/// Gate 2 of 3 against uploading a key file (spec §12 S11). The file is
-/// opened without following links, so a link to a key file is refused as a
-/// link and its target is never opened; a hard link to one has a link count
-/// above 1. Then the size, the wrapper, the inner magic (GOYOVA02 or
-/// GOYOVA04, each from its smallest file up) and the vault ID must match,
-/// which a key file (GOYOK…) never does.
-pub fn gate(path: &Path, pinned: Option<&[u8; 16]>) -> Gate {
+/// What both gates check before reading a file: opened without following
+/// links, so a link to a key file is refused as a link and its target is
+/// never opened; not a directory; and a link count of 1, which a hard link
+/// to a key file exceeds.
+fn opened(path: &Path) -> Result<(File, sys::FileInfo), Gate> {
     let file = match sys::open_no_follow(path) {
         Ok(file) => file,
         Err(e) => {
-            return match e.raw_os_error() {
+            return Err(match e.raw_os_error() {
                 Some(2 | 3) => Gate::Missing,
                 // Replaced right now (delete pending), or open elsewhere.
                 Some(5 | 32 | 33) => Gate::Busy,
                 _ => Gate::Refused(Refusal::Unreadable, None),
-            };
+            });
         }
     };
     let Ok(info) = sys::file_info(&file) else {
-        return Gate::Refused(Refusal::Unreadable, None);
+        return Err(Gate::Refused(Refusal::Unreadable, None));
     };
     if info.attributes & 0x400 != 0 {
-        return Gate::Refused(Refusal::Link, None); // FILE_ATTRIBUTE_REPARSE_POINT
+        return Err(Gate::Refused(Refusal::Link, None)); // FILE_ATTRIBUTE_REPARSE_POINT
     }
     if info.attributes & 0x10 != 0 {
-        return Gate::Refused(Refusal::NotFile, None); // FILE_ATTRIBUTE_DIRECTORY
+        return Err(Gate::Refused(Refusal::NotFile, None)); // FILE_ATTRIBUTE_DIRECTORY
     }
     match info.links {
-        0 => return Gate::Busy, // deleted, still open elsewhere
-        1 => {}
-        _ => return Gate::Refused(Refusal::HardLink, None),
+        0 => Err(Gate::Busy), // deleted, still open elsewhere
+        1 => Ok((file, info)),
+        _ => Err(Gate::Refused(Refusal::HardLink, None)),
     }
+}
+/// Gate 2 of 3 against uploading a key file (spec §12 S11): the file
+/// checks of [`opened`], then the size, the wrapper, the inner magic
+/// (GOYOVA02 or GOYOVA04, each from its smallest file up) and the vault ID
+/// must match, which a key file (GOYOK…) never does.
+pub fn gate(path: &Path, pinned: Option<&[u8; 16]>) -> Gate {
+    let (file, info) = match opened(path) {
+        Ok(opened) => opened,
+        Err(gate) => return gate,
+    };
     let size = (WRAP_HEADER + MIN_VAULT) as u64..=MAX_WRAPPED as u64;
     if !size.contains(&info.size) {
         return Gate::Refused(Refusal::Size, None);
@@ -415,9 +440,32 @@ struct Queued {
 #[derive(Clone, Copy)]
 struct Held {
     sha: [u8; 32],
-    /// `oldserver` or `keyfile`, shown while it waits.
+    /// `oldserver` or `keyfile` (or `nokeys`), shown while it waits.
     state: SyncState,
     until: u64,
+    /// A KEY_BEHIND upload in the security-key build (spec v3 §7.12, S6R2
+    /// #9): while the key view is present with `line` 0 it waits for that
+    /// view's content (its SHA-256) to change, never for `until`; else
+    /// `until` is an hour ahead.
+    #[cfg(feature = "security-key")]
+    view: Option<[u8; 32]>,
+    /// How far ahead `until` was set.
+    #[cfg(feature = "security-key")]
+    wait: u64,
+}
+impl Held {
+    /// Whether its wait is over.
+    fn over(&self, now: u64) -> bool {
+        #[cfg(feature = "security-key")]
+        if self.view.is_some() {
+            return false; // released when the key view changes
+        }
+        #[cfg(feature = "security-key")]
+        let wait = self.wait;
+        #[cfg(not(feature = "security-key"))]
+        let wait = RETRY_HELD;
+        passed(self.until, now, wait)
+    }
 }
 /// What the helper remembers about one vault between passes.
 struct Vault {
@@ -461,13 +509,20 @@ struct Vault {
     /// `--once` or "sync now") first reads an outgoing. Nothing persisted
     /// tells a 0.8 helper's refusal from this one's, so each run tries once.
     upgrade_retry: bool,
+    /// The key steps' memory for this run (nothing of it is persisted).
+    #[cfg(feature = "security-key")]
+    keys: keys::Keys,
+    /// The header flags (byte 64) of the last GOYOVA04 outgoing that passed
+    /// the gate: bit0 a hardware key file, bit1 key-file sync.
+    #[cfg(feature = "security-key")]
+    out_flags: u8,
 }
 impl Vault {
-    /// What a held upload `sha` shows while it waits, until RETRY_HELD has
-    /// passed.
+    /// What a held upload `sha` shows while it waits, until its wait is
+    /// over.
     fn holding(&self, sha: Option<[u8; 32]>, now: u64) -> Option<SyncState> {
         self.held
-            .filter(|h| Some(h.sha) == sha && !passed(h.until, now, RETRY_HELD))
+            .filter(|h| Some(h.sha) == sha && !h.over(now))
             .map(|h| h.state)
     }
 }
@@ -504,6 +559,10 @@ impl<T: Transport> Engine<T> {
                 folder: None,
                 held: None,
                 upgrade_retry: true,
+                #[cfg(feature = "security-key")]
+                keys: keys::Keys::default(),
+                #[cfg(feature = "security-key")]
+                out_flags: 0,
             })
             .collect();
         Self {
@@ -523,7 +582,8 @@ impl<T: Transport> Engine<T> {
     /// Whether vault `i` needs a pass now: a new or changed outgoing (once
     /// even during a backoff, unless the server holds back uploads), a
     /// queued incoming, a poll or a retry that is due, or the status
-    /// heartbeat. Lists the sync folder; opens nothing.
+    /// heartbeat; in the security-key build also what the key steps cached
+    /// (spec v3 §7.12). Lists the sync folder; opens nothing.
     pub fn due(&self, i: usize) -> bool {
         let now = (self.clock)().as_secs();
         let v = &self.vaults[i];
@@ -535,6 +595,10 @@ impl<T: Transport> Engine<T> {
         }
         let waiting = !passed(v.backoff_until, now, MAX_BACKOFF);
         if !waiting && passed(v.next_poll, now, 2 * self.interval) {
+            return true;
+        }
+        #[cfg(feature = "security-key")]
+        if keys::due(v, now, waiting) {
             return true;
         }
         match (syncfile::stamp(&v.dir, OUTGOING), v.out_seen) {
@@ -725,6 +789,10 @@ impl<T: Transport> Pass<'_, T> {
                 let v = &mut *self.v;
                 (v.state, v.persisted, v.queued) = (HelperState::default(), None, None);
                 (v.out_seen, v.in_seen, v.held) = (None, None, None);
+                #[cfg(feature = "security-key")]
+                {
+                    (v.keys, v.out_flags) = (keys::Keys::default(), 0);
+                }
                 self.note("created the sync folder");
             }
             Ok(false) => {}
@@ -760,12 +828,33 @@ impl<T: Transport> Pass<'_, T> {
             self.pin();
         }
         if let Some(id) = self.v.state.id {
-            self.flush(); // P3
-            let ok = self.push(&id); // P4
             let poll = force || passed(self.v.next_poll, self.now, 2 * self.poll_wait);
-            if ok && !self.put && !self.cancelled && poll && !self.waiting() {
-                self.pull(&id); // P5
+            #[cfg(not(feature = "security-key"))]
+            let (go, upload) = {
+                self.flush(); // P3
+                (true, self.upload(&id))
+            };
+            // KR, P4's choice and KG come first; P4 and P5 wait while KG has
+            // not written or confirmed the key view (spec v3 §7.12).
+            #[cfg(feature = "security-key")]
+            let (go, upload) = {
+                let first = self.keys_first(&id, poll);
+                self.flush(); // P3
+                first
+            };
+            if go {
+                let ok = self.push(upload); // P4
+                if ok && !self.put && !self.cancelled && poll && !self.waiting() {
+                    self.pull(&id); // P5
+                }
             }
+            // A server copy that P4's CONFLICT or P5 brought is written only
+            // after a GETKEY made after it (S6R2 #1): a cut that came before
+            // the copy is then in kview before the copy is in incoming.
+            #[cfg(feature = "security-key")]
+            self.keys_after_fetch(&id);
+            #[cfg(feature = "security-key")]
+            self.keys_last(&id); // KP
             if self.queued_now {
                 self.flush(); // P6
             }
@@ -975,6 +1064,12 @@ impl<T: Transport> Pass<'_, T> {
             }
             Gate::Ok(gated) => {
                 self.v.out_seen = Some((stamp, Some(gated.sha)));
+                #[cfg(feature = "security-key")]
+                {
+                    let vault = &gated.bytes[WRAP_HEADER..];
+                    let keyed = vault.starts_with(KEYED_VAULT);
+                    self.v.out_flags = vault.get(64).filter(|_| keyed).copied().unwrap_or(0);
+                }
                 let retry = std::mem::take(&mut self.v.upgrade_retry);
                 if Some(gated.sha) == self.v.state.done {
                     None
@@ -1050,11 +1145,11 @@ impl<T: Transport> Pass<'_, T> {
             }
         }
     }
-    /// P4. False if an exchange failed, which ends the pass's network use.
-    fn push(&mut self, id: &[u8; 16]) -> bool {
+    /// P4's choice: the outgoing file to send now, if any.
+    fn upload(&mut self, id: &[u8; 16]) -> Option<Gated> {
         let Some(stamp) = syncfile::stamp(&self.v.dir, OUTGOING) else {
             self.v.out_seen = None;
-            return true;
+            return None;
         };
         let fresh = self.v.out_seen.is_none_or(|(seen, _)| seen != stamp);
         if (!fresh || self.v.withheld) && self.waiting() {
@@ -1067,12 +1162,16 @@ impl<T: Transport> Pass<'_, T> {
                     self.set(state);
                 }
             }
-            return true;
+            return None;
         }
-        let Some(gated) = self.outgoing(stamp, Some(id)) else {
-            return true;
-        };
-        self.put(&gated, gated.base, true)
+        self.outgoing(stamp, Some(id))
+    }
+    /// P4. False if an exchange failed, which ends the pass's network use.
+    fn push(&mut self, upload: Option<Gated>) -> bool {
+        match upload {
+            Some(gated) => self.put(&gated, gated.base, true),
+            None => true,
+        }
     }
     fn put(&mut self, gated: &Gated, expected: u64, empty_retry: bool) -> bool {
         let blob = &gated.bytes[WRAP_HEADER..];
@@ -1148,7 +1247,10 @@ impl<T: Transport> Pass<'_, T> {
                 self.note(
                     "server refused the upload: its key file for this vault has another state",
                 );
+                #[cfg(not(feature = "security-key"))]
                 self.hold(gated.sha, SyncState::KeyFile);
+                #[cfg(feature = "security-key")]
+                self.hold_behind(gated.sha, blob);
             }
             Status::BadBlob | Status::TooLarge | Status::Limit | Status::BadRequest => {
                 self.v.state.rejected = Some(gated.sha);
@@ -1167,7 +1269,15 @@ impl<T: Transport> Pass<'_, T> {
     /// first, which is sent at once. Nothing is persisted (spec §7.6).
     fn hold(&mut self, sha: [u8; 32], state: SyncState) {
         let until = self.time() + RETRY_HELD;
-        self.v.held = Some(Held { sha, state, until });
+        self.v.held = Some(Held {
+            sha,
+            state,
+            until,
+            #[cfg(feature = "security-key")]
+            view: None,
+            #[cfg(feature = "security-key")]
+            wait: RETRY_HELD,
+        });
         self.set(state);
         self.succeeded();
         self.note(&format!("upload held; retry in {RETRY_HELD} s"));

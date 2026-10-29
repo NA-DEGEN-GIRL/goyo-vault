@@ -53,11 +53,16 @@ pub const ADOPT_ROLLBACK: &str = "이 PC는 지금 이 PC가 전에 쓴 것(수�
 /// What was checked and previewed is not what the write found.
 pub(super) const ADOPT_STALE: &str = "받을 열쇠 파일을 확인한 뒤에 이 PC의 열쇠 파일이나 그 파일이 바뀌었습니다. 처음부터 다시 하세요.";
 
-/// Where the other key file comes from. The server's file and the login's
-/// join with key-file sync.
+/// Where the other key file comes from: a file, or (security-key build)
+/// the server's key file in the key view, by its record number (spec
+/// §7.15).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Source {
     File(PathBuf),
+    #[cfg(feature = "security-key")]
+    Server {
+        seq: u64,
+    },
 }
 /// The gate an adopt passed (spec §7.15a), bound to the file it was asked
 /// for: the preview and the write refuse any other file. The default build
@@ -138,6 +143,10 @@ pub struct Acks {
     /// The fork option the plan was made for.
     #[cfg(feature = "security-key")]
     pub fork_option: ForkOption,
+    /// S-KEYSYNC-ON answered yes, where the preview turns key-file sync on
+    /// here (spec §7.16 "Every consented on").
+    #[cfg(feature = "security-key")]
+    pub keysync_on: bool,
 }
 /// How the other file stands against this PC's (spec §5.8). Older and every
 /// refusal are errors of `adopt_check`.
@@ -171,6 +180,10 @@ pub struct AdoptCheck {
     /// the gate of each way to take the file (security-key build).
     #[cfg(feature = "security-key")]
     pub keys: KeyGates,
+    /// Where the file came from: every later check reads it again from
+    /// the same place.
+    #[cfg(feature = "security-key")]
+    pub source: Source,
 }
 /// What the security-key build found before any touch (spec §5.8, §7.15a).
 #[cfg(feature = "security-key")]
@@ -237,6 +250,14 @@ pub struct Preview {
     /// S-ADOPT-PWONLY first.
     #[cfg(feature = "security-key")]
     pub password_only: bool,
+    /// The result is GOYOKS01 while this PC's key file is not: [받기] asks
+    /// S-KEYSYNC-ON first, under the transport precondition (spec §7.16).
+    #[cfg(feature = "security-key")]
+    pub keysync_on: bool,
+    /// The result leaves key-file sync (S-KEYSYNC-OFF-JOIN), and whether
+    /// its `ks` asks the server to delete its key file (S6R2 #22).
+    #[cfg(feature = "security-key")]
+    pub keysync_off: Option<bool>,
 }
 /// An adopt checked, opened and previewed, for `adopt` to write. Bound to
 /// its session and screen like the Reauth (spec §5.3).
@@ -321,6 +342,7 @@ impl Session {
     /// security-key build adds P3, P4, slot and pair-record pinning, and
     /// the gate of each way to take the file, all before any touch.
     pub fn adopt_check(&self, other: &KeyFile, source: Source) -> Result<AdoptCheck> {
+        #[cfg(not(feature = "security-key"))]
         let Source::File(_) = source;
         self.held()?;
         let own = self.own_public();
@@ -341,6 +363,8 @@ impl Session {
             epoch,
             #[cfg(feature = "security-key")]
             keys: KeyGates::default(),
+            #[cfg(feature = "security-key")]
+            source: source.clone(),
         };
         if theirs.state == own.state {
             return Ok(check(AdoptClass::Equal, false, None, own.state.epoch));
@@ -362,7 +386,20 @@ impl Session {
         {
             return Err(ADOPT_OLDER);
         }
+        // The server's file at this PC's own epoch (two changes that kept
+        // the data key, such as two KeySyncOn from one state) is a fork the
+        // key channel holds on, even when it holds nothing this PC lacks:
+        // only a union above both lands on its record (spec §7.21-7, -33
+        // (d)). So is a USB copy of that same file (KeyFork-SK names this
+        // route). Any other file from elsewhere that adds nothing needs no
+        // write.
+        #[cfg(feature = "security-key")]
+        let sibling = (matches!(source, Source::Server { .. }) || self.server_top_is(theirs.state))
+            && theirs.state.epoch == own.state.epoch;
+        #[cfg(not(feature = "security-key"))]
+        let sibling = false;
         if theirs.state.epoch <= own.state.epoch
+            && !sibling
             && theirs.ids.iter().all(|i| own.ids.contains(i))
             && removals_known
             && keys_known
@@ -442,16 +479,6 @@ impl Session {
         if self.unconfirmed() && !successor {
             return Err(gate::TOFU_ADOPT);
         }
-        // A successor that turns key-file sync on needs S-KEYSYNC-ON's
-        // consent and the transport check (spec §5.8, §7.9), which arrive
-        // with key-file sync: until then it is not taken.
-        #[cfg(feature = "security-key")]
-        if successor
-            && other.magic() == Some(keyfile::Magic::Ks01)
-            && self.key_file.magic() != Some(keyfile::Magic::Ks01)
-        {
-            return Err(super::NOT_PLANNED);
-        }
         if successor {
             #[allow(unused_mut)]
             let mut c = check(AdoptClass::Successor, false, None, theirs.state.epoch);
@@ -474,13 +501,23 @@ impl Session {
             return Ok(c);
         }
         // A union: above both files, this PC's floor and its confirmed
-        // state, with every removal of both.
+        // state, with every removal of both; a GOYOKS01 result also above
+        // the server's file or cut within their bounds (spec §5.5 W2).
+        #[cfg(feature = "security-key")]
+        let server = if other.magic() == Some(keyfile::Magic::Ks01) {
+            self.server_epoch()
+        } else {
+            0
+        };
+        #[cfg(not(feature = "security-key"))]
+        let server = 0;
         let epoch = own
             .state
             .epoch
             .max(theirs.state.epoch)
             .max(self.max_epoch)
             .max(a)
+            .max(server)
             .checked_add(1)
             .filter(|e| *e <= EPOCH_MAX)
             .ok_or(EPOCH_LIMIT)?;
@@ -628,7 +665,7 @@ impl Session {
         if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
-        let now = self.adopt_check(other, Source::File(other.path().to_owned()))?;
+        let now = self.adopt_check(other, source_of(check, other.path()))?;
         if gate.state() != now.other || now != *check || opened.sha != sha256(other.bytes()) {
             return Err(ADOPT_STALE);
         }
@@ -690,6 +727,10 @@ impl Session {
             suspend_keys: Vec::new(),
             #[cfg(feature = "security-key")]
             password_only: false,
+            #[cfg(feature = "security-key")]
+            keysync_on: false,
+            #[cfg(feature = "security-key")]
+            keysync_off: None,
         };
         // A union with security keys, planned now with the touches so far:
         // what it renumbers, drops and would suspend.
@@ -712,6 +753,22 @@ impl Session {
             preview.suspend = plan.unreached.clone();
             preview.suspend_keys = plan.unreached_keys.clone();
             preview.password_only = self.key_file.needs_security_key() && plan.password_only();
+            preview.keysync_on = plan.sync;
+        }
+        // Key-file sync turned on here, or left (spec §7.16).
+        #[cfg(feature = "security-key")]
+        {
+            if check.class == AdoptClass::Successor {
+                preview.keysync_on = other.magic() == Some(keyfile::Magic::Ks01);
+            }
+            // `keysync_on` says here whether the result is GOYOKS01.
+            let result = preview.keysync_on;
+            preview.keysync_on = result && !self.ks01();
+            if !result {
+                preview.keysync_off = self
+                    .take_ks(check)
+                    .map(|ks| !matches!(ks, anchor::Ks::None));
+            }
         }
         Ok(AdoptPlan {
             check: now,
@@ -756,11 +813,31 @@ impl Session {
             return Err(AUTH_ERROR);
         }
         let other = KeyFile::from_bytes(&plan.path, plan.bytes.clone())?;
-        if self.adopt_check(&other, Source::File(plan.path.clone()))? != plan.check
+        if self.adopt_check(&other, source_of(&plan.check, &plan.path))? != plan.check
             || plan.gate.state() != plan.check.other
         {
             return Err(ADOPT_STALE);
         }
+        // Key-file sync turned on here only with S-KEYSYNC-ON's yes, a
+        // touch that stated its transport, and no off of this PC pending;
+        // the `ks` and `merged` this write records (spec §7.16).
+        #[cfg(feature = "security-key")]
+        let landing = {
+            if plan.preview.keysync_on && (!acks.keysync_on || r.transport().is_none()) {
+                return Err(if acks.keysync_on {
+                    super::super::keysync::KEYSYNC_NOTRANSPORT
+                } else {
+                    super::NOT_PLANNED
+                });
+            }
+            let ks = if plan.preview.keysync_on {
+                Some(self.on_ks()?)
+            } else {
+                plan.preview.keysync_off.and(self.take_ks(&plan.check))
+            };
+            let (merged, clear_gate) = self.take_marks(&plan.check);
+            (ks, merged, clear_gate)
+        };
         if !self.key_on_disk()? {
             return Err(KEY_CHANGED);
         }
@@ -789,8 +866,13 @@ impl Session {
             #[cfg(feature = "security-key")]
             AdoptClass::Successor if other.needs_security_key() => {
                 let touched = plan.other.touched.as_ref();
-                let built =
+                let mut built =
                     self.reseal_keys(&other, &plan.other.opened, &plan.other.password, touched)?;
+                (
+                    built.landing.ks,
+                    built.landing.merged,
+                    built.landing.clear_gate,
+                ) = landing;
                 self.land(
                     built,
                     anchor::Src::Adopt,
@@ -812,7 +894,7 @@ impl Session {
                 let join = self.join_of(&plan.check, plan.option);
                 let readmit = self.readmit_of(&plan.check, join);
                 let extra = self.extra_outputs(&r, &extra)?;
-                let union = self.plan_union(
+                let mut union = self.plan_union(
                     r.keys.as_ref(),
                     &other,
                     plan.other.touched.as_ref(),
@@ -820,6 +902,14 @@ impl Session {
                     join,
                     &readmit,
                 )?;
+                if union.sync && !self.ks01() && !plan.preview.keysync_on {
+                    return Err(ADOPT_STALE);
+                }
+                (
+                    union.landing.ks,
+                    union.landing.merged,
+                    union.landing.clear_gate,
+                ) = landing;
                 report = (
                     union.renumbered.clone(),
                     union.dropped_uv.clone(),
@@ -1251,6 +1341,20 @@ impl Session {
         }
     }
 }
+/// The source an adopt checks the file from again: the one it was checked
+/// from (a server file is judged as the server's in every check).
+fn source_of(check: &AdoptCheck, path: &std::path::Path) -> Source {
+    #[cfg(feature = "security-key")]
+    {
+        let _ = path;
+        check.source.clone()
+    }
+    #[cfg(not(feature = "security-key"))]
+    {
+        let _ = check;
+        Source::File(path.to_owned())
+    }
+}
 /// The removals of two key files, one per credential (spec §5.8): the
 /// earliest epoch, and the loss mark of either, the earlier date when both
 /// have one (1, a loss on an unknown date, counts as the earliest).
@@ -1304,6 +1408,8 @@ mod tests {
             both_passwords: p.both_passwords,
             #[cfg(feature = "security-key")]
             fork_option: ForkOption::Both,
+            #[cfg(feature = "security-key")]
+            keysync_on: false,
         }
     }
     /// The whole adopt of `other` as the flow runs it (spec §9.2): the
@@ -2143,6 +2249,8 @@ mod tests {
             both_passwords: false,
             #[cfg(feature = "security-key")]
             fork_option: ForkOption::Both,
+            #[cfg(feature = "security-key")]
+            keysync_on: false,
         };
         let mut changed = plan(&s, &r);
         changed.gate = another;

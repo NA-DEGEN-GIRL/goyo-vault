@@ -27,7 +27,10 @@ pub const KEY_OFF: i32 = 155;
 pub const SK_TOGGLE: i32 = 157;
 pub const SK_PIN: i32 = 158;
 pub const KEY_RESEED: i32 = 159;
+pub const KEYSYNC_ON: i32 = 160;
+pub const KEYSYNC_OFF: i32 = 161;
 pub const KEY_ACCEPT: i32 = 162;
+pub const KEY_REUPLOAD: i32 = 163;
 pub const TOFU_OK: i32 = 165;
 pub const TOFU_LOCK: i32 = 166;
 pub const KEY_LOST: i32 = 171;
@@ -35,6 +38,7 @@ pub const KEY_PAIR: i32 = 172;
 pub const LOSS_PWCHANGE: i32 = 173;
 pub const GATE_OK: i32 = 174;
 pub const GATE_LATER: i32 = 175;
+pub const GATE_DROP: i32 = 176;
 pub const REVIEW_OK: i32 = 177;
 pub const TOFU_NOPC: i32 = 178;
 pub const LOSS_YES: i32 = 179;
@@ -680,13 +684,22 @@ impl App {
                     fill(FULL, &[&listed(&o.full)])
                 };
                 self.text(0, &full, (40, 398, 796, 20), small, TONE_MUTED, 0);
+                // A vault that syncs gets the key-file sync line under the
+                // list (spec §9.1), which gives up 40 of its height.
+                let sync = self
+                    .session
+                    .as_ref()
+                    .and_then(Session::key_sync_view)
+                    .filter(|v| v.synced);
+                let short = if sync.is_some() { 40 } else { 0 };
                 match &halt {
                     // A halted vault channel (spec §7.5a): its text in the
                     // list's place; the key changes stay, each with its gate
                     // question, and the removal of a lost key with none
                     // (S-LOST-HALTED).
                     Some((text, _)) => {
-                        self.text(0, text, (40, 424, 796, 104), small, TONE_DANGER, 0);
+                        let box_ = (40, 424, 796, 104 - short);
+                        self.text(0, text, box_, small, TONE_DANGER, 0);
                     }
                     None => {
                         // ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
@@ -702,7 +715,7 @@ impl App {
                             52,
                             428,
                             780,
-                            94,
+                            94 - short,
                             0x4 | 0x40 | 0x800 | 0x0020_0000,
                         );
                         self.frames.push((
@@ -710,7 +723,7 @@ impl App {
                                 left: 40,
                                 top: 422,
                                 right: 836,
-                                bottom: 528,
+                                bottom: 528 - short,
                             },
                             list,
                         ));
@@ -725,6 +738,29 @@ impl App {
                             }
                             EDIT_PROC.get_or_init(|| std::mem::transmute::<isize, Proc>(orig));
                         }
+                    }
+                }
+                if let Some(v) = &sync {
+                    let (text, buttons) = key_sync_text(v);
+                    let tone = if v.waiting.is_some() || v.gone || v.no_key_ops {
+                        TONE_DANGER
+                    } else {
+                        TONE_MUTED
+                    };
+                    let n = buttons.len() as i32;
+                    let bw = if n > 1 { 120 } else { 248 };
+                    let left = 836 - n * (bw + 8) + 8;
+                    self.text(0, &text, (40, 492, left - 48, 40), small, tone, 0);
+                    for (i, (id, label)) in buttons.into_iter().enumerate() {
+                        let variant = if id == KEY_ACCEPT {
+                            theme::PRIMARY
+                        } else if id == GATE_DROP || id == KEYSYNC_OFF {
+                            theme::DANGER_GHOST
+                        } else {
+                            theme::SECONDARY
+                        };
+                        let x = left + i as i32 * (bw + 8);
+                        self.button(id, label, x, 494, bw, 32, variant);
                     }
                 }
                 // Two rows of three: what adds or pairs keys, then what
@@ -1168,7 +1204,7 @@ impl App {
                 Screen::Keys,
                 KEY_ON | KEY_PIN | KEYON_PWCHANGE | KEY_ADD | KEY_PAIR | KEY_RESEED | KEY_OFF
                 | KEY_LOST | KEY_REMOVE | LOST_REDO | KEY_ACCEPT | KEY_LIST | PASS | CONFIRM
-                | PEEK_PASS | PEEK_CONFIRM,
+                | PEEK_PASS | PEEK_CONFIRM | KEYSYNC_ON | KEYSYNC_OFF | KEY_REUPLOAD | GATE_DROP,
             ) => Some(true),
             (Screen::Vault, TOFU_OK | TOFU_NOPC | TOFU_LOCK | GATE_CODE) => {
                 Some(self.tofu_banner())
@@ -1185,7 +1221,16 @@ pub(crate) fn phased(a: &App, id: i32) -> bool {
     match a.screen {
         Screen::Keys => matches!(
             id,
-            KEY_ON | KEY_ADD | KEY_RESEED | KEY_OFF | KEY_ACCEPT | ANCHOR_FORGET
+            KEY_ON
+                | KEY_ADD
+                | KEY_RESEED
+                | KEY_OFF
+                | KEY_ACCEPT
+                | ANCHOR_FORGET
+                | KEYSYNC_ON
+                | KEYSYNC_OFF
+                | KEY_REUPLOAD
+                | GATE_DROP
         ),
         Screen::Pair | Screen::Adopt => matches!(id, 1 | SUBMIT),
         // A password change of a key file with security keys needs a touch.
@@ -1220,14 +1265,20 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         (Some(Screen::Password), _) => password_flow(h),
         (Some(Screen::LostKey), LOSS_PWCHANGE) => pw_untick(h),
         (Some(Screen::LostKey | Screen::KeyRemove), _) => remove_flow(h),
-        (Some(Screen::Adopt), _) => adopt_flow(h),
+        (Some(Screen::Adopt), _) => adopt_from(h, false),
         (Some(Screen::Vault), 1 | SUBMIT) => tofu_flow(h, TOFU_OK),
         (Some(Screen::Vault), _) => tofu_flow(h, id),
         (_, KEY_ON) => keys_on_flow(h),
         (_, KEY_ADD) => add_key_flow(h),
         (_, KEY_RESEED) => reseed_flow(h),
         (_, KEY_OFF) => keys_off_flow(h),
-        (_, KEY_ACCEPT) => accept_flow(h),
+        // [받기…]: the changed key file's own gate in gate-pending mode,
+        // else the server's key file (spec §7.15).
+        (_, KEY_ACCEPT) if gate_login() => accept_flow(h),
+        (_, KEY_ACCEPT) => adopt_from(h, true),
+        (_, KEYSYNC_ON | KEY_REUPLOAD) => keysync_on_flow(h, id),
+        (_, KEYSYNC_OFF) => keysync_off_flow(h),
+        (_, GATE_DROP) => gate_drop_flow(h),
         _ => Err("현재 화면에서 허용되지 않는 작업입니다."),
     }
 }
@@ -1387,12 +1438,22 @@ fn take<T>(
     id: i32,
     more: impl FnOnce(&mut App, &Typed) -> crypto::Result<T>,
 ) -> crypto::Result<(Typed, T)> {
+    take_with(h, id, &vault::Change::Password(Zeroizing::default()), more)
+}
+/// The same for `change`, whose own gate is asked (spec §7.5: the off of
+/// key-file sync is not held by a pending gate, its on is).
+fn take_with<T>(
+    h: Hwnd,
+    id: i32,
+    change: &vault::Change,
+    more: impl FnOnce(&mut App, &Typed) -> crypto::Result<T>,
+) -> crypto::Result<(Typed, T)> {
     let taken = APP.with(|cell| -> crypto::Result<_> {
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
         let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
         a.enter(id)?;
         let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
-        let gate = s.password_change()?;
+        let gate = s.change_gate(change)?;
         if gate == Some(vault::Gate::LocalRollback) {
             return Err(vault::Gate::LocalRollback.question());
         }
@@ -2457,12 +2518,31 @@ fn reseed_flow(h: Hwnd) -> crypto::Result<()> {
 /// live key, the Reauth and the write; S-BACKUP, then S-RETIRE with every
 /// key's registration name.
 fn keys_off_flow(h: Hwnd) -> crypto::Result<()> {
-    let (t, ()) = take(h, KEY_OFF, |_, t| {
+    let change = vault::Change::KeysOff;
+    let (t, synced) = take_with(h, KEY_OFF, &change, |a, t| {
         t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
         authenticator().map_err(FidoError::text)?;
-        Ok(())
+        // A GOYOKS01 key file: the off sequence of key-file sync (spec
+        // §7.16, §9.2 keys off step 1), with P1's `ks′` snapshot.
+        let s = a.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
+        Ok(s.key_sync_view()
+            .filter(|v| v.on)
+            .map(|view| (view, s.off_request())))
     })?;
-    if !ask(h, OFF) || !gate_asked(h, &t) {
+    let asked = match &synced {
+        Some((view, request)) => {
+            let first = format!(
+                "{}
+
+{}",
+                tr(OFF),
+                tr(KEYSOFF_SYNCED)
+            );
+            off_asked(h, &first, view, *request)
+        }
+        None => ask(h, OFF),
+    };
+    if !asked || !gate_asked(h, &t) {
         return Ok(());
     }
     let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
@@ -2475,10 +2555,12 @@ fn keys_off_flow(h: Hwnd) -> crypto::Result<()> {
         return Ok(());
     };
     drop(touch);
-    let done = |_: &Session| {
-        Done::of(vec![tr(KEYS_OFF_DONE).to_owned()]).more(tr(KEYS_OFF_OTHERS).to_owned())
+    let request = synced.map(|(_, request)| request);
+    let done = move |_: &Session| match request {
+        Some(request) => Done::of(vec![tr(KEYS_OFF_DONE).to_owned(), off_line(request)])
+            .more(tr(OFF_OTHERS).to_owned()),
+        None => Done::of(vec![tr(KEYS_OFF_DONE).to_owned()]).more(tr(KEYS_OFF_OTHERS).to_owned()),
     };
-    let change = vault::Change::KeysOff;
     if let Some(told) = write(
         h,
         &t,
@@ -3131,6 +3213,7 @@ fn remove_flow(h: Hwnd) -> crypto::Result<()> {
     match write(h, &t, r, extra, change, consent, &done) {
         Ok(Some(told)) => {
             backup_after(h, BACKUP_QUESTION);
+            prune_after(h);
             if lost {
                 tell_after(h, &told);
                 review_after(h);
@@ -4094,15 +4177,28 @@ fn fork_text(take_other: bool, both: bool) -> String {
 /// S-SUSPEND, the write, S-BACKUP, and S-REVIEW after a removal for a loss.
 /// The Reauth, every Touch, the other file's password and its opened keys
 /// live only in this frame.
-fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
+fn adopt_from(h: Hwnd, server: bool) -> crypto::Result<()> {
+    let screen = if server { Screen::Keys } else { Screen::Adopt };
     let p1 = APP.with(|cell| -> crypto::Result<Option<_>> {
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
         let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
-        a.enter(SUBMIT)?;
-        let path = a.adopt_source.clone().ok_or("받을 열쇠 파일을 고르세요.")?;
+        a.enter(if server { KEY_ACCEPT } else { SUBMIT })?;
         let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
-        let other = KeyFile::read(&path)?;
-        let check = s.adopt_check(&other, Source::File(path))?;
+        // The server's key file exactly as judged (spec §7.15 step 1): a
+        // successor (with a carry or not), or a fork, which this flow joins
+        // with fork options 1 and 2 behind their gate; a refused file goes
+        // only through "새 열쇠 파일 받기" with a file from elsewhere.
+        let (other, source) = if server {
+            let (file, seq) = s.server_key_file().ok_or(vault::NO_CANDIDATE)?;
+            if !server_takes(s.server_class()) {
+                return Err(vault::NOT_A_SUCCESSOR);
+            }
+            (file, Source::Server { seq })
+        } else {
+            let path = a.adopt_source.clone().ok_or("받을 열쇠 파일을 고르세요.")?;
+            (KeyFile::read(&path)?, Source::File(path))
+        };
+        let check = s.adopt_check(&other, source)?;
         let same = match check.class {
             AdoptClass::Equal => Some(vault::ADOPT_EQUAL),
             AdoptClass::Contained => Some(vault::ADOPT_CONTAINED),
@@ -4116,9 +4212,15 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
         if keys.is_some() || other.needs_security_key() {
             authenticator().map_err(FidoError::text)?;
         }
+        // A result that turns key-file sync on here: the transport first,
+        // before any gate question or touch (spec §7.15 step 1, S6-3 #10).
+        let ks01 = |m: Option<vault::keyfile::Magic>| m == Some(vault::keyfile::Magic::Ks01);
+        if ks01(other.magic()) && !ks01(s.key_magic()) && !check.fork {
+            transport_reported()?;
+        }
         let gate = (s.gate_choices(), s.unlocked_with());
         let typed = Typed {
-            screen: Screen::Adopt,
+            screen,
             serial: a.serial,
             current: a.read(CURRENT_PASS)?,
             otp: a.read(OTP)?,
@@ -4127,7 +4229,7 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
             keys: keys.clone(),
             uses_otp: s.uses_otp(),
         };
-        a.flow = Some(SUBMIT);
+        a.flow = Some(if server { KEY_ACCEPT } else { SUBMIT });
         Ok(Some((a.serial, other, check, typed, keys, gate)))
     });
     drain_pending(h);
@@ -4135,7 +4237,6 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
         return Ok(());
     };
     let (current, otp, otp_time) = (&t.current, &t.otp, t.otp_time);
-    let screen = Screen::Adopt;
     let (epoch, tag) = (check.other.epoch, check.other.tag);
     // A: the fork option, then its gate; nothing about the change before.
     // Two password-only files have no options: they are joined, as in the
@@ -4424,6 +4525,35 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
     if preview.password_only && !ask(h, ADOPT_PWONLY) {
         return Ok(());
     }
+    // Key-file sync turned on here (S-KEYSYNC-ON, under the transport
+    // precondition) or left (S-KEYSYNC-OFF-JOIN), spec §7.16.
+    let keysync_on = preview.keysync_on;
+    if keysync_on {
+        transport_reported()?;
+        if !ask(h, KEYSYNC_ON_TEXT) {
+            return Ok(());
+        }
+    }
+    if let Some(deletes) = preview.keysync_off {
+        let middle = if deletes {
+            OFF_JOIN_DELETES
+        } else {
+            OFF_JOIN_KEEPS
+        };
+        let text = [OFF_JOIN, middle, OFF_JOIN_USB].map(tr).join(" ");
+        let go = DialogButton {
+            id: 1,
+            label: TOFU_OK_LABEL,
+            role: Role::Accept,
+        };
+        let kind = InputKind::Preview { check: None };
+        if !matches!(
+            ask_input(h, kind, &text, &[go, CANCEL_BUTTON]),
+            InputAnswer::Accept { .. }
+        ) {
+            return Ok(());
+        }
+    }
     if preview.both_passwords && !ask(h, ADOPT_BOTHPASS) {
         return Ok(());
     }
@@ -4480,6 +4610,7 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
         },
         both_passwords: preview.both_passwords,
         fork_option: option,
+        keysync_on,
     };
     let written = phase(h, screen, serial, |a| {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
@@ -4536,6 +4667,7 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
     match written {
         Ok(Some(true)) => {
             backup_after(h, BACKUP_QUESTION);
+            prune_after(h);
             review_after(h);
         }
         Err(e) if e == vault::KEY_DAMAGED => save_damaged_key(h),
@@ -4543,6 +4675,414 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
         Ok(_) => {}
     }
     Ok(())
+}
+
+// Key-file sync (spec §7.8-§7.19, §9.1-§9.3; stage 6).
+
+/// The Keys screen's key-file sync line (spec §9.1).
+pub const KS_OFF: &str = "열쇠 파일 동기화: 꺼짐";
+pub const KS_SAME: &str = "열쇠 파일 동기화: 켜짐";
+pub const KS_GONE: &str = "열쇠 파일 동기화: 켜짐 · 서버에 없음";
+pub const KS_READY: &str = "서버에 새 열쇠 파일 있음 (수정 {e})";
+pub const KS_GATE: &str = "서버에 확인할 열쇠 변경 있음 (수정 {e})";
+pub const KS_FORK: &str = "서버의 열쇠 파일과 갈라짐 (수정 {e}) · [받기…]로 합치세요";
+/// A stored pending gate whose candidate is no longer the server's top
+/// (spec §7.15a; [받지 않기…] still ends it).
+pub const KS_GATE_GONE: &str = "확인을 기다리는 열쇠 변경(수정 {e})이 서버에 없습니다 · 받을 수 없으면 [받지 않기…]를 누르세요";
+pub const KS_DEL_PENDING: &str = "서버의 열쇠 파일 삭제: 대기 중 (goyo-sync가 처리합니다)";
+pub const KS_DEL_NOVIEW: &str = "서버의 열쇠 파일 삭제: 대기 중 (goyo-sync가 서버를 확인하면, 이 PC가 잠금 해제되어 있을 때 요청합니다)";
+pub const KS_DEL_NOKEYS: &str = "서버의 열쇠 파일 삭제: 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받지 않습니다(--key-sync 목록에 없음). 다른 PC에서 이미 끄고 지웠다면 할 일이 없습니다.";
+pub const KS_DEL_ANSWERED: &str = "서버의 열쇠 파일 삭제: 서버가 삭제했다고 응답함 (기록 {seq})";
+pub const KEYSYNC_ON_BUTTON: &str = "열쇠 파일 동기화 켜기…";
+pub const KEYSYNC_OFF_BUTTON: &str = "열쇠 파일 동기화 끄기…";
+pub const REUPLOAD_BUTTON: &str = "열쇠 파일 다시 올리기";
+pub const DROP_BUTTON: &str = "받지 않기…";
+/// S-KEYSYNC-ON (spec §7.9 items 1-10).
+pub const KEYSYNC_ON_TEXT: &str = "열쇠 파일 동기화를 켜면:\n1. 서버, 또는 동기화 SSH 키를 가진 사람이 열쇠 파일을 갖게 됩니다. 남는 장벽은 비밀번호와 보안 키(+PIN)뿐입니다.\n2. 올린 열쇠 파일은 그때 서버에 접근한 사람이 영원히 보관할 수 있습니다. 키 제거나 비밀번호 변경은 그 뒤에 저장하는 것만 보호합니다. 키를 잃었고 비밀번호가 알려졌을 수 있다면 비밀 자체를 바꾸세요.\n3. 해킹된 서버는 열쇠 변경을 어느 PC에 숨길 수 있습니다. 모든 PC가 받아야(잃어버린 키를 고르거나 코드를 입력해야) 열쇠 변경이 끝납니다. 키를 잃으면 모든 PC에서 '잃어버린 키 제거'를 하세요.\n4. 서버 사본은 백업이 아닙니다. USB 열쇠 백업과 2개 이상의 키가 여전히 필요하고, 복구 코드는 없습니다.\n5. PIN이 필수입니다: 6자 이상, 비밀번호와 다르게. 8번 틀리면 키가 잠기고, 초기화한 키로는 이 금고를 열 수 없습니다.\n6. 잃어버린 PC의 authorized_keys 줄은 바로 지우고, 사람마다 서버 계정을 따로 쓰세요.\n7. 휴대폰과 Windows Hello는 쓸 수 없고, USB나 NFC 보안 키만 씁니다.\n8. 더 쓰지 않는 키에서는 이 금고의 등록을 지우세요(제조사 도구, 예: 관리자 권한으로 ykman fido credentials delete; 키의 PIN 필요). FIDO 전체 초기화는 다른 곳에 쓰지 않는 키만 하세요.\n9. 열쇠 파일 사본이 각 PC의 동기화 폴더에 생깁니다.\n10. 열쇠를 바꾸면 다른 PC는 다음 잠금 해제 때 받습니다. 제거는 잃어버린 키를 고르고, 키 추가나 설정 변경은 바꾼 PC에 보이는 코드를 입력합니다. 보안 키를 끄면 열쇠 파일 동기화도 꺼지고, 다른 PC는 다시 USB로 열쇠 파일을 받아야 합니다.\n열쇠 파일 동기화를 켤까요?";
+/// [열쇠 파일 다시 올리기] (KeySyncGone, spec §7.11).
+pub const REUPLOAD_ASK: &str = "서버에 이 금고의 열쇠 파일이 없습니다. 다른 PC에서 열쇠 파일 동기화를 끈 것이라면 다시 올리지 말고 그 PC의 열쇠 파일을 USB로 받으세요. 아무도 끄지 않았는데 지워진 것이 확실할 때만 다시 올리세요.\n이 PC의 열쇠 파일을 다시 올릴까요?";
+pub const KEYSYNC_ON_DONE: &str = "열쇠 파일 동기화를 켰습니다. goyo-sync가 서버에 열쇠 파일을 올립니다. 다른 PC는 다음 잠금 해제 때 이 PC의 열쇠 확인 코드를 입력해야 받습니다.";
+pub const REUPLOADED: &str = "열쇠 파일을 다시 올리도록 했습니다. goyo-sync가 서버에 올립니다.";
+/// S-KEYSYNC-OFF and its additions (spec §7.16 step 1).
+pub const KEYSYNC_OFF_ASK: &str = "열쇠 파일 동기화를 끕니다. 서버에 열쇠 파일 삭제를 요청하고 데이터 키를 바꿉니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다. 계속할까요?";
+pub const KEYSOFF_SYNCED: &str = "이 열쇠 파일은 열쇠 파일 동기화를 씁니다. 보안 키를 끄면 열쇠 파일 동기화도 끄고, 서버에 열쇠 파일 삭제를 요청합니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다.";
+pub const OFF_FORK: &str = "서버에 이 PC가 받지 않은 열쇠 파일(수정 {e})이 있습니다. 다른 PC의 변경일 수도, 위조된 파일일 수도 있습니다. 끄면 그 파일도 서버에서 지워지고, 다른 PC의 변경이라면 그 PC의 변경은 USB로 옮겨야 합니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남았던 열쇠 파일로 열리지 않습니다.";
+pub const OFF_NOHELPER: &str = "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?";
+pub const OFF_NOHELPER_NOVIEW: &str = "이 PC에 서버 확인 기록이 없어, goyo-sync가 서버를 확인한 뒤 이 PC를 한 번 더 잠금 해제해야 삭제 요청이 나갑니다.";
+pub const OFF_NOKEYS: &str = "이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받지 않아(서버 강제 명령에 --key-sync=<금고 ID> 없음) 서버의 열쇠 파일을 지울 수 없습니다.
+열쇠 파일 동기화를 쓰던 금고에서 서버가 이렇게 답한다면 서버 설정이 바뀌었거나 서버가 해킹되었을 수 있습니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남은 열쇠 파일로 열리지 않습니다. 다만 서버 관리자가 이 PC의 줄에 그 설정을 넣거나 data/<id>/k/를 지울 때까지 이 PC의 금고는 서버에 올라가지 않습니다(서버의 열쇠 파일이 다른 상태를 요구합니다). 끌까요?";
+/// The off's status (spec §7.16 step 6, S6R2 #22).
+pub const OFF_DONE: &str = "열쇠 파일 동기화를 껐습니다.";
+pub const OFF_DELETES: &str =
+    "서버에 열쇠 파일 삭제를 요청했습니다(해킹된 서버라면 이미 복사했을 수 있습니다).";
+pub const OFF_AFTER_VIEW: &str =
+    "goyo-sync가 서버를 확인하면 열쇠 파일 삭제를 요청합니다(이 PC를 잠금 해제한 상태에서).";
+pub const OFF_NOTHING: &str =
+    "서버에는 지울 열쇠 파일이 없습니다(이미 다른 PC에서 껐거나 지워졌습니다).";
+pub const OFF_OTHERS: &str = "다른 PC는 동기화를 멈추니 이 열쇠 파일을 USB로 옮겨 '새 열쇠 파일 받기'를 하세요. 더 쓰지 않는 보안 키는 그 키에서 이 금고의 등록을 지우세요(다른 곳에 쓰지 않는 키만 FIDO 초기화).";
+pub const OFF_FAILED: &str = "열쇠 파일 동기화를 끄지 못했습니다. 아무것도 바뀌지 않았습니다.";
+/// S-KEYSYNC-OFF-JOIN (spec §7.16; S6R2 #22).
+pub const OFF_JOIN: &str = "받은 결과는 열쇠 파일 동기화가 꺼진 열쇠 파일입니다.";
+pub const OFF_JOIN_DELETES: &str =
+    "서버의 열쇠 파일을 지우도록 요청합니다(해킹된 서버라면 이미 복사했을 수 있습니다).";
+pub const OFF_JOIN_KEEPS: &str = "서버의 열쇠 파일은 지우지 않습니다. 이미 다른 PC에서 끄고 지웠거나, 서버에 있는 것은 다른 PC가 나중에 정한 설정입니다(이 PC가 전에 쓰던 열쇠 파일이 서버에 남아 있으면 goyo-sync가 서버를 확인한 뒤 지우도록 요청합니다).";
+pub const OFF_JOIN_USB: &str = "다른 PC는 이 열쇠 파일을 USB로 받아야 합니다.";
+/// S-GATE-DROP (spec §7.15a).
+pub const GATE_DROP_ASK: &str = "이 열쇠 변경을 받지 않습니다. 다른 PC에서 실제로 바꾼 것이라면 이 PC는 동기화를 계속 멈춘 채로 남습니다(나중에 USB로 받을 수 있습니다). 위조된 것이 확실할 때만 누르세요. 그 PC를 더 쓸 수 없어서라면 받지 않기 대신 '다른 PC가 없어 이 PC 상태로 올리기'(그 버튼이 있을 때)나 '열쇠 파일 동기화 끄기'를 하세요.";
+pub const GATE_DROPPED: &str =
+    "이 열쇠 변경을 받지 않았습니다. 서버에 다른 열쇠 파일이 올 때까지 동기화를 멈춥니다.";
+/// S-PRUNE (spec §7.19).
+pub const PRUNE_ASK: &str = "서버에 이 변경 전 금고 기록(최근 200개)이 남아 있습니다. 빠진 키와 예전 비밀번호를 가진 사람은 그 기록을 열 수 있습니다. 지울까요? 지우면 그 기록으로 되돌릴 수 없고, 해킹된 서버라면 이미 복사해 두었을 수 있습니다. 잃어버린 키와 비밀번호가 함께 노출되었을 수 있다면 금고 안의 비밀 자체를 바꾸세요.";
+pub const PRUNE_DONE: &str =
+    "서버에 이 변경 전 금고 기록을 지우도록 요청했습니다(goyo-sync가 보냅니다).";
+/// The key notices of spec §7.4.
+pub const N_KEY_ROLLBACK: &str =
+    "서버가 이 금고에서 이미 본 것보다 오래된 열쇠 파일을 보냈습니다. 받지 않았습니다.";
+pub const N_REFUSED: &str = "서버의 열쇠 파일을 받지 않고 동기화를 멈췄습니다({reason}). 다른 PC에서 바꾼 것이 맞다면 그 PC의 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 그런 일이 없었다면 서버가 위조했을 수 있습니다.";
+pub const N_BAD_KEY: &str = "받아 둔 서버 열쇠 파일을 읽을 수 없습니다. 무시했습니다.";
+pub const N_GATE_PENDING: &str = "다른 PC에서 보안 키 구성이나 설정을 바꾼 열쇠 파일이 서버에 있습니다. 받기 전에 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력해야 합니다('열쇠 관리'의 [받기…]). 그때까지 이 PC는 서버에 아무것도 올리지 않고 받은 사본도 합치지 않습니다. 키를 잃어버렸다면 '잃어버린 키 제거'를 이 PC에서도 하세요.";
+pub const N_GONE: &str = "서버에 이 금고의 열쇠 파일이 없습니다(다른 PC에서 열쇠 파일 동기화를 껐거나 서버에서 지움). 다른 PC에서 끈 것이라면 다시 올리지 말고 그 PC의 열쇠 파일을 USB로 받으세요. 아무도 끄지 않았는데 지워진 것이 확실할 때만 '열쇠 관리'에서 '열쇠 파일 다시 올리기'를 누르세요. 그때까지 이 PC는 서버 사본을 합치지도 올리지도 않습니다(변경은 이 PC에 저장됩니다).";
+pub const N_READY: &str =
+    "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.";
+pub const N_NOKEYSYNC: &str = "서버가 열쇠 파일 동기화를 받지 않습니다(강제 명령에 --key-sync 없음). docs/SECURITY_KEY.md를 보세요.";
+pub const N_KEYUP_REFUSED: &str = "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.";
+pub const N_HELPER: &str = "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.";
+/// S-KEYSYNC-OFF-ADMIN (spec §7.16 step 7), once, after the deletion line.
+pub const N_ADMIN: &str = "열쇠 파일 동기화를 다시 켜지 않을 거라면, 모든 PC가 이 끄기를 받은 뒤(이 열쇠 파일을 USB로 받거나 그 PC에서 직접 끔) 서버 관리자에게 모든 PC의 강제 명령에서 이 금고 ID를 --key-sync 목록에서 빼 달라고 하세요. 빼지 않으면 그 줄의 동기화 키를 훔친 사람이 이 금고의 업로드를 막을 수 있습니다.";
+/// KeyFork-SK (spec §7.4), in place of the default build's KeyFork.
+pub const N_KEYFORK_SK: &str = "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 한 PC에서 '열쇠 관리 › 새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받으세요. 보안 키 구성이 다르면 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력해야 합니다. 키를 잃어버렸다면 이 PC에서도 '잃어버린 키 제거'를 하세요. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.";
+
+/// The status line of a key notice of key-file sync and whether it is a
+/// danger line (spec §7.4); None for the notices main.rs words.
+pub fn key_sync_line(notice: &vault::SyncNotice) -> Option<(Zeroizing<String>, bool)> {
+    use vault::SyncNotice as N;
+    Some(match notice {
+        N::KeyFork => (line(N_KEYFORK_SK), true),
+        N::KeyRollback => (line(N_KEY_ROLLBACK), true),
+        N::KeyFileRefused(reason) => (Zeroizing::new(fill(N_REFUSED, &[&tr(reason)])), true),
+        N::BadKeyIncoming => (line(N_BAD_KEY), true),
+        N::GatePending => (line(N_GATE_PENDING), true),
+        N::KeySyncGone => (line(N_GONE), true),
+        N::KeyFileReady { epoch } => (Zeroizing::new(fill(N_READY, &[epoch])), true),
+        N::NoKeySync => (line(N_NOKEYSYNC), true),
+        N::KeyUpRefused => (line(N_KEYUP_REFUSED), true),
+        N::KeySyncHelper => (line(N_HELPER), true),
+        N::KeySyncDeleted { seq, admin } => {
+            let mut text = fill(KS_DEL_ANSWERED, &[seq]);
+            if *admin {
+                text = format!("{text}\r\n{}", tr(N_ADMIN));
+            }
+            (Zeroizing::new(text), false)
+        }
+        _ => return None,
+    })
+}
+
+/// The Keys screen's key-file sync line and its button (spec §9.1), for a
+/// vault that syncs: the state, the waiting change or the deletion line,
+/// and [받기…] with [받지 않기…], [열쇠 파일 다시 올리기], or [끄기…] /
+/// [켜기…].
+pub fn key_sync_text(v: &vault::KeySyncView) -> (String, Vec<(i32, &'static str)>) {
+    let mut text: Vec<String> = Vec::new();
+    let mut buttons: Vec<(i32, &'static str)> = Vec::new();
+    match v.waiting {
+        Some(w) if matches!(w.class, vault::KeyClass::Successor { .. }) => {
+            text.push(fill(
+                if w.pending_gate { KS_GATE } else { KS_READY },
+                &[&w.epoch],
+            ));
+            buttons.push((KEY_ACCEPT, ACCEPT_BUTTON));
+            if w.pending_gate {
+                buttons.push((GATE_DROP, DROP_BUTTON));
+            }
+        }
+        // A fork is joined by the same flow: fork options 1 and 2 behind
+        // their gate, a union uploaded on the server's record (§7.15).
+        Some(w) if w.class == vault::KeyClass::KeyFork => {
+            text.push(fill(KS_FORK, &[&w.epoch]));
+            buttons.push((KEY_ACCEPT, ACCEPT_BUTTON));
+        }
+        Some(w) => text.push(fill(KS_FORK, &[&w.epoch])),
+        None => {}
+    }
+    // A pending gate whose candidate left the top (a server restored from a
+    // backup, an admin's rm -r k/, a PC gone): [받지 않기…] still ends it.
+    let stale_gate = v
+        .stale_gate
+        .filter(|_| !buttons.iter().any(|(id, _)| *id == GATE_DROP));
+    if let Some(epoch) = stale_gate {
+        text.push(fill(KS_GATE_GONE, &[&epoch]));
+    }
+    if text.is_empty() {
+        text.push(
+            tr(if !v.on {
+                KS_OFF
+            } else if v.gone {
+                KS_GONE
+            } else {
+                KS_SAME
+            })
+            .to_owned(),
+        );
+    }
+    match v.deletion {
+        Some(vault::Deletion::Pending) => text.push(tr(KS_DEL_PENDING).to_owned()),
+        Some(vault::Deletion::PendingNoView) => text.push(tr(KS_DEL_NOVIEW).to_owned()),
+        Some(vault::Deletion::NoKeyOps) => text.push(tr(KS_DEL_NOKEYS).to_owned()),
+        Some(vault::Deletion::Answered(seq)) => text.push(fill(KS_DEL_ANSWERED, &[&seq])),
+        None => {}
+    }
+    if buttons.is_empty() {
+        buttons.push(if v.on && v.gone {
+            (KEY_REUPLOAD, REUPLOAD_BUTTON)
+        } else if v.on {
+            (KEYSYNC_OFF, KEYSYNC_OFF_BUTTON)
+        } else {
+            (KEYSYNC_ON, KEYSYNC_ON_BUTTON)
+        });
+    }
+    if stale_gate.is_some() {
+        buttons.push((GATE_DROP, DROP_BUTTON));
+    }
+    (text.join("\r\n"), buttons)
+}
+
+/// Whether [받기…] takes the server's file of this class: a successor, or
+/// a fork it joins (spec §7.15); a Refused, Stale or Equal file is not.
+pub fn server_takes(class: Option<vault::KeyClass>) -> bool {
+    matches!(
+        class,
+        Some(vault::KeyClass::Successor { .. } | vault::KeyClass::KeyFork)
+    )
+}
+
+/// The transport precondition before any ceremony (spec §7.9, S6-1 #6):
+/// this Windows' WebAuthn API reports the transport of an assertion
+/// (version 4 assertions, API 6 and later).
+fn transport_reported() -> crypto::Result<()> {
+    let api = authenticator().map_err(FidoError::text)?.api_version();
+    if api < 6 {
+        return Err(vault::KEYSYNC_NOTRANSPORT);
+    }
+    Ok(())
+}
+
+/// [열쇠 파일 동기화 켜기…] and [열쇠 파일 다시 올리기] (spec §7.9,
+/// §9.2): §7.9's preconditions and the transport before any question;
+/// S-KEYSYNC-ON (or the re-upload's warning) and the gate; one touch of an
+/// active key; `rekey(KeySyncOn)`.
+fn keysync_on_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
+    let change = vault::Change::KeySyncOn;
+    let (t, ()) = take_with(h, id, &change, |a, t| {
+        t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
+        transport_reported()?;
+        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        s.keysync_ready()
+    })?;
+    let question = if id == KEY_REUPLOAD {
+        REUPLOAD_ASK
+    } else {
+        KEYSYNC_ON_TEXT
+    };
+    if !ask(h, question) || !gate_asked(h, &t) {
+        return Ok(());
+    }
+    let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
+    let Some(touch) = touch_of(h, &t, &keys.active(), TOUCH)? else {
+        return Ok(());
+    };
+    let Some(r) = reauth(h, &t, Some(&touch))? else {
+        return Ok(());
+    };
+    drop(touch);
+    let reupload = id == KEY_REUPLOAD;
+    let done = move |_: &Session| {
+        Done::of(vec![
+            tr(if reupload {
+                REUPLOADED
+            } else {
+                KEYSYNC_ON_DONE
+            })
+            .to_owned(),
+        ])
+    };
+    if let Some(told) = write(
+        h,
+        &t,
+        r,
+        Vec::new(),
+        change,
+        vault::Consent::default(),
+        &done,
+    )? && !reupload
+    {
+        backup_after(h, BACKUP_QUESTION);
+        tell_after(h, &told);
+    }
+    Ok(())
+}
+/// The questions an off of key-file sync asks first (spec §7.16 step 1),
+/// after `first` (S-KEYSYNC-OFF, or S-OFF with its paragraph): the fork
+/// warning, then S-KEYSYNC-OFF-NOKEYS (default yes) or
+/// S-KEYSYNC-OFF-NOHELPER (default no). True to go on.
+fn off_asked(h: Hwnd, first: &str, view: &vault::KeySyncView, request: vault::OffRequest) -> bool {
+    let mut text = tr(first).to_owned();
+    if let Some(w) = view.waiting {
+        text = format!("{text}\n\n{}", fill(OFF_FORK, &[&w.epoch]));
+    }
+    if !ask(h, &text) {
+        return false;
+    }
+    if view.no_key_ops {
+        let yes = DialogButton {
+            id: 1,
+            label: YES,
+            role: Role::Accept,
+        };
+        let no = DialogButton {
+            id: 2,
+            label: NO,
+            role: Role::Cancel,
+        };
+        let kind = InputKind::Preview { check: None };
+        return matches!(
+            ask_input(h, kind, OFF_NOKEYS, &[yes, no]),
+            InputAnswer::Accept { .. }
+        );
+    }
+    if !view.helper {
+        let mut text = tr(OFF_NOHELPER).to_owned();
+        if request == vault::OffRequest::AfterView {
+            text = format!("{text}\n{}", tr(OFF_NOHELPER_NOVIEW));
+        }
+        return ask(h, &text);
+    }
+    true
+}
+/// The off's status (spec §7.16 step 6): its request in the wording of its
+/// `ks′` as one line; the other PCs' step follows in the dialog after the
+/// backup.
+fn off_line(request: vault::OffRequest) -> String {
+    let said = match request {
+        vault::OffRequest::Deletes => OFF_DELETES,
+        vault::OffRequest::AfterView => OFF_AFTER_VIEW,
+        vault::OffRequest::Nothing => OFF_NOTHING,
+    };
+    format!("{} {}", tr(OFF_DONE), tr(said))
+}
+/// [열쇠 파일 동기화 끄기…] (spec §7.16, §9.2): the questions of step 1,
+/// the gate, P1's `ks′` snapshot (kept across a rekey that wrote
+/// nothing), one touch, `rekey(KeySyncOff)`, which deletes `kreq` and
+/// `kview` before it rotates.
+fn keysync_off_flow(h: Hwnd) -> crypto::Result<()> {
+    let change = vault::Change::KeySyncOff;
+    let (t, (view, request)) = take_with(h, KEYSYNC_OFF, &change, |a, t| {
+        t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
+        authenticator().map_err(FidoError::text)?;
+        let s = a.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
+        let view = s.key_sync_view().ok_or(vault::NOT_PLANNED)?;
+        Ok((view, s.off_request()))
+    })?;
+    if !off_asked(h, KEYSYNC_OFF_ASK, &view, request) || !gate_asked(h, &t) {
+        return Ok(());
+    }
+    let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
+    let Some(touch) = touch_of(h, &t, &keys.active(), TOUCH)? else {
+        return Ok(());
+    };
+    let Some(r) = reauth(h, &t, Some(&touch))? else {
+        return Ok(());
+    };
+    drop(touch);
+    let done = move |_: &Session| Done::of(vec![off_line(request)]).more(tr(OFF_OTHERS).to_owned());
+    match write(
+        h,
+        &t,
+        r,
+        Vec::new(),
+        change,
+        vault::Consent::default(),
+        &done,
+    ) {
+        Ok(Some(told)) => {
+            backup_after(h, BACKUP_QUESTION);
+            tell_after(h, &told);
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) if [GAP_KEPT, vault::GAP_CHANGED, vault::KEY_DAMAGED].contains(&e) => Err(e),
+        Err(e) => {
+            fail(&[e, OFF_FAILED]);
+            Ok(())
+        }
+    }
+}
+/// [받지 않기…] (spec §7.15a): S-GATE-DROP (danger, default no), then the
+/// candidate is remembered as dropped and never offered again.
+fn gate_drop_flow(h: Hwnd) -> crypto::Result<()> {
+    let p1 = APP.with(|cell| -> crypto::Result<_> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        a.enter(GATE_DROP)?;
+        a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        a.flow = Some(GATE_DROP);
+        Ok(a.serial)
+    });
+    drain_pending(h);
+    let serial = p1?;
+    if !ask(h, GATE_DROP_ASK) {
+        return Ok(());
+    }
+    phase(h, Screen::Keys, serial, |a| {
+        let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+        s.drop_gate()?;
+        a.sync_badge = s.badge();
+        a.status = line(GATE_DROPPED);
+        a.status_tone = TONE_DANGER;
+        a.build();
+        Ok(())
+    })
+    .map(|_| ())
+}
+/// S-PRUNE after a removal on a GOYOKS01 vault (spec §7.19): a yes writes
+/// `prune.request`, which goyo-sync sends once the head is at that epoch.
+fn prune_after(h: Hwnd) {
+    let offered = APP.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|b| {
+                b.as_ref()
+                    .and_then(|a| a.session.as_ref().map(Session::prune_offered))
+            })
+            .unwrap_or(false)
+    });
+    if !offered || !ask(h, PRUNE_ASK) {
+        return;
+    }
+    APP.with(|cell| {
+        if let Ok(mut b) = cell.try_borrow_mut()
+            && let Some(a) = b.as_mut()
+            && let Some(s) = a.session.as_ref()
+        {
+            match s.request_prune() {
+                Ok(()) => a.status(PRUNE_DONE),
+                Err(e) => a.error(e),
+            }
+        }
+    });
+}
+
+/// Whether the session waits for a changed key file's own gate.
+fn gate_login() -> bool {
+    APP.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|b| {
+                b.as_ref()
+                    .and_then(|a| a.session.as_ref().map(Session::gate_pending))
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Each flow's status after it is done, filled with its longest values, as
@@ -4573,7 +5113,18 @@ pub fn composed_statuses() -> Vec<String> {
             tr(ADOPT_PASS_OTHER).to_owned(),
         ],
         vec![fill(SUSPENDED_NEAR_SHORT, &[&8, &7])],
+        vec![tr(KEYSYNC_ON_DONE).to_owned()],
+        vec![tr(REUPLOADED).to_owned()],
     ];
+    // The offs, in each wording of their request (spec §7.16 step 6).
+    for request in [
+        vault::OffRequest::Deletes,
+        vault::OffRequest::AfterView,
+        vault::OffRequest::Nothing,
+    ] {
+        out.push(vec![off_line(request)]);
+        out.push(vec![tr(KEYS_OFF_DONE).to_owned(), off_line(request)]);
+    }
     out.iter_mut().map(|l| l.join("\r\n")).collect()
 }
 
@@ -4721,6 +5272,63 @@ mod tests {
         assert_eq!(one.lines[1], format!("{KEYS_ON_DONE_ONE} {PASS_NEW}"));
         let two = keys_on_done(2, false);
         assert!(!two.danger && two.lines == [fill(KEYS_ON_DONE, &[&2])]);
+    }
+
+    /// The Keys screen's key-file sync line (spec §9.1, §7.15, §7.15a):
+    /// [받기…] for a successor and for a fork it joins, never for a
+    /// refused file; [받지 않기…] for a pending gate, also once its
+    /// candidate is no longer the server's top.
+    #[test]
+    fn key_sync_buttons_reach_every_way_out() {
+        let ids = |v: &vault::KeySyncView| -> Vec<i32> {
+            key_sync_text(v).1.iter().map(|(id, _)| *id).collect()
+        };
+        let waiting = |class, pending_gate| {
+            Some(vault::Waiting {
+                epoch: 7,
+                class,
+                pending_gate,
+                supersede: false,
+            })
+        };
+        let on = vault::KeySyncView {
+            on: true,
+            synced: true,
+            ..vault::KeySyncView::default()
+        };
+        let gated = vault::KeyClass::Successor {
+            carry: false,
+            gate: Some(vault::GateKind::G1),
+        };
+        // Two KeySyncOn from one state: the loser's fork is joined here.
+        let fork = vault::KeySyncView {
+            waiting: waiting(vault::KeyClass::KeyFork, false),
+            ..on
+        };
+        assert_eq!(ids(&fork), [KEY_ACCEPT]);
+        assert!(key_sync_text(&fork).0.contains("[받기…]"));
+        assert!(server_takes(Some(vault::KeyClass::KeyFork)));
+        assert!(server_takes(Some(gated)));
+        assert!(!server_takes(Some(vault::KeyClass::Refused("x"))));
+        assert!(!server_takes(Some(vault::KeyClass::Equal)));
+        let refused = vault::KeySyncView {
+            waiting: waiting(vault::KeyClass::Refused("x"), false),
+            ..on
+        };
+        assert_eq!(ids(&refused), [KEYSYNC_OFF]);
+        let pending = vault::KeySyncView {
+            waiting: waiting(gated, true),
+            ..on
+        };
+        assert_eq!(ids(&pending), [KEY_ACCEPT, GATE_DROP]);
+        // The candidate left the top (a GOYOKH01 PC: no off to end it).
+        let gone = vault::KeySyncView {
+            on: false,
+            stale_gate: Some(7),
+            ..on
+        };
+        assert_eq!(ids(&gone), [KEYSYNC_ON, GATE_DROP]);
+        assert!(key_sync_text(&gone).0.contains(&fill(KS_GATE_GONE, &[&7])));
     }
 
     /// The review's times are this PC's local time (spec §5.13), within the

@@ -28,15 +28,15 @@ pub fn init(exe_dir: Option<&Path>) {
 }
 
 macro_rules! messages {
-    ($($name:ident = $ko:literal, $en:literal;)*) => {
+    ($($(#[$cfg:meta])* $name:ident = $ko:literal, $en:literal;)*) => {
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        pub enum Msg { $($name,)* }
+        pub enum Msg { $($(#[$cfg])* $name,)* }
         impl Msg {
             #[cfg(test)]
-            pub const ALL: &[Msg] = &[$(Msg::$name,)*];
+            pub const ALL: &[Msg] = &[$($(#[$cfg])* Msg::$name,)*];
             /// (Korean, English).
             pub fn pair(self) -> (&'static str, &'static str) {
-                match self { $(Msg::$name => ($ko, $en),)* }
+                match self { $($(#[$cfg])* Msg::$name => ($ko, $en),)* }
             }
         }
     };
@@ -172,6 +172,9 @@ messages! {
         "{}: the goyo-sync script on the server does not accept this vault's format. Update it with 'Install or update on server' in the settings window. Changes are kept on this PC and uploaded again every 10 minutes.";
     StateKeyFile = "{}: 서버의 열쇠 파일과 이 금고 사본이 맞지 않아 서버가 받지 않았습니다. 새 열쇠 파일을 받으면 다시 올라갑니다.",
         "{}: the server did not take this vault copy because it does not match the server's key file. It is uploaded again once this PC has the new key file.";
+    #[cfg(feature = "security-key")]
+    StateNoKeys = "{}: 이 PC의 서버 연결이 이 금고의 열쇠 파일 동기화를 받지 않습니다. 서버 관리자가 이 PC의 강제 명령에 serve --key-sync=<금고 ID>를 넣어야 합니다. 변경은 이 PC에 저장되어 있습니다.",
+        "{}: this PC's server connection does not serve key-file sync for this vault. The server admin must add serve --key-sync=<vault ID> to this PC's forced command. Changes are kept on this PC.";
     StderrLine = "  ssh: {}",
         "  ssh: {}";
 }

@@ -4261,6 +4261,8 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
         // The fork options' dialog arrives with the key screens (stage 5).
         #[cfg(feature = "security-key")]
         fork_option: vault::ForkOption::Both,
+        #[cfg(feature = "security-key")]
+        keysync_on: false,
     };
     let written = phase(h, Screen::Adopt, serial, |a| {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
@@ -5630,6 +5632,11 @@ fn shown(path: &Path) -> String {
 /// keeps its Korean source, so a language switch translates it. No line
 /// names an entry: the status line is window text other programs can read.
 fn sync_line(notice: &SyncNotice) -> (Zeroizing<String>, isize) {
+    // The key notices of key-file sync, and KeyFork-SK (spec v3 §7.4).
+    #[cfg(feature = "security-key")]
+    if let Some((text, danger)) = keys_ui::key_sync_line(notice) {
+        return (text, if danger { TONE_DANGER } else { TONE_MUTED });
+    }
     let (text, danger) = match notice {
         SyncNotice::SyncOn => (
             line("동기화를 켰습니다. 서버에 올라가면 위에 '동기화됨'이 표시됩니다."),
@@ -5786,6 +5793,8 @@ fn sync_line(notice: &SyncNotice) -> (Zeroizing<String>, isize) {
             )),
             true,
         ),
+        #[cfg(feature = "security-key")]
+        _ => (Zeroizing::default(), false),
     };
     (text, if danger { TONE_DANGER } else { TONE_MUTED })
 }
@@ -6834,20 +6843,25 @@ mod tests {
     /// The security-key build's own source files with Korean literals: their
     /// English is in EN_SK, which only that build compiles, so only that
     /// build checks it; every build checks that each is listed (spec §9.3).
-    const SCANNED_SK: [&str; 5] = [
+    const SCANNED_SK: [&str; 7] = [
         "fido.rs",
         "keys_ui.rs",
         "vault/gate.rs",
         "vault/keyfile/inbox.rs",
+        "vault/keysync.rs",
         "vault/rotate/hw.rs",
+        // goyo-sync's window draws with this app's i18n.rs.
+        "bin/goyo-sync/keys_gui.rs",
     ];
     #[cfg(feature = "security-key")]
-    const SOURCES_SK: [&str; 5] = [
+    const SOURCES_SK: [&str; 7] = [
         include_str!("fido.rs"),
         include_str!("keys_ui.rs"),
         include_str!("vault/gate.rs"),
         include_str!("vault/keyfile/inbox.rs"),
+        include_str!("vault/keysync.rs"),
         include_str!("vault/rotate/hw.rs"),
+        include_str!("bin/goyo-sync/keys_gui.rs"),
     ];
     /// The texts english_is_complete checks with their English: EN, and in
     /// the security-key build EN_SK too.
@@ -6865,13 +6879,14 @@ mod tests {
         sources.collect()
     }
     /// Files with Korean literals that english_is_complete does not check.
-    const NOT_SCANNED: [&str; 3] = [
+    const NOT_SCANNED: [&str; 4] = [
         // The table itself.
         "i18n.rs",
         // goyo-sync's command-line messages carry their English beside them.
         "bin/goyo-sync/msg.rs",
-        // goyo-sync's tests: a test module as a whole.
+        // goyo-sync's tests: test modules as a whole.
         "bin/goyo-sync/tests.rs",
+        "bin/goyo-sync/e2e.rs",
     ];
     /// Every source file with a Korean literal outside its tests is checked
     /// for its English or exempt for a reason, so a new module cannot slip
@@ -7255,7 +7270,12 @@ mod tests {
         assert_eq!(sync_line(&merged).1, TONE_MUTED);
         // The key notices of spec v3 §7.4 are all in the danger tone, and a
         // copy under a key this PC does not hold may be forged (§14.6-9).
-        for notice in &sync_notices()[sync_notices().len() - 7..] {
+        let all = sync_notices();
+        let at = all
+            .iter()
+            .position(|n| *n == SyncNotice::KeyChanged { hardware: false })
+            .unwrap();
+        for notice in &all[at..at + 7] {
             assert_eq!(sync_line(notice).1, TONE_DANGER, "{notice:?}");
         }
         let changed = sync_line(&SyncNotice::KeyChanged { hardware: false }).0;
@@ -7316,6 +7336,31 @@ mod tests {
             SyncNotice::RollbackHeld,
             SyncNotice::NewerKeyFile,
             SyncNotice::OldKeyReplaced,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyRollback,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyFileRefused("수정 번호가 너무 큼"),
+            #[cfg(feature = "security-key")]
+            SyncNotice::BadKeyIncoming,
+            #[cfg(feature = "security-key")]
+            SyncNotice::GatePending,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeySyncGone,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyFileReady {
+                epoch: (1 << 48) - 1,
+            },
+            #[cfg(feature = "security-key")]
+            SyncNotice::NoKeySync,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyUpRefused,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeySyncHelper,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeySyncDeleted {
+                seq: (1 << 48) - 1,
+                admin: true,
+            },
         ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
@@ -9331,6 +9376,10 @@ mod tests {
                     CONFIRM,
                     PEEK_PASS,
                     PEEK_CONFIRM,
+                    KEYSYNC_ON,
+                    KEYSYNC_OFF,
+                    KEY_REUPLOAD,
+                    GATE_DROP,
                 ],
                 _ => Vec::new(),
             }

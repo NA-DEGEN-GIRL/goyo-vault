@@ -152,6 +152,14 @@ fn keyed(id: &[u8; 16], fill: u8) -> Vec<u8> {
 struct Mock {
     replies: VecDeque<Result<Output, Failure>>,
     calls: Vec<Call>,
+    /// In the security-key build, unless this is set, a GETKEY is answered
+    /// EMPTY (a server that holds no key file for the vault) without a
+    /// scripted reply and counted in `fetched`, not logged in `calls`: the
+    /// vault channel's tests see the calls they script.
+    #[cfg(feature = "security-key")]
+    keys: bool,
+    #[cfg(feature = "security-key")]
+    fetched: usize,
 }
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Call {
@@ -164,7 +172,7 @@ impl Mock {
     fn with(replies: impl IntoIterator<Item = Result<Output, Failure>>) -> Self {
         Self {
             replies: replies.into_iter().collect(),
-            calls: Vec::new(),
+            ..Self::default()
         }
     }
     fn ops(&self) -> Vec<(Op, u64)> {
@@ -174,6 +182,11 @@ impl Mock {
 impl Transport for Mock {
     fn exchange(&mut self, request: &[u8], _beat: &mut dyn FnMut()) -> Result<Output, Failure> {
         let r = Request::decode(request).expect("the server would refuse this frame");
+        #[cfg(feature = "security-key")]
+        if !self.keys && r.op == Op::GetKey {
+            self.fetched += 1;
+            return reply(Status::Empty, 0, b"");
+        }
         self.calls.push(Call {
             op: r.op,
             version: r.version,
@@ -1374,7 +1387,9 @@ fn an_old_server_script_holds_goyova04_uploads() {
 /// KEY_BEHIND (status 14) answers an upload whose header does not match the
 /// server's key file: `keyfile`, nothing persisted, the file sent again
 /// after ten minutes, and a new file from the app at once (spec §7.6,
-/// §14.6-15).
+/// §14.6-15). The security-key build waits for the key view instead
+/// (`key_behind_waits_for_the_key_view`).
+#[cfg(not(feature = "security-key"))]
 #[test]
 fn key_behind_holds_the_upload_for_a_new_key_file() {
     let pc = Pc::with_folder();
@@ -1585,7 +1600,12 @@ struct Slow {
 }
 impl Transport for Slow {
     fn exchange(&mut self, request: &[u8], beat: &mut dyn FnMut()) -> Result<Output, Failure> {
-        Request::decode(request).expect("the server would refuse this frame");
+        let _r = Request::decode(request).expect("the server would refuse this frame");
+        // The security-key build fetches the key view first: at once, empty.
+        #[cfg(feature = "security-key")]
+        if _r.op == Op::GetKey {
+            return reply(Status::Empty, 0, b"");
+        }
         let (secs, reply) = self.calls.pop_front().expect("no reply was scripted");
         let mut held = None;
         for _ in 0..secs {
@@ -2568,4 +2588,1521 @@ fn small_helpers() {
     );
     // A kill-on-close job can be made.
     assert!(sys::Job::new().is_some());
+}
+
+// ---- key-file sync in the helper (security-key build; spec v3 §7.12, §14.7-7) ----
+
+#[cfg(feature = "security-key")]
+pub(crate) mod keys {
+    use super::*;
+    use crate::engine::{BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, VIEW_STUCK, key_gate};
+    use goyo_vault::{
+        syncfile::{
+            KEY_REQUEST, KEY_VIEW, KeyOp, KeyOutcome, KeyRequest, KeyView, PRUNE_REQUEST,
+            RecordKind, parse_key_view, render_key_request, render_key_view, render_prune_request,
+            render_record_header,
+        },
+        vault::keyfile::{EPOCH_MAX, EPOCH_WINDOW, is_sync_key_file, ks_id_zero},
+    };
+
+    /// The GOYOKS01 fixture: vault 3a3b…49, epoch 9 (tests/fixtures).
+    const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+    fn id() -> [u8; 16] {
+        KS[8..24].try_into().unwrap()
+    }
+    /// The fixture at another epoch, still well formed (no slot was added
+    /// at an epoch above 9).
+    fn ks(epoch: u64) -> Vec<u8> {
+        let mut f = KS.to_vec();
+        f[24..32].copy_from_slice(&epoch.to_le_bytes());
+        f
+    }
+    /// Another file at `epoch`: one body byte differs, which no public
+    /// check can see.
+    fn other(epoch: u64, n: u8) -> Vec<u8> {
+        let mut f = ks(epoch);
+        *f.last_mut().unwrap() ^= n;
+        f
+    }
+    fn epoch_of(file: &[u8]) -> u64 {
+        u64::from_le_bytes(file[24..32].try_into().unwrap())
+    }
+    fn header(generation: u64, file: &[u8]) -> Vec<u8> {
+        render_record_header(RecordKind::Key, false, generation, epoch_of(file)).to_vec()
+    }
+    fn key_record(generation: u64, file: &[u8]) -> Vec<u8> {
+        [header(generation, file), file.to_vec()].concat()
+    }
+    fn cut(number: u64, floor: u64) -> Vec<u8> {
+        render_record_header(RecordKind::Cut, false, number, floor).to_vec()
+    }
+    /// A mock on which every call, the key ops included, is scripted.
+    fn mock(replies: impl IntoIterator<Item = Result<Output, Failure>>) -> Mock {
+        Mock {
+            keys: true,
+            ..Mock::with(replies)
+        }
+    }
+    fn timeout() -> Result<Output, Failure> {
+        Ok(Output {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            log: Vec::new(),
+            code: None,
+            killed: Some(Killed::Timeout),
+        })
+    }
+    /// A GOYOVA04 header the server's floor takes under `file`: its epoch,
+    /// current key ID and state tag (spec v3 §7.13), flags 3 (key-file
+    /// sync).
+    fn floor_vault(file: &[u8], fill: u8) -> Vec<u8> {
+        let syntax = is_sync_key_file(file, &id()).unwrap();
+        let mut v = keyed(&id(), fill);
+        v[24..40].copy_from_slice(&syntax.current_key_id);
+        v[40..48].copy_from_slice(&syntax.epoch.to_le_bytes());
+        v[48..64].copy_from_slice(&syntax.tag);
+        v[64..68].copy_from_slice(&[3, 0, 0, 0]);
+        v
+    }
+    impl Pc {
+        /// What the app writes as `kreq`; returns its SHA-256.
+        fn request(&self, r: &KeyRequest) -> [u8; 32] {
+            let bytes = render_key_request(r);
+            replace_file(&self.dir.join(KEY_REQUEST), &bytes).unwrap();
+            sha256(&bytes)
+        }
+        /// `kview`, if present and well formed.
+        fn view(&self) -> Option<KeyView> {
+            parse_key_view(&fs::read(self.dir.join(KEY_VIEW)).ok()?, &id())
+        }
+        fn set_view(&self, v: &KeyView) {
+            replace_file(&self.dir.join(KEY_VIEW), &render_key_view(v)).unwrap();
+        }
+    }
+    /// An engine that polls hourly: within one test the 10-minute rules
+    /// run without polls in between.
+    fn quiet<T: Transport>(pc: &Pc, transport: T, clock: &TestClock) -> Engine<T> {
+        let log = Log::new(Some(pc.t.0.join(LOG)));
+        Engine::new(
+            transport,
+            std::slice::from_ref(&pc.vault),
+            3600,
+            clock.boxed(),
+            log,
+        )
+    }
+    fn put_keys(e: &Engine<Mock>) -> Vec<&Call> {
+        e.transport
+            .calls
+            .iter()
+            .filter(|c| c.op == Op::PutKey)
+            .collect()
+    }
+    /// A pinned vault whose server head is version 4.
+    fn pinned() -> Pc {
+        let pc = Pc::with_folder();
+        seed_incoming(&pc, id(), 4, &keyed(&id(), 3));
+        pc
+    }
+
+    /// Gate 2 (spec v3 §7.12, §14.7-7): only a `GOYOSKO2` request of this
+    /// vault's GOYOKS01 file at an epoch above `floor`, or a bare CUT, in a
+    /// plain single-link file. The vault gate refuses a key request.
+    #[test]
+    fn gate_2_takes_only_this_vaults_key_requests() {
+        let pc = Pc::with_folder();
+        let path = pc.dir.join(KEY_REQUEST);
+        let id = id();
+        let check = |bytes: &[u8]| {
+            fs::write(&path, bytes).unwrap();
+            key_gate(&path, &id)
+        };
+        let file = ks(12);
+        let put = render_key_request(&KeyRequest::put(3, 9, &file));
+        let got = check(&put);
+        assert!(matches!(&got, KeyGate::Ok(g)
+            if (g.op, g.base, g.epoch, g.sha) == (KeyOp::Put, 3, 12, sha256(&put))));
+        let cut_request = render_key_request(&KeyRequest::cut(4));
+        assert!(matches!(check(&cut_request), KeyGate::Ok(g) if (g.op, g.base) == (KeyOp::Cut, 4)));
+        // No bound above floor (S6-2 #1): an honest drifted upload passes.
+        let far = render_key_request(&KeyRequest::put(1, 9, &ks(EPOCH_MAX)));
+        assert!(matches!(check(&far), KeyGate::Ok(_)));
+        let as_payload = |magic: &[u8; 8]| {
+            let mut f = file.clone();
+            f[..8].copy_from_slice(magic);
+            render_key_request(&KeyRequest::put(0, 0, &f))
+        };
+        let with = |bytes: &[u8], at: usize, value: u8| {
+            let mut b = bytes.to_vec();
+            b[at] = value;
+            b
+        };
+        let mut zero_ks = file.clone();
+        zero_ks[48..64].copy_from_slice(&ks_id_zero(&id));
+        let mut another = file.clone();
+        another[8] ^= 1;
+        let cases: Vec<(Vec<u8>, Refusal)> = vec![
+            (as_payload(b"GOYOKE01"), Refusal::KeyFormat),
+            (as_payload(b"GOYOKE02"), Refusal::KeyFormat),
+            (as_payload(b"GOYOKE03"), Refusal::KeyFormat),
+            (as_payload(b"GOYOKH01"), Refusal::KeyFormat),
+            (as_payload(b"GOYOVA02"), Refusal::KeyFormat),
+            (as_payload(b"GOYOVA04"), Refusal::KeyFormat),
+            (
+                render_key_request(&KeyRequest::put(0, 0, &another)),
+                Refusal::Id,
+            ),
+            (with(&put, 7, b'1'), Refusal::KeyFormat), // GOYOSKO1
+            (with(&put, 3, b'S'), Refusal::KeyFormat), // GOYSSKO2
+            (with(&put, 8, 3), Refusal::KeyFormat),    // unknown op
+            (with(&put, 12, 1), Refusal::KeyFormat),   // reserved
+            (with(&cut_request, 8, 1), Refusal::KeyFormat), // a PUT of 32 bytes
+            (with(&put, 8, 2), Refusal::KeyFormat),    // a CUT with a payload
+            ([&cut_request[..], &[0]].concat(), Refusal::Size),
+            (put[..32 + 488].to_vec(), Refusal::Size),
+            (Vec::new(), Refusal::Size),
+            (
+                render_key_request(&KeyRequest::cut(EPOCH_MAX + 1)),
+                Refusal::KeyFormat,
+            ),
+            (
+                render_key_request(&KeyRequest::put(EPOCH_MAX + 1, 0, &file)),
+                Refusal::KeyFormat,
+            ),
+            (
+                render_key_request(&KeyRequest::put(0, EPOCH_MAX + 1, &file)),
+                Refusal::KeyFormat,
+            ),
+            (
+                render_key_request(&KeyRequest::put(0, 12, &file)),
+                Refusal::KeyFormat,
+            ),
+            (
+                render_key_request(&KeyRequest::put(0, 0, &ks(EPOCH_MAX + 1))),
+                Refusal::KeyFormat,
+            ),
+            (
+                render_key_request(&KeyRequest::put(0, 0, &zero_ks)),
+                Refusal::KeyFormat,
+            ),
+        ];
+        for (i, (bytes, want)) in cases.iter().enumerate() {
+            let got = check(bytes);
+            assert!(matches!(got, KeyGate::Refused(r) if r == *want), "case {i}");
+        }
+        // Every structural rule of the key file is the strict parse's own
+        // (the mask, pair-record and via rules of §4.6): the gate refuses a
+        // header byte changed exactly when `is_sync_key_file` does.
+        let mut refused = 0;
+        for at in 24..300 {
+            let mut f = file.clone();
+            f[at] ^= 0x41;
+            let valid = is_sync_key_file(&f, &id).is_some();
+            let got = check(&render_key_request(&KeyRequest::put(0, 0, &f)));
+            assert_eq!(matches!(got, KeyGate::Ok(_)), valid, "byte {at}");
+            refused += usize::from(!valid);
+        }
+        assert!(refused > 30, "only {refused} changes refused");
+        // The file checks: a hard link, a junction, a folder, nothing.
+        fs::write(&path, &put).unwrap();
+        fs::hard_link(&path, pc.t.0.join("elsewhere")).unwrap();
+        assert!(matches!(
+            key_gate(&path, &id),
+            KeyGate::Refused(Refusal::HardLink)
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(key_gate(&path, &id), KeyGate::Missing));
+        junction(&path, &pc.t.0);
+        assert!(matches!(
+            key_gate(&path, &id),
+            KeyGate::Refused(Refusal::Link)
+        ));
+        fs::remove_dir(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            key_gate(&path, &id),
+            KeyGate::Refused(Refusal::NotFile)
+        ));
+        fs::remove_dir(&path).unwrap();
+        // The vault gate never takes a key request, wrapped or not.
+        let outgoing = pc.dir.join(OUTGOING);
+        let wrapped_vault = render_key_request(&KeyRequest::put(0, 0, &keyed(&id, 3)));
+        for bytes in [&put, &cut_request, &wrapped_vault] {
+            fs::write(&outgoing, bytes).unwrap();
+            assert!(matches!(gate(&outgoing, Some(&id)), Gate::Refused(..)));
+        }
+    }
+
+    /// KR comes before P4, and KG between them (spec v3 §7.12, §14.7-7
+    /// "pass order without holds"): a request with no answer holds back
+    /// only its own pass's P4 and P5; a vault at the new state that lands
+    /// first gets KEY_BEHIND, and the request's answer releases it into
+    /// the same pass.
+    #[test]
+    fn kr_and_kg_run_before_the_vault_steps() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let file = ks(10);
+        let sha = pc.request(&KeyRequest::put(0, 0, &file));
+        pc.outgoing(4, &keyed(&id(), 3));
+        // KR fails: KG waits for KR's answer, and P4 and P5 for KG.
+        let mut e = pc.engine(mock([reply(Status::ServerError, 0, b"")]), &clock);
+        assert_eq!(e.pass(0, false), done(SyncState::Server, 4, None, None));
+        assert_eq!(e.transport.ops(), [(Op::PutKey, 0)]);
+        assert_eq!(e.transport.calls[0].blob, file);
+        assert!(pc.view().is_none());
+        // In the backoff the app writes another vault upload: sent once,
+        // after KG, while the request waits; the server's floor refuses it.
+        clock.advance(5);
+        let v = keyed(&id(), 7);
+        pc.outgoing(4, &v);
+        assert!(e.due(0));
+        e.transport.replies.extend([
+            reply(Status::Empty, 0, b""),
+            reply(Status::KeyBehind, 0, b""),
+        ]);
+        assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 4, None, None));
+        // The request's answer releases the held upload into this pass.
+        clock.advance(1);
+        assert!(e.due(0));
+        e.transport.replies.extend([
+            reply(Status::Ok, 1, &header(0, &file)),
+            reply(Status::NotModified, 1, b""),
+            reply(Status::Ok, 5, b""),
+        ]);
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 5, Some(5), None));
+        assert_eq!(
+            e.transport.ops(),
+            [
+                (Op::PutKey, 0),
+                (Op::GetKey, 0),
+                (Op::Put, 4),
+                (Op::PutKey, 0),
+                (Op::GetKey, 1),
+                (Op::Put, 4),
+            ]
+        );
+        assert_eq!(e.transport.calls[4].sha, sha256(&key_record(0, &file)));
+        assert_eq!(e.transport.calls[5].blob, v);
+        let view = pc.view().unwrap();
+        assert_eq!((view.seq, view.line), (1, 0));
+        assert_eq!(
+            (view.answered, view.outcome),
+            (Some(sha), KeyOutcome::Applied)
+        );
+        assert_eq!(view.record, key_record(0, &file));
+        assert!(
+            pc.log()
+                .contains("the upload refused as KEY_BEHIND goes again")
+        );
+        // The status says this helper does key-file sync.
+        assert!(pc.status().keys);
+        // Answered: nothing more is due until the heartbeat.
+        assert!(!e.due(0));
+    }
+
+    /// KR sends like `push` (S6-1 #13 and #21; §14.7-7): after no reply, a
+    /// timeout or SERVER_ERROR the same request goes again once the backoff
+    /// has passed; LIMIT holds it for RETRY_HELD in memory; an answer with
+    /// outcome 3 goes again every 10 minutes and at the next helper start,
+    /// never more often, and lands once the server takes it.
+    #[test]
+    fn kr_retries_like_push() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let file = ks(10);
+        let sha = pc.request(&KeyRequest::put(0, 0, &file));
+        let mut e = quiet(&pc, mock([Err(Failure::Start)]), &clock);
+        assert_eq!(e.pass(0, false), done(SyncState::Server, 4, None, None));
+        for (wait, failure, state) in [
+            (30, timeout(), SyncState::Offline),
+            (60, reply(Status::ServerError, 0, b""), SyncState::Server),
+        ] {
+            clock.advance(wait - 1);
+            e.pass(0, false); // in the backoff: no call (none is scripted)
+            clock.advance(1);
+            assert!(e.due(0));
+            e.transport.replies.push_back(failure);
+            assert_eq!(e.pass(0, false), done(state, 4, None, None));
+        }
+        // LIMIT: held for RETRY_HELD, in memory only.
+        clock.advance(120);
+        e.transport.replies.push_back(reply(Status::Limit, 0, b""));
+        e.pass(0, false);
+        assert!(
+            pc.log()
+                .contains(&format!("key request held; retry in {RETRY_HELD} s"))
+        );
+        // The next pass fetches the view and polls; the request waits.
+        e.transport.replies.extend([
+            reply(Status::Empty, 0, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        e.pass(0, false);
+        clock.advance(RETRY_HELD - 1);
+        e.pass(0, false);
+        clock.advance(1);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::Ok, 1, &header(0, &file)));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
+        let sends = put_keys(&e);
+        assert_eq!(sends.len(), 5);
+        assert!(sends.iter().all(|c| c.version == 0 && c.blob == file));
+        let view = pc.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (1, Some(sha), KeyOutcome::Applied)
+        );
+        // A refused key file (outcome 3, S-KEYUP-REFUSED): `refused`, sent
+        // again every 10 minutes only, and at the next start.
+        let next = ks(11);
+        let sha = pc.request(&KeyRequest::put(1, 10, &next));
+        clock.advance(1);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::BadBlob, 0, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::Refused, 4, None, None));
+        let view = pc.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (1, Some(sha), KeyOutcome::Refused)
+        );
+        assert!(!e.due(0));
+        clock.advance(KEY_RETRY - 1);
+        assert_eq!(e.pass(0, false), done(SyncState::Refused, 4, None, None));
+        clock.advance(1);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::TooLarge, 0, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::Refused, 4, None, None));
+        assert_eq!(put_keys(&e).len(), 7);
+        // The server script was updated and the helper starts again: sent
+        // at once, and taken.
+        let replies = [
+            reply(Status::Ok, 2, &header(0, &next)),
+            reply(Status::NotModified, 2, b""),
+            reply(Status::NotModified, 4, b""),
+        ];
+        let mut e = quiet(&pc, mock(replies), &clock);
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
+        assert_eq!(
+            e.transport.ops(),
+            [(Op::PutKey, 1), (Op::GetKey, 2), (Op::Get, 4)]
+        );
+        let view = pc.view().unwrap();
+        assert_eq!((view.seq, view.outcome), (2, KeyOutcome::Applied));
+    }
+
+    /// `Engine::due` (S6-1 #22, S6R1 #25): an answered request left in place
+    /// while the app is closed makes no pass and opens nothing, tick after
+    /// tick; an unanswered one is due only after its backoff; a changed
+    /// stamp of `kreq` or `kview` is decided by the next pass.
+    #[test]
+    fn due_lists_the_key_files_and_opens_neither() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let file = ks(10);
+        pc.request(&KeyRequest::put(0, 0, &file));
+        let replies = [
+            reply(Status::Ok, 1, &header(0, &file)),
+            reply(Status::NotModified, 1, b""),
+            reply(Status::NotModified, 4, b""),
+        ];
+        let mut e = quiet(&pc, mock(replies), &clock);
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
+        let opens = KEY_OPENS.with(|n| n.get());
+        for _ in 0..100 {
+            assert!(!e.due(0));
+        }
+        // Two-second ticks until the heartbeat is due: nothing.
+        for _ in 0..(HEARTBEAT / 2 - 1) {
+            clock.advance(2);
+            assert!(!e.due(0));
+        }
+        assert_eq!(
+            KEY_OPENS.with(|n| n.get()),
+            opens,
+            "due() opened kreq or kview"
+        );
+        // A new request is due at once; after a failed send, not before the
+        // backoff has passed.
+        pc.request(&KeyRequest::put(1, 10, &ks(11)));
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::ServerError, 0, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::Server, 4, None, None));
+        let opens = KEY_OPENS.with(|n| n.get());
+        for _ in 0..14 {
+            clock.advance(2);
+            assert!(!e.due(0));
+        }
+        assert_eq!(KEY_OPENS.with(|n| n.get()), opens);
+        clock.advance(2);
+        assert!(e.due(0));
+        // A view changed behind the helper is looked at by the next pass,
+        // also in the backoff.
+        clock.back(2);
+        let mut v = pc.view().unwrap();
+        v.line = 1;
+        pc.set_view(&v);
+        assert!(e.due(0));
+    }
+
+    /// No key bytes after an off (S6-1 #30, S6-3 #19; rules (a)-(c) of
+    /// §7.12): KG waits while this PC's CUT is unanswered; a fetched key
+    /// record queued before the CUT is never written while the CUT waits
+    /// (b); a later write drops a queued view (a); and a view queued for
+    /// content that another engine has since replaced is dropped (c).
+    #[test]
+    fn no_key_record_comes_back_while_an_off_waits() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let record = key_record(0, &ks(10));
+        // (b) A fetch of the server's key record queued: the app holds
+        // kview open.
+        pc.set_view(&KeyView::default());
+        let reader = fs::File::open(pc.dir.join(KEY_VIEW)).unwrap();
+        let mut e = quiet(&pc, mock([reply(Status::Ok, 1, &record)]), &clock);
+        e.pass(0, false);
+        assert_eq!(
+            e.transport.ops(),
+            [(Op::GetKey, 0)],
+            "P5 waits for the view"
+        );
+        assert!(
+            pc.log()
+                .contains("kview not written (Busy); the answer stays queued")
+        );
+        // The app turns key-file sync off: its CUT, then it lets go of
+        // kview. The CUT fails once: still no key record, and no KG.
+        let sha = pc.request(&KeyRequest::cut(1));
+        drop(reader);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::ServerError, 0, b""));
+        e.pass(0, false);
+        assert!(pc.log().contains("kept a fetched key record out of kview"));
+        assert_eq!(pc.view(), Some(KeyView::default()));
+        clock.advance(30);
+        e.transport.replies.extend([
+            reply(Status::Ok, 2, &cut(2, 10)),
+            reply(Status::NotModified, 2, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        assert!(e.due(0));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
+        assert_eq!(
+            e.transport.ops(),
+            [
+                (Op::GetKey, 0),
+                (Op::CutKey, 1),
+                (Op::CutKey, 1),
+                (Op::GetKey, 2),
+                (Op::Get, 4)
+            ]
+        );
+        let view = pc.view().unwrap();
+        assert_eq!((view.seq, view.record.clone()), (2, cut(2, 10)));
+        assert_eq!(
+            (view.answered, view.outcome),
+            (Some(sha), KeyOutcome::Applied)
+        );
+
+        // (a) A queued fetch, then this engine's answer to a PUT: the
+        // fetch is never written.
+        let pc = pinned();
+        pc.set_view(&KeyView::default());
+        let reader = fs::File::open(pc.dir.join(KEY_VIEW)).unwrap();
+        let mut e = quiet(&pc, mock([reply(Status::Ok, 1, &record)]), &clock);
+        e.pass(0, false);
+        let mine = ks(11);
+        let sha = pc.request(&KeyRequest::put(1, 10, &mine));
+        let theirs = key_record(0, &other(11, 1));
+        e.transport.replies.extend([
+            reply(Status::Conflict, 2, &theirs),
+            reply(Status::NotModified, 2, b""),
+        ]);
+        e.pass(0, false);
+        assert_eq!(
+            e.transport.ops(),
+            [(Op::GetKey, 0), (Op::PutKey, 1), (Op::GetKey, 2)]
+        );
+        drop(reader);
+        assert!(e.due(0));
+        e.transport.replies.extend([
+            reply(Status::NotModified, 2, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        e.pass(0, false);
+        let view = pc.view().unwrap();
+        assert_eq!((view.seq, view.record.clone()), (2, theirs.clone()));
+        assert_eq!(
+            (view.answered, view.outcome),
+            (Some(sha), KeyOutcome::Conflict)
+        );
+
+        // (c) Two engines on one folder: one queues an older view, the
+        // other writes a newer one; the first drops its own.
+        let pc = pinned();
+        pc.set_view(&KeyView::default());
+        let reader = fs::File::open(pc.dir.join(KEY_VIEW)).unwrap();
+        let mut daemon = quiet(&pc, mock([reply(Status::Ok, 1, &record)]), &clock);
+        daemon.pass(0, false);
+        drop(reader);
+        let newer = key_record(0, &ks(12));
+        let mut now = quiet(
+            &pc,
+            mock([
+                reply(Status::Ok, 3, &newer),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        now.pass(0, true);
+        assert_eq!(pc.view().unwrap().seq, 3);
+        clock.advance(1);
+        assert!(daemon.due(0));
+        daemon.transport.replies.extend([
+            reply(Status::NotModified, 3, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        daemon.pass(0, false);
+        assert_eq!(daemon.transport.calls[1].sha, sha256(&newer));
+        assert_eq!(pc.view().unwrap().record, newer);
+        assert!(
+            pc.log()
+                .contains("dropped a queued key view: kview changed since it was made")
+        );
+        // A second engine finds the first one's answer and sends nothing:
+        // the request is answered.
+        let file = ks(13);
+        let sha = pc.request(&KeyRequest::put(3, 12, &file));
+        let mut first = quiet(
+            &pc,
+            mock([
+                reply(Status::Ok, 4, &header(0, &file)),
+                reply(Status::NotModified, 4, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        first.pass(0, false);
+        assert_eq!(pc.view().unwrap().answered, Some(sha));
+        let mut second = quiet(
+            &pc,
+            mock([
+                reply(Status::NotModified, 4, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        second.pass(0, false);
+        assert_eq!(second.transport.ops(), [(Op::GetKey, 4), (Op::Get, 4)]);
+        // While one engine holds the folder's lock the other skips.
+        let lock = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(pc.dir.join(HELPER_LOCK))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert_eq!(second.pass(0, true), Outcome::Locked);
+    }
+
+    /// `kview` is what GETKEY sends as "have" (round 3, finding 19): read
+    /// at every pass, so a deleted or damaged one is fetched again whole;
+    /// and a server that went back (round 4, finding 4) is written like any
+    /// other answer and logged.
+    #[test]
+    fn kview_is_what_getkey_sends_as_have() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let (r5, r2) = (key_record(0, &ks(12)), key_record(0, &ks(10)));
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::Ok, 5, &r5),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, false);
+        let poll = |e: &mut Engine<Mock>, get: Result<Output, Failure>| {
+            clock.advance(3600);
+            e.transport
+                .replies
+                .extend([get, reply(Status::NotModified, 4, b"")]);
+            e.pass(0, false);
+            let call = &e.transport.calls[e.transport.calls.len() - 2];
+            (call.version, call.sha)
+        };
+        assert_eq!(
+            poll(&mut e, reply(Status::NotModified, 5, b"")),
+            (5, sha256(&r5))
+        );
+        // Deleted behind the helper, then damaged: asked with nothing held.
+        fs::remove_file(pc.dir.join(KEY_VIEW)).unwrap();
+        assert_eq!(poll(&mut e, reply(Status::Ok, 5, &r5)), (0, [0; 32]));
+        assert_eq!(pc.view().unwrap().record, r5);
+        let mut damaged = render_key_view(&pc.view().unwrap());
+        damaged[60] ^= 1;
+        fs::write(pc.dir.join(KEY_VIEW), &damaged).unwrap();
+        assert_eq!(poll(&mut e, reply(Status::Ok, 5, &r5)), (0, [0; 32]));
+        assert_eq!(pc.view().unwrap().record, r5);
+        // A restored server: a lower number replaces the view, logged.
+        assert_eq!(poll(&mut e, reply(Status::Ok, 2, &r2)), (5, sha256(&r5)));
+        assert_eq!(pc.view().unwrap().seq, 2);
+        assert!(pc.log().contains("server key record went back 5->2"));
+        // EMPTY: no record.
+        poll(&mut e, reply(Status::Empty, 0, b""));
+        assert_eq!(pc.view(), Some(KeyView::default()));
+        // A malformed answer is a protocol error: the view stays.
+        let bad = key_record(1, &ks(12)); // generation 1 is not below 1
+        clock.advance(3600);
+        e.transport.replies.push_back(reply(Status::Ok, 1, &bad));
+        assert_eq!(e.pass(0, false), done(SyncState::Server, 4, None, None));
+        assert_eq!(pc.view(), Some(KeyView::default()));
+        assert!(pc.log().contains("frame=not a key record of this vault"));
+    }
+
+    /// The answers KR writes (spec v3 §7.12): a PUTKEY CONFLICT on a cut,
+    /// and EMPTY, are recorded with outcome 2 and hold nothing; a planted
+    /// `kview` whose `answered` names the request keeps it unsent; a
+    /// planted CUT is sent (R33); a request gate 2 refuses shows `refused`
+    /// with no pass storm, and the app's rewrite releases it (S6-2 #22).
+    #[test]
+    fn answers_and_planted_files() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let file = ks(11);
+        let sha = pc.request(&KeyRequest::put(3, 9, &file));
+        pc.outgoing(4, &keyed(&id(), 3));
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::Conflict, 4, &cut(4, 9)),
+                reply(Status::NotModified, 4, b""),
+                reply(Status::Ok, 5, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 5, Some(5), None));
+        let view = pc.view().unwrap();
+        assert_eq!((view.seq, view.record.clone()), (4, cut(4, 9)));
+        assert_eq!(
+            (view.answered, view.outcome),
+            (Some(sha), KeyOutcome::Conflict)
+        );
+        let sha = pc.request(&KeyRequest::put(9, 9, &file));
+        clock.advance(1);
+        e.transport.replies.push_back(reply(Status::Empty, 0, b""));
+        e.pass(0, false);
+        let view = pc.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (0, Some(sha), KeyOutcome::Conflict)
+        );
+        // A planted view that says the next request was answered.
+        let sha = pc.request(&KeyRequest::put(0, 0, &file));
+        pc.set_view(&KeyView {
+            answered: Some(sha),
+            outcome: KeyOutcome::Applied,
+            ..KeyView::default()
+        });
+        clock.advance(1);
+        assert!(e.due(0));
+        e.pass(0, false);
+        assert!(!e.due(0));
+        assert_eq!(put_keys(&e).len(), 2, "a planted answer keeps it unsent");
+        // A planted CUT is sent as it is.
+        pc.request(&KeyRequest::cut(EPOCH_MAX));
+        clock.advance(1);
+        e.transport
+            .replies
+            .push_back(reply(Status::Ok, 1, &cut(1, 0)));
+        e.pass(0, false);
+        assert_eq!(e.transport.ops().last(), Some(&(Op::CutKey, EPOCH_MAX)));
+        // A zero-length request and a junction: refused, logged once, and
+        // no pass storm.
+        let makes: [&dyn Fn(&Path); 2] = [&|p: &Path| fs::write(p, b"").unwrap(), &|p: &Path| {
+            junction(p, &pc.t.0)
+        }];
+        for make in makes {
+            let path = pc.dir.join(KEY_REQUEST);
+            let _ = fs::remove_file(&path);
+            make(&path);
+            clock.advance(1);
+            assert!(e.due(0));
+            assert_eq!(e.pass(0, false), done(SyncState::Refused, 5, None, None));
+            for _ in 0..20 {
+                clock.advance(2);
+                assert!(!e.due(0), "a refused request makes passes");
+            }
+            let _ = fs::remove_dir(&path);
+        }
+        assert_eq!(
+            pc.log()
+                .matches("refused key request before sending")
+                .count(),
+            2
+        );
+        // The app's rewrite releases it.
+        let file = ks(12);
+        pc.request(&KeyRequest::put(1, 0, &file));
+        clock.advance(1);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::Ok, 2, &header(1, &file)));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 5, None, None));
+        // A PUTKEY OK whose record header names another epoch than the file
+        // sent breaks the answer rules: a protocol error, and the view
+        // keeps its last answer.
+        let before = pc.view();
+        pc.request(&KeyRequest::put(2, 12, &ks(13)));
+        clock.advance(1);
+        e.transport
+            .replies
+            .push_back(reply(Status::Ok, 3, &header(0, &ks(14))));
+        assert_eq!(e.pass(0, false), done(SyncState::Server, 5, None, None));
+        assert!(
+            pc.log()
+                .contains("PUTKEY OK names another epoch than the key file sent")
+        );
+        assert_eq!(pc.view(), before);
+    }
+
+    /// KEY_BEHIND in the security-key build (spec v3 §7.12, S6R2 #9): with
+    /// the key view present and `line` 0 the upload goes again only when
+    /// the view changes, or at helper start, never on a timer; with no
+    /// view or `line` 1, hourly; a hardware vault on a line without key
+    /// ops shows `nokeys`.
+    #[test]
+    fn key_behind_waits_for_the_key_view() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let v = keyed(&id(), 3);
+        pc.outgoing(4, &v);
+        let mut e = pc.engine(
+            mock([
+                reply(Status::Empty, 0, b""),
+                reply(Status::KeyBehind, 0, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 4, None, None));
+        assert!(
+            pc.log()
+                .contains("upload held until the server's key record changes")
+        );
+        // Polls go on; the view does not change; no PUT, not even after
+        // RETRY_HELD.
+        for _ in 0..12 {
+            clock.advance(60);
+            e.transport.replies.extend([
+                reply(Status::Empty, 0, b""),
+                reply(Status::NotModified, 4, b""),
+            ]);
+            assert!(e.due(0));
+            assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 4, None, None));
+        }
+        assert_eq!(
+            e.transport.calls.iter().filter(|c| c.op == Op::Put).count(),
+            1
+        );
+        // The server's key record changes: KG writes it and the held upload
+        // goes in the same pass.
+        clock.advance(60);
+        let file = ks(10);
+        e.transport.replies.extend([
+            reply(Status::Ok, 1, &key_record(0, &file)),
+            reply(Status::Ok, 5, b""),
+        ]);
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 5, Some(5), None));
+        assert_eq!(
+            e.transport.ops()[e.transport.calls.len() - 2..],
+            [(Op::GetKey, 0), (Op::Put, 4)]
+        );
+        // At helper start a held upload goes at once.
+        let v2 = keyed(&id(), 5);
+        pc.outgoing(5, &v2);
+        clock.advance(1);
+        e.transport.replies.extend([
+            reply(Status::NotModified, 1, b""),
+            reply(Status::KeyBehind, 0, b""),
+        ]);
+        assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 5, None, None));
+        let mut e = pc.engine(
+            mock([
+                reply(Status::NotModified, 1, b""),
+                reply(Status::Ok, 6, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 6, Some(6), None));
+        // A line without key ops: a hardware vault's KEY_BEHIND is
+        // `nokeys`, and goes again hourly.
+        pc.set_view(&KeyView {
+            line: 1,
+            ..pc.view().unwrap()
+        });
+        let v3 = keyed(&id(), 1);
+        pc.outgoing(6, &v3);
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::BadRequest, 0, b""),
+                reply(Status::KeyBehind, 0, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 6, None, None));
+        assert!(
+            pc.log()
+                .contains(&format!("upload held; retry in {BEHIND_HOURLY} s"))
+        );
+        clock.advance(BEHIND_HOURLY - 1);
+        e.transport.replies.extend([
+            reply(Status::BadRequest, 0, b""),
+            reply(Status::NotModified, 6, b""),
+        ]);
+        assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 6, None, None));
+        assert_eq!(
+            e.transport.ops(),
+            [(Op::GetKey, 1), (Op::Put, 6), (Op::GetKey, 1), (Op::Get, 6)]
+        );
+        clock.advance(1);
+        e.transport
+            .replies
+            .push_back(reply(Status::KeyBehind, 0, b""));
+        assert!(e.due(0));
+        e.pass(0, false);
+        assert_eq!(
+            e.transport.calls.iter().filter(|c| c.op == Op::Put).count(),
+            2
+        );
+    }
+
+    /// A line without key ops (S6-1 #18 and #20; §14.7-7): KR's answer has
+    /// outcome 4 and `line` 1; `nokeys` for a vault that uses key-file
+    /// sync; KR and KG go again only at start and every 10 minutes, and
+    /// P3-P5 keep running without a backoff.
+    #[test]
+    fn a_line_without_key_ops_shows_nokeys() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let file = ks(10);
+        let sha = pc.request(&KeyRequest::put(0, 0, &file));
+        let mut e = pc.engine(
+            mock([
+                reply(Status::BadRequest, 0, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 4, None, None));
+        assert_eq!(e.transport.ops(), [(Op::PutKey, 0), (Op::Get, 4)]);
+        let view = pc.view().unwrap();
+        assert_eq!(
+            (view.line, view.answered, view.outcome),
+            (1, Some(sha), KeyOutcome::NoKeyOps)
+        );
+        assert_eq!(pc.status().state, Some(SyncState::NoKeys));
+        // Polls go on; key ops wait for their 10 minutes.
+        for _ in 0..9 {
+            clock.advance(60);
+            e.transport
+                .replies
+                .push_back(reply(Status::NotModified, 4, b""));
+            assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 4, None, None));
+        }
+        assert_eq!(put_keys(&e).len(), 1);
+        clock.advance(60);
+        e.transport.replies.extend([
+            reply(Status::BadRequest, 0, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        e.pass(0, false);
+        assert_eq!(put_keys(&e).len(), 2);
+        // The admin adds the vault to the line: the next start sends it.
+        let mut e = pc.engine(
+            mock([
+                reply(Status::Ok, 1, &header(0, &file)),
+                reply(Status::NotModified, 1, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
+        assert_eq!(pc.view().unwrap().line, 0);
+        // KG on a line without key ops: at start and every 10 minutes only.
+        fs::remove_file(pc.dir.join(KEY_REQUEST)).unwrap();
+        let mut e = pc.engine(
+            mock([
+                reply(Status::BadRequest, 0, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, false);
+        assert_eq!(pc.view().unwrap().line, 1);
+        for _ in 0..9 {
+            clock.advance(60);
+            e.transport
+                .replies
+                .push_back(reply(Status::NotModified, 4, b""));
+            e.pass(0, false);
+        }
+        clock.advance(60);
+        e.transport.replies.extend([
+            reply(Status::NotModified, 1, b""),
+            reply(Status::NotModified, 4, b""),
+        ]);
+        e.pass(0, false);
+        let gets: Vec<_> = e
+            .transport
+            .ops()
+            .into_iter()
+            .filter(|o| o.0 == Op::GetKey)
+            .collect();
+        assert_eq!(gets, [(Op::GetKey, 1), (Op::GetKey, 1)]);
+        assert_eq!(
+            pc.view().unwrap().line,
+            0,
+            "NOT_MODIFIED on a line that serves key ops again"
+        );
+    }
+
+    /// KG's cadence (review finding 34; S6R1 #22; S6R2 #1): in every pass
+    /// where P5 runs, also with no request at all; before every vault
+    /// upload; never while this PC's CUT is unanswered.
+    #[test]
+    fn kg_runs_where_p5_runs_and_before_every_upload() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let mut e = pc.engine(
+            mock([
+                reply(Status::Empty, 0, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, false);
+        assert_eq!(e.transport.ops(), [(Op::GetKey, 0), (Op::Get, 4)]);
+        // Each edit's upload is preceded by a fetch (S6R2 #1: no vault copy
+        // reaches the app before the cut it came with).
+        for n in 0..5u64 {
+            clock.advance(1);
+            pc.outgoing(4 + n, &keyed(&id(), 10 + n as u8));
+            e.transport
+                .replies
+                .extend([reply(Status::Empty, 0, b""), reply(Status::Ok, 5 + n, b"")]);
+            assert!(e.due(0));
+            e.pass(0, false);
+        }
+        let ops = e.transport.ops();
+        assert_eq!(ops.len(), 12);
+        for pair in ops[2..].chunks(2) {
+            assert_eq!((pair[0].0, pair[1].0), (Op::GetKey, Op::Put));
+        }
+        // An unanswered CUT: no GETKEY, and the vault steps still run.
+        pc.request(&KeyRequest::cut(0));
+        clock.advance(60);
+        e.transport
+            .replies
+            .push_back(reply(Status::ServerError, 0, b""));
+        e.pass(0, false);
+        clock.advance(5);
+        pc.outgoing(9, &keyed(&id(), 30));
+        e.transport.replies.push_back(reply(Status::Ok, 10, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 10, Some(10), None));
+        clock.advance(60);
+        e.transport.replies.extend([
+            reply(Status::Ok, 1, &cut(1, 0)),
+            reply(Status::NotModified, 1, b""),
+            reply(Status::NotModified, 10, b""),
+        ]);
+        e.pass(0, false);
+        let tail = e.transport.ops()[12..].to_vec();
+        assert_eq!(
+            tail,
+            [
+                (Op::CutKey, 0),
+                (Op::Put, 9),
+                (Op::CutKey, 0),
+                (Op::GetKey, 1),
+                (Op::Get, 10)
+            ]
+        );
+    }
+
+    /// The order rule for a fetched copy (S6R2 #1): a copy that P5 brings
+    /// is written to incoming only after a GETKEY made after the GET, so a
+    /// cut that landed between KG and P5 is in `kview` before the copy is
+    /// in incoming. When that GETKEY fails, the copy is not written and the
+    /// next poll fetches it again.
+    #[test]
+    fn a_fetched_copy_waits_for_a_getkey_after_it() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let copy = keyed(&id(), 7);
+        let mut e = pc.engine(
+            mock([
+                reply(Status::Ok, 1, &key_record(0, &ks(9))),
+                reply(Status::Ok, 5, &copy),
+                reply(Status::Ok, 2, &cut(2, 9)),
+            ]),
+            &clock,
+        );
+        e.pass(0, true);
+        assert_eq!(
+            e.transport.ops(),
+            [(Op::GetKey, 0), (Op::Get, 4), (Op::GetKey, 1)]
+        );
+        assert_eq!(pc.view().unwrap().record, cut(2, 9));
+        assert_eq!(pc.incoming(), Some((5, copy.clone())));
+        // The GETKEY after the copy fails: the copy waits for a later poll.
+        let next = keyed(&id(), 8);
+        clock.advance(120);
+        e.transport.replies.extend([
+            reply(Status::NotModified, 2, b""),
+            reply(Status::Ok, 6, &next),
+            reply(Status::ServerError, 0, b""),
+        ]);
+        e.pass(0, true);
+        assert_eq!(pc.incoming(), Some((5, copy)));
+        clock.advance(600);
+        e.transport.replies.extend([
+            reply(Status::NotModified, 2, b""),
+            reply(Status::Ok, 6, &next),
+            reply(Status::NotModified, 2, b""),
+        ]);
+        e.pass(0, true);
+        assert_eq!(pc.incoming(), Some((6, next)));
+        assert_eq!(
+            e.transport.ops()[3..],
+            [
+                (Op::GetKey, 2),
+                (Op::Get, 5),
+                (Op::GetKey, 2),
+                (Op::GetKey, 2),
+                (Op::Get, 5),
+                (Op::GetKey, 2)
+            ]
+        );
+    }
+
+    /// A refusal of this PC's key file (BAD_BLOB) over a missing `kview`
+    /// carries no top of its own: it is written with the top a GETKEY gets
+    /// at once, never as `seq` 0 (an empty namespace, which a GOYOKS01 PC
+    /// would read as KeySyncGone).
+    #[test]
+    fn a_refusal_over_no_view_is_written_with_the_top() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::Ok, 1, &key_record(0, &ks(9))),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, true);
+        // The view is lost (an antivirus); the request goes in a pass with
+        // no poll, so no KG of its own follows.
+        fs::remove_file(pc.dir.join(KEY_VIEW)).unwrap();
+        let sha = pc.request(&KeyRequest::put(1, 9, &ks(10)));
+        clock.advance(1);
+        e.transport.replies.extend([
+            reply(Status::BadBlob, 0, b""),
+            reply(Status::Ok, 1, &key_record(0, &ks(9))),
+        ]);
+        assert!(e.due(0));
+        e.pass(0, false);
+        assert_eq!(e.transport.ops()[2..], [(Op::PutKey, 1), (Op::GetKey, 0)]);
+        let view = pc.view().unwrap();
+        assert_eq!(
+            (view.seq, view.line, view.answered, view.outcome),
+            (1, 0, Some(sha), KeyOutcome::Refused)
+        );
+        assert_eq!(view.record, key_record(0, &ks(9)));
+    }
+
+    /// A `kview` that can never be written (a folder planted under its
+    /// name): after `VIEW_STUCK` failed writes the vault shows `config`;
+    /// since the app then reads no view at all, the vault steps go on.
+    #[test]
+    fn an_unwritable_key_view_shows_and_does_not_stop_the_vault() {
+        let pc = pinned();
+        let clock = TestClock::new();
+        fs::create_dir(pc.dir.join(KEY_VIEW)).unwrap();
+        let mut e = pc.engine(Mock::default(), &clock);
+        e.transport.keys = true;
+        for _ in 0..VIEW_STUCK {
+            e.transport.replies.extend([
+                reply(Status::Ok, 1, &key_record(0, &ks(9))),
+                reply(Status::NotModified, 4, b""),
+            ]);
+            clock.advance(120);
+            e.pass(0, true);
+        }
+        let ops = e.transport.ops();
+        assert_eq!(
+            ops.iter().filter(|o| o.0 == Op::Get).count() as u32,
+            VIEW_STUCK
+        );
+        assert_eq!(pc.status().state, Some(SyncState::Config));
+    }
+
+    /// KP (spec v3 §7.12, §7.19): sent once the vault head has reached the
+    /// request's epoch; OK or NOT_FOUND deletes the request; BAD_REQUEST
+    /// holds it for 10 minutes without the backoff; another vault's
+    /// request is left alone.
+    #[test]
+    fn prune_requests_wait_for_the_head() {
+        let pc = Pc::with_folder();
+        let clock = TestClock::new();
+        let head = |epoch: u64| {
+            let mut v = keyed(&id(), 3);
+            v[40..48].copy_from_slice(&epoch.to_le_bytes());
+            seed_incoming(&pc, id(), 4, &v);
+        };
+        head(7);
+        replace_file(&pc.dir.join(PRUNE_REQUEST), &render_prune_request(&id(), 9)).unwrap();
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::Empty, 0, b""),
+                reply(Status::NotModified, 4, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, false);
+        assert_eq!(e.transport.ops(), [(Op::GetKey, 0), (Op::Get, 4)]);
+        head(9);
+        clock.advance(1);
+        e.transport
+            .replies
+            .push_back(reply(Status::BadRequest, 0, b""));
+        e.pass(0, false);
+        assert_eq!(e.transport.ops().last(), Some(&(Op::Prune, 9)));
+        clock.advance(KEY_RETRY - 1);
+        e.pass(0, false);
+        clock.advance(1);
+        e.transport.replies.push_back(reply(Status::Ok, 3, b""));
+        e.pass(0, false);
+        assert_eq!(
+            e.transport
+                .ops()
+                .iter()
+                .filter(|o| o.0 == Op::Prune)
+                .count(),
+            2
+        );
+        assert!(!pc.dir.join(PRUNE_REQUEST).exists());
+        assert!(
+            pc.log()
+                .contains("server pruned 3 vault versions below epoch 9")
+        );
+        // Another vault's request: left alone, logged once.
+        replace_file(
+            &pc.dir.join(PRUNE_REQUEST),
+            &render_prune_request(&[0x77; 16], 2),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            clock.advance(1);
+            e.pass(0, false);
+        }
+        assert!(pc.dir.join(PRUNE_REQUEST).exists());
+        assert_eq!(pc.log().matches("prune.request ignored").count(), 1);
+    }
+
+    /// The server script run locally with `--key-sync` naming `ids` (none:
+    /// the flag is left out), one process per request.
+    pub(crate) struct KeyLocal {
+        pub(crate) root: PathBuf,
+        pub(crate) ids: Vec<[u8; 16]>,
+    }
+    impl Transport for KeyLocal {
+        fn exchange(&mut self, request: &[u8], beat: &mut dyn FnMut()) -> Result<Output, Failure> {
+            let mut command = python_command();
+            command
+                .arg("-I")
+                .arg(server_script())
+                .args(["serve", "--root"])
+                .arg(&self.root);
+            if !self.ids.is_empty() {
+                let ids: Vec<String> = self.ids.iter().map(|id| syncfile::hex(id)).collect();
+                command.arg(format!("--key-sync={}", ids.join(",")));
+            }
+            run_bounded(command, request, Duration::from_secs(60), &mut |d| {
+                beat();
+                no_stop(d)
+            })
+        }
+    }
+    /// Every file the server stores under `root`, by path.
+    fn stored(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for e in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    dirs.push(e.path());
+                } else {
+                    out.push((e.path(), fs::read(e.path()).unwrap()));
+                }
+            }
+        }
+        out
+    }
+    fn records(root: &Path) -> Vec<String> {
+        let k = root.join(syncfile::hex(&id())).join("k");
+        let mut names: Vec<String> = fs::read_dir(k)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rec"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The key steps against the real server script (spec v3 §7.12-§7.13,
+    /// §14.7-7 idempotence and "a line without key ops"): a first upload
+    /// and the vault at its state; a lost `kview` and a lost reply each
+    /// cost one resend, answered CONFLICT with this PC's own file and no
+    /// extra record; the floor holds a vault at an older state until it is
+    /// rewritten; a CUT, and its replay, end the generation, after which
+    /// any GOYOVA04 passes; a line without `--key-sync` answers outcome 4
+    /// and shows `nokeys` while the vault channel goes on. No stored file
+    /// is a password-only or local key file, and at most two key files are
+    /// kept.
+    #[test]
+    fn end_to_end_key_requests_with_the_real_server() {
+        if !python() {
+            return;
+        }
+        let server = Temp::new("keyserver");
+        let root = server.0.join("data");
+        let clock = TestClock::new();
+        let a = Pc::with_folder();
+        let local = |ids: Vec<[u8; 16]>| KeyLocal {
+            root: root.clone(),
+            ids,
+        };
+        let mut e = quiet(&a, local(vec![id()]), &clock);
+        // KeySyncOn's S4: the key file and the vault at its state.
+        let (f10, f11) = (ks(10), ks(11));
+        let sha = a.request(&KeyRequest::put(0, 0, &f10));
+        a.outgoing(0, &floor_vault(&f10, 1));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 1, Some(1), None));
+        let view = a.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (1, Some(sha), KeyOutcome::Applied)
+        );
+        assert_eq!(view.record, key_record(0, &f10));
+        assert_eq!(records(&root).len(), 1);
+        // kview lost after an applied PUT: one resend, CONFLICT carrying
+        // this PC's own file, no new record.
+        fs::remove_file(a.dir.join(KEY_VIEW)).unwrap();
+        clock.advance(1);
+        assert!(e.due(0));
+        e.pass(0, false);
+        let view = a.view().unwrap();
+        assert_eq!((view.seq, view.outcome), (1, KeyOutcome::Conflict));
+        assert_eq!(view.record, key_record(0, &f10));
+        assert_eq!(records(&root).len(), 1);
+        // A reply lost: the next request committed by an earlier attempt.
+        let sha = a.request(&KeyRequest::put(1, 10, &f11));
+        let direct = Request::put_key(id(), 1, &f11).unwrap().encode();
+        let out = local(vec![id()]).exchange(&direct, &mut || {}).unwrap();
+        let (r, _) = Response::decode(&out.stdout, Op::PutKey, &id(), 1).unwrap();
+        assert_eq!((r.status, r.version), (Status::Ok, 2));
+        clock.advance(1);
+        // The vault at the old state waits behind the floor meanwhile.
+        a.outgoing(1, &floor_vault(&f10, 2));
+        assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 1, None, None));
+        let view = a.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (2, Some(sha), KeyOutcome::Conflict)
+        );
+        assert_eq!(view.record, key_record(0, &f11));
+        assert_eq!(records(&root).len(), 2, "the previous key file and the top");
+        // The app rewrites the vault under the new state: it lands.
+        clock.advance(1);
+        a.outgoing(1, &floor_vault(&f11, 3));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 2, Some(2), None));
+        // The off: a CUT on record 2; then the same CUT again after a lost
+        // view, which changes nothing.
+        let sha = a.request(&KeyRequest::cut(2));
+        clock.advance(1);
+        e.pass(0, false);
+        let view = a.view().unwrap();
+        assert_eq!(
+            (view.seq, view.answered, view.outcome),
+            (3, Some(sha), KeyOutcome::Applied)
+        );
+        assert_eq!(view.record, cut(3, 11));
+        fs::remove_file(a.dir.join(KEY_VIEW)).unwrap();
+        clock.advance(1);
+        e.pass(0, false);
+        assert_eq!(a.view().unwrap().record, cut(3, 11));
+        assert_eq!(records(&root).len(), 1, "only the cut");
+        // No floor after a cut: a vault under any state lands.
+        clock.advance(1);
+        a.outgoing(2, &floor_vault(&f10, 4));
+        assert_eq!(e.pass(0, false), done(SyncState::Ok, 3, Some(3), None));
+
+        // B's forced command has no --key-sync: its request is answered
+        // with outcome 4, `nokeys` shows, and the vault channel goes on.
+        let b = Pc::with_folder();
+        seed_incoming(&b, id(), 3, &floor_vault(&f10, 4));
+        let sha = b.request(&KeyRequest::put(3, 11, &ks(12)));
+        let mut eb = quiet(&b, local(Vec::new()), &clock);
+        assert_eq!(eb.pass(0, false), done(SyncState::NoKeys, 3, None, None));
+        let view = b.view().unwrap();
+        assert_eq!(
+            (view.line, view.answered, view.outcome),
+            (1, Some(sha), KeyOutcome::NoKeyOps)
+        );
+        assert_eq!(eb.pass(0, true), done(SyncState::NoKeys, 3, None, None));
+        assert!(b.log().contains("GET NOT_MODIFIED"));
+        // Gate 3 and the end check: no password-only or local key file was
+        // ever stored, GOYOKS01 only in k/, at most two key files.
+        let files = stored(&root);
+        assert!(!files.is_empty());
+        for (path, data) in &files {
+            assert!(
+                !data.starts_with(b"GOYOKE") && !data.starts_with(b"GOYOKH"),
+                "{path:?}"
+            );
+            let in_k = path.parent().is_some_and(|p| p.ends_with("k"));
+            let holds_ks = data.windows(8).any(|w| w == b"GOYOKS01");
+            assert!(!holds_ks || in_k, "{path:?}");
+        }
+        let payloads = files
+            .iter()
+            .filter(|(p, d)| p.parent().is_some_and(|p| p.ends_with("k")) && d.len() > 32)
+            .count();
+        assert!(payloads <= 2);
+    }
+
+    /// Gate 3 against the strict parse (S6-1 #25, S6-2 #19; §14.7-7): each
+    /// GOYOKS01 file, the fixture and its changed copies, is sent by
+    /// PUTKEY(0) to the real script on a fresh root of its own, with
+    /// `--key-sync` naming the fixture's vault. The script refuses it as
+    /// "not a GOYOKS01 key file of this vault" exactly when
+    /// `is_sync_key_file` refuses it; a file both accept is stored when its
+    /// epoch is within EPOCH_WINDOW and refused with the window reason
+    /// otherwise.
+    #[test]
+    fn gate_3_judges_key_files_as_the_strict_parse_does() {
+        if !python() {
+            return;
+        }
+        let id = id();
+        let mut cases: Vec<Vec<u8>> = [
+            9,
+            EPOCH_WINDOW,
+            EPOCH_WINDOW + 1,
+            EPOCH_MAX,
+            EPOCH_MAX + 1,
+            0,
+        ]
+        .into_iter()
+        .map(ks)
+        .collect();
+        for at in (0..128)
+            .chain((128..1300).step_by(5))
+            .chain((1300..KS.len()).step_by(41))
+        {
+            for flip in [0x01u8, 0x80] {
+                if at >= 128 && flip == 0x80 {
+                    continue;
+                }
+                let mut f = KS.to_vec();
+                f[at] ^= flip;
+                cases.push(f);
+            }
+        }
+        cases.push(KS[..KS.len() - 1].to_vec());
+        cases.push([KS, &[0]].concat());
+        let server = Temp::new("gate3");
+        let next = AtomicU32::new(0);
+        let results: Vec<(usize, Status, String)> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed) as usize;
+                            let Some(f) = cases.get(i) else {
+                                return mine;
+                            };
+                            let mut local = KeyLocal {
+                                root: server.0.join(format!("r{i}")),
+                                ids: vec![id],
+                            };
+                            let request = Request {
+                                op: Op::PutKey,
+                                vault_id: id,
+                                version: 0,
+                                blob_sha: sha256(f),
+                                blob: f,
+                            };
+                            let out = local.exchange(&request.encode(), &mut || {}).unwrap();
+                            let (r, _) = Response::decode(&out.stdout, Op::PutKey, &id, 0).unwrap();
+                            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+                            mine.push((i, r.status, err));
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        assert_eq!(results.len(), cases.len());
+        let (mut refused, mut stored) = (0, 0);
+        for (i, status, err) in results {
+            let f = &cases[i];
+            let grammar = err.contains("not a GOYOKS01 key file of this vault");
+            match is_sync_key_file(f, &id) {
+                None => {
+                    assert!(
+                        status == Status::BadBlob && grammar,
+                        "case {i}: {status:?} {err}"
+                    );
+                    refused += 1;
+                }
+                Some(s) if s.epoch <= EPOCH_WINDOW => {
+                    assert_eq!(status, Status::Ok, "case {i}: {err}");
+                    stored += 1;
+                }
+                Some(_) => {
+                    let window = err.contains("epoch window");
+                    assert!(
+                        status == Status::BadBlob && window,
+                        "case {i}: {status:?} {err}"
+                    );
+                }
+            }
+        }
+        assert!(
+            refused > 100 && stored > 50,
+            "{refused} refused, {stored} stored"
+        );
+    }
 }

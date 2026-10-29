@@ -16,6 +16,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "security-key")]
+mod keys;
+#[cfg(feature = "security-key")]
+pub use keys::*;
 
 /// The app's next upload; written by the app, read by the helper.
 pub const OUTGOING: &str = "outgoing.goyosync";
@@ -30,8 +34,25 @@ pub const HELPER_LOCK: &str = "helper.lock";
 pub const TEMP_SUFFIX: &str = ".goyotmp";
 /// Temp-file prefixes each side may remove. Neither touches the other's, so
 /// a cleanup can never delete a file the other process is about to rename.
+#[cfg(not(feature = "security-key"))]
 pub const APP_TEMPS: [&str; 2] = ["outgoing.goyosync.", "pre-merge-"];
+#[cfg(not(feature = "security-key"))]
 pub const HELPER_TEMPS: [&str; 3] = ["incoming.goyosync.", "status.", "helper.state."];
+/// The same with the key-file sync files (spec v3 §7.10).
+#[cfg(feature = "security-key")]
+pub const APP_TEMPS: [&str; 4] = [
+    "outgoing.goyosync.",
+    "pre-merge-",
+    "outgoing.goyokeysync.",
+    "prune.request.",
+];
+#[cfg(feature = "security-key")]
+pub const HELPER_TEMPS: [&str; 4] = [
+    "incoming.goyosync.",
+    "status.",
+    "helper.state.",
+    "incoming.goyokeysync.",
+];
 
 pub const OUTGOING_MAGIC: &[u8; 8] = b"GOYOSOU1";
 pub const INCOMING_MAGIC: &[u8; 8] = b"GOYOSIN1";
@@ -364,8 +385,14 @@ pub enum SyncState {
     /// The server refused an upload because its key file for the vault has
     /// another state than the upload's header (key-file sync).
     KeyFile,
+    /// This PC's server line serves no key ops for the vault (no
+    /// `--key-sync=<id>` in its forced command), which uses key-file sync
+    /// or whose upload got KEY_BEHIND (spec v3 §7.12).
+    #[cfg(feature = "security-key")]
+    NoKeys,
 }
 impl SyncState {
+    #[cfg(not(feature = "security-key"))]
     pub const ALL: [SyncState; 12] = [
         Self::Ok,
         Self::Idle,
@@ -379,6 +406,22 @@ impl SyncState {
         Self::Update,
         Self::OldServer,
         Self::KeyFile,
+    ];
+    #[cfg(feature = "security-key")]
+    pub const ALL: [SyncState; 13] = [
+        Self::Ok,
+        Self::Idle,
+        Self::Offline,
+        Self::Auth,
+        Self::HostKey,
+        Self::NoSsh,
+        Self::Server,
+        Self::Refused,
+        Self::Config,
+        Self::Update,
+        Self::OldServer,
+        Self::KeyFile,
+        Self::NoKeys,
     ];
     pub fn token(self) -> &'static str {
         match self {
@@ -394,6 +437,8 @@ impl SyncState {
             Self::Update => "update",
             Self::OldServer => "oldserver",
             Self::KeyFile => "keyfile",
+            #[cfg(feature = "security-key")]
+            Self::NoKeys => "nokeys",
         }
     }
     pub fn from_token(token: &str) -> Option<Self> {
@@ -409,17 +454,28 @@ pub struct SyncStatus {
     /// Unix seconds of the last valid server reply, or 0.
     pub contact: u64,
     pub state: Option<SyncState>,
+    /// The helper does key-file sync: a security-key build wrote the
+    /// optional fourth line `features=keys` (spec v3 §7.10).
+    #[cfg(feature = "security-key")]
+    pub keys: bool,
 }
 const STATUS_HEADER: &str = "goyo-sync-status 1";
+#[cfg(feature = "security-key")]
+const FEATURES_KEYS: &str = "features=keys";
+/// The status file. A security-key build adds `features=keys`, which a
+/// default or 0.8 app ignores like any line after the state.
 pub fn render_status(heartbeat: u64, contact: u64, state: SyncState) -> Vec<u8> {
-    format!(
+    let text = format!(
         "{STATUS_HEADER}\nheartbeat={heartbeat}\ncontact={contact}\nstate={}\n",
         state.token()
-    )
-    .into_bytes()
+    );
+    #[cfg(feature = "security-key")]
+    let text = text + FEATURES_KEYS + "\n";
+    text.into_bytes()
 }
 /// Strict and positional: ASCII, LF, the header, then heartbeat, contact and
-/// state in that order. Junk, oversize or another header gives all unknown.
+/// state in that order (and, in a security-key build, `features=keys`).
+/// Junk, oversize or another header gives all unknown.
 pub fn parse_status(bytes: &[u8]) -> SyncStatus {
     let mut status = SyncStatus::default();
     let Some(text) = ascii(bytes, MAX_STATUS) else {
@@ -434,6 +490,10 @@ pub fn parse_status(bytes: &[u8]) -> SyncStatus {
         .unwrap_or(0);
     status.contact = field(&mut lines, "contact=").and_then(decimal).unwrap_or(0);
     status.state = field(&mut lines, "state=").and_then(SyncState::from_token);
+    #[cfg(feature = "security-key")]
+    {
+        status.keys = lines.next() == Some(FEATURES_KEYS);
+    }
     status
 }
 /// Missing, Busy and Io are passed on so the caller can tell "no helper"
@@ -690,11 +750,14 @@ mod tests {
         for state in SyncState::ALL {
             let bytes = render_status(1_792_000_000, 1_791_999_000, state);
             assert!(bytes.len() <= MAX_STATUS);
-            let want = SyncStatus {
-                heartbeat: 1_792_000_000,
-                contact: 1_791_999_000,
-                state: Some(state),
-            };
+            let mut want = SyncStatus::default();
+            (want.heartbeat, want.contact) = (1_792_000_000, 1_791_999_000);
+            want.state = Some(state);
+            // Only a security-key helper says it does key-file sync.
+            #[cfg(feature = "security-key")]
+            {
+                want.keys = true;
+            }
             assert_eq!(parse_status(&bytes), want);
             assert_eq!(SyncState::from_token(state.token()), Some(state));
         }
@@ -742,12 +805,27 @@ mod tests {
         ];
         for (body, (heartbeat, contact, state)) in cases {
             let text = format!("goyo-sync-status 1\n{body}");
-            let want = SyncStatus {
-                heartbeat,
-                contact,
-                state,
-            };
+            let mut want = SyncStatus::default();
+            (want.heartbeat, want.contact, want.state) = (heartbeat, contact, state);
             assert_eq!(parse_status(text.as_bytes()), want, "{body:?}");
+        }
+        // The fourth line: exactly `features=keys`, else no key-file sync.
+        #[cfg(feature = "security-key")]
+        for (line, keys) in [
+            ("features=keys\n", true),
+            ("features=keys", true),
+            ("features=key\n", false),
+            ("features=keys \n", false),
+            ("x=1\nfeatures=keys\n", false),
+            ("", false),
+        ] {
+            let text = format!("goyo-sync-status 1\nheartbeat=5\ncontact=7\nstate=ok\n{line}");
+            let status = parse_status(text.as_bytes());
+            assert_eq!(
+                (status.keys, status.state),
+                (keys, Some(SyncState::Ok)),
+                "{line:?}"
+            );
         }
     }
     #[test]
