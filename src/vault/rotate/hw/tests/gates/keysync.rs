@@ -1510,8 +1510,8 @@ fn restore_fetched(
 }
 
 /// Spec §7.17 (§14.10 walkthrough 4, a new PC from the server): the vault
-/// fetched with "열쇠 파일도 받기" restores with the server's key file read
-/// only: nothing is written outside the sync folder before G1 (no key
+/// brought with goyo-sync's "이 PC로 가져오기" restores with the server's
+/// key file read only: nothing is written outside the sync folder before G1 (no key
 /// file, no restored vault file, no anchor line), no edit; a wrong code
 /// writes nothing; the save step never writes into a sync folder or over a
 /// file; then the key file, the vault file and the confirmed line with `t`,
@@ -1576,6 +1576,53 @@ fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
     let s = Session::login_with(prepared, NEW, &otp, typed, None, &t).unwrap();
     assert!(!s.tofu() && !s.gate_pending());
     assert!(has(&s, "three"));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §2.29 (UX overhaul, "서버에서 가져온 금고"): goyo-sync fetched the
+/// vault file into the folder the user picked, next to its sync folder;
+/// the app restores it in place with the server's key file. Nothing is
+/// written before G1 (the fetched file keeps its bytes, no key file, no
+/// anchor line); the pass writes the key file next to it and saves the
+/// vault file where it was, and the pair then opens as a login. A Restore
+/// of any other file onto itself is still refused.
+#[test]
+fn a_fetched_vault_is_restored_in_place_behind_its_code() {
+    let (a, sa, _b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    let shown = code_of(&sa);
+    let c = c_with_view(&a, &id, &mut server);
+    let fetched = fs::read(c.vault()).unwrap();
+    let mut s = restore_fetched(&c, &c.vault(), NEW, &mut codes, &keys, 1).unwrap();
+    assert!(s.tofu() && s.fetched_unsaved());
+    assert_eq!(fs::read(c.vault()).unwrap(), fetched);
+    assert!(!c.key().exists() && c.anchor().is_empty());
+    assert_eq!(
+        s.tofu_save(Some(&Code([7; 8])), &c.key()).err(),
+        Some(GATE_CODE_WRONG)
+    );
+    assert_eq!(fs::read(c.vault()).unwrap(), fetched);
+    s.tofu_save(Some(&shown), &c.key()).unwrap();
+    assert!(!s.tofu() && !s.fetched_unsaved());
+    assert_eq!(fs::read(c.key()).unwrap(), fs::read(a.key()).unwrap());
+    assert!(c.lines(&id).vault.unwrap().state.flags.t);
+    s.put(None, entry("in place")).unwrap();
+    drop(s);
+    c.here();
+    let prepared = prepare(&c.vault(), &c.key()).unwrap();
+    let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
+    let (otp, typed) = codes.next();
+    let s = Session::login_with(prepared, NEW, &otp, typed, None, &t).unwrap();
+    assert!(!s.tofu() && !s.gate_pending());
+    assert!(has(&s, "in place"));
+    drop(s);
+    // An ordinary Restore never writes over its own backup.
+    let prepared = crate::vault::prepare_restore(&c.vault(), &c.key()).unwrap();
+    let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
+    let (otp, typed) = codes.next();
+    assert_eq!(
+        Session::restore_with(prepared, &c.vault(), NEW, &otp, typed, &t).err(),
+        Some(crate::vault::NOT_DISTINCT)
+    );
     set_kdf_profile(KdfProfile::Real);
 }
 

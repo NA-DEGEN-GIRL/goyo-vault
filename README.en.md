@@ -93,7 +93,7 @@ From 0.9.0, **a vault whose key was changed (its password changed, or another PC
 With no vault saved yet, you see this screen ("No vault saved yet").
 
 - **Create a new vault** if this is your first time.
-- **Restore from backup** to bring over a vault from another PC.
+- **Restore from backup** to bring a vault back from a backup file made with 'Back up vault'. A vault used on another PC opens with **Open a vault from another location** once its vault file and key file are copied by USB, or, with sync, comes with goyo-sync's **Bring to this PC…**.
 - **Open a vault from another location** for a vault on a USB drive or in another folder.
 
 Switch between **Dark** and **Light** in the top-right corner.
@@ -177,7 +177,7 @@ Use the buttons at the bottom of the vault screen.
 
 ![Restore from backup](docs/images/en/restore.png)
 
-To restore, press **Restore from backup** on the first-start or open screen. Choose the backup and the key file, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file; the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
+To restore, press **Restore from backup** on the first-start or open screen. Choose the **Vault backup file (.goyo)** (a file made with 'Back up vault') and **the key file used when that backup was made**, set the **New location for the restored vault**, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file. A vault goyo-sync brought from the server is not restored but opened as it is: put its key file next to it by USB, or, in the security-key build with the server's key file, the **Vault brought from the server** screen appears ([SECURITY_KEY.en.md](docs/SECURITY_KEY.en.md), 'A new PC'); the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
 ### 7. Key management: change the password, receive a new key file
 
@@ -240,7 +240,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 
 **A restore needs:** a vault backup + the key file (the original or a key backup) + the password (+ the OTP if the vault uses one). Without any one of them the vault cannot be restored.
 
-**With sync,** the server keeps the last 200 encrypted versions ('Get from server…' in the settings window or `goyo-sync --fetch`, then Restore). Key and OTP backups are still up to you. The server keeps that history, so it does not replace your vault backups either.
+**With sync,** the server keeps the last 200 encrypted versions (get one with `goyo-sync --fetch`, then Restore it to a new name). Key and OTP backups are still up to you. The server keeps that history, so it does not replace your vault backups either.
 
 **Where to keep them**
 - Keep vault backups and key backups on **different drives**, for example the vault backup on an external disk and the key backup on a USB stick.
@@ -250,7 +250,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 
 ## Sync (optional)
 
-To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC gets its vault with 'Get from server…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
+To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only the encrypted vault file** with your own SSH server (Linux or similar, with python3). Double-click `goyo-sync.exe` to open a settings window that looks like Goyo Vault: check the connection (comparing the host key fingerprint on a first connection), install the server script, choose the vaults to sync, and turn on autostart and background sync in one place; a second PC brings its vault with 'Bring to this PC…'. Setup, troubleshooting and the command line: [docs/SYNC.en.md](docs/SYNC.en.md).
 
 - **Every PC needs 0.8.0 or later.** A synced vault and its backups do not open in 0.7.x or older. Each vault asks at every unlock until you agree, and only vaults you agree for change. Before changing the key, update the server script and every PC to 0.9.0.
 - The key file and password are never sent. Move the key file between PCs by USB.

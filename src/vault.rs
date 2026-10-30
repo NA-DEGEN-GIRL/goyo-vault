@@ -71,7 +71,7 @@ pub use serverkey::{
     FETCHED_EXISTS, FETCHED_HELD, FETCHED_IN_SYNC, FETCHED_NONE, FETCHED_OLDER, FETCHED_UNSAVED,
     Failed, KEYSYNC_CONSENT, OTP_STALE, RemovalMerge, SERVER_KEY_NOT_SUCCESSOR,
     SERVER_KEY_OLD_KEYS, SERVER_KEY_UNCHAINED, ServerEntry, UnlockProof, fetched_key,
-    fetched_key_info, is_fetched_key, prepare_restore_fetched,
+    fetched_key_info, is_fetched_key, known_here, prepare_restore_fetched,
 };
 pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
@@ -1675,9 +1675,17 @@ impl Session {
             ..
         } = prepared;
         let login = destination.is_none();
+        // A vault file goyo-sync fetched is restored in place (see below):
+        // like a login, its file is locked before it is read, so no other
+        // instance saves it between this read and the TOFU pass's write.
+        #[cfg(feature = "security-key")]
+        let in_place =
+            fetched && destination.and_then(|d| normalized(d).ok()) == Some(source.clone());
+        #[cfg(not(feature = "security-key"))]
+        let in_place = false;
         // Restore inputs and key files are immutable read snapshots. They may be
         // on read-only media; only the live output needs a writable sidecar lock.
-        let mut locks = if login {
+        let mut locks = if login || in_place {
             vec![FileLock::acquire(&source)?]
         } else {
             Vec::new()
@@ -1866,11 +1874,18 @@ impl Session {
         let path = if let Some(dest) = destination {
             let dest = normalized(dest)?;
             distinct(&dest, &key_path)?;
-            distinct(&dest, &source)?;
-            if dest.exists() {
-                return Err("복원 대상은 새 파일이어야 합니다.");
+            // A vault file goyo-sync fetched is restored where it lies, next
+            // to its sync folder, with the server's key file (spec §2.29, UX
+            // overhaul): like any bootstrap Restore it writes nothing before
+            // G1, and the TOFU pass saves it in place of the fetched copy.
+            // Its lock was taken before the read.
+            if !in_place {
+                distinct(&dest, &source)?;
+                if dest.exists() {
+                    return Err("복원 대상은 새 파일이어야 합니다.");
+                }
+                locks.push(FileLock::acquire(&dest)?);
             }
-            locks.push(FileLock::acquire(&dest)?);
             dest
         } else {
             source
@@ -3105,11 +3120,13 @@ fn is_device_name(name: &str) -> bool {
     ) || numbered("COM")
         || numbered("LPT")
 }
+/// Two of the vault, key and backup paths name one file.
+pub const NOT_DISTINCT: &str = "금고와 열쇠, 백업 대상은 서로 다른 파일이어야 합니다.";
 fn distinct(a: &Path, b: &Path) -> Result<()> {
     if a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
         || (a.exists() && b.exists() && file_identity(a)? == file_identity(b)?)
     {
-        Err("금고와 열쇠, 백업 대상은 서로 다른 파일이어야 합니다.")
+        Err(NOT_DISTINCT)
     } else {
         Ok(())
     }

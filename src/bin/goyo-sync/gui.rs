@@ -15,8 +15,11 @@
 //! message loop, and a queue filter inside dialogs, drops posted commands,
 //! button clicks and edit or list operations aimed at its windows. It reads
 //! goyo-sync.conf, the helper's status files and goyo-sync.log; it never
-//! opens a vault or key file: paths come from file dialogs only, and whether
-//! a vault exists is read from its folder's listing.
+//! opens a key file; paths come from file dialogs only, and whether a vault
+//! exists is read from its folder's listing. Only the security-key build
+//! reads a listed vault's first 65 bytes, and the key view and the first 81
+//! bytes of the server's copy in its sync folder, for the words of the
+//! key-file look and the forced-command line (keys_gui.rs).
 use crate::{
     CONFIG, ERROR, OK,
     config::{self, Config, Problem},
@@ -94,13 +97,9 @@ const LOG: i32 = 112;
 const CLOSE: i32 = 113;
 const REFRESH: i32 = 114;
 const TAKE: i32 = 115;
-/// "열쇠 파일도 받기" on the server list (security-key build).
-#[cfg(feature = "security-key")]
-const FETCH_KEY: i32 = 116;
-/// "열쇠 파일 동기화 허용 (실험)" and [강제 명령 줄…] under the vault list
-/// (security-key build, spec v3 §7.12).
-#[cfg(feature = "security-key")]
-const KEY_SYNC_ALLOW: i32 = 117;
+/// [강제 명령 줄…] under the vault list (security-key build, spec v3
+/// §7.12, §2.29 (sync)): the line names the listed vaults that use key-file
+/// sync. That sync is switched in goyo-vault only.
 #[cfg(feature = "security-key")]
 const KEY_LINE: i32 = 118;
 /// IDCANCEL: Esc in the log and server-list views.
@@ -162,6 +161,8 @@ thread_local! {
     /// no test shows a real dialog. What would have been shown is kept.
     static ANSWERS: RefCell<std::collections::VecDeque<bool>> = RefCell::default();
     static PICKS: RefCell<std::collections::VecDeque<Option<PathBuf>>> = RefCell::default();
+    /// The next file dialog fails to open (see pick_failed).
+    static PICK_FAILS: Cell<bool> = const { Cell::new(false) };
     static ASKED: RefCell<Vec<String>> = RefCell::default();
     static TOLD: RefCell<Vec<String>> = RefCell::default();
 }
@@ -198,9 +199,9 @@ fn pick(h: Hwnd, what: &Ask) -> Option<PathBuf> {
         Ask::Fetch(_, default) => pick_file(
             h,
             true,
-            "고요 금고/백업 (*.goyo)\0*.goyo\0모든 파일\0*.*\0",
+            "고요 금고 (*.goyo)\0*.goyo\0모든 파일\0*.*\0",
             "goyo",
-            "새 파일 이름을 선택하세요 (기존 파일 덮어쓰기 금지)",
+            "가져올 폴더를 고르세요 · 금고는 그 폴더에 이 이름으로 저장됩니다",
             Some(default.as_path()),
         ),
         _ => dialog(h, false, false),
@@ -210,6 +211,17 @@ fn pick(h: Hwnd, what: &Ask) -> Option<PathBuf> {
 fn pick(_: Hwnd, _: &Ask) -> Option<PathBuf> {
     PICKS.with(|p| p.borrow_mut().pop_front().flatten())
 }
+/// A file dialog that could not open (CommDlgExtendedError), told apart
+/// from a cancel, as goyo-vault says it.
+const DIALOG_FAILED: &str = "파일을 고르는 창을 열지 못했습니다. 경로에 쓸 수 없는 문자가 있거나 폴더에 접근할 수 없을 수 있습니다. 다시 하거나 다른 폴더를 고르세요.";
+#[cfg(not(test))]
+fn pick_failed() -> bool {
+    dialog_failed()
+}
+#[cfg(test)]
+fn pick_failed() -> bool {
+    PICK_FAILS.with(|f| f.replace(false))
+}
 
 /// What the worker thread runs.
 enum Job {
@@ -217,8 +229,10 @@ enum Job {
     Trust(Config),
     Install(Config),
     List(Config),
+    #[cfg(not(feature = "security-key"))]
     Fetch(Config, [u8; 16], PathBuf),
-    /// The same, then the server's key file (spec §7.17).
+    /// The vault file, then the server's key file when it has one (spec
+    /// §7.17, §2.29 (sync)).
     #[cfg(feature = "security-key")]
     FetchKey(Config, [u8; 16], PathBuf),
     Sync(Config),
@@ -231,6 +245,7 @@ impl Job {
             Job::Trust(_) => Kind::Trust,
             Job::Install(_) => Kind::Install,
             Job::List(_) => Kind::List,
+            #[cfg(not(feature = "security-key"))]
             Job::Fetch(..) => Kind::Fetch,
             #[cfg(feature = "security-key")]
             Job::FetchKey(..) => Kind::Fetch,
@@ -243,7 +258,15 @@ impl Job {
             Job::Check(c) => Done::Checked(setup::check(runner, log, &c), c),
             Job::Trust(c) => Done::Trusted(setup::trust(runner, log, &c), c),
             Job::Install(c) => Done::Installed(setup::install(runner, log, &c)),
-            Job::List(c) => Done::Listed(setup::list(runner, log, &c), c),
+            Job::List(c) => {
+                let listed = setup::list(runner, log, &c);
+                let keys = match &listed {
+                    Ok(entries) => key_marks(runner, log, &c, entries),
+                    Err(_) => Vec::new(),
+                };
+                Done::Listed(listed, c, keys)
+            }
+            #[cfg(not(feature = "security-key"))]
             Job::Fetch(c, id, path) => {
                 let got = setup::fetch(runner, log, &c, id, &path);
                 Done::Got(got, path)
@@ -284,13 +307,34 @@ enum Done {
     Checked(Checked, Config),
     Trusted(Trusted, Config),
     Installed(Installed),
-    Listed(Result<Vec<ListEntry>, Checked>, Config),
+    /// The server's vaults, and what it holds as each one's key file.
+    Listed(Result<Vec<ListEntry>, Checked>, Config, Vec<KeyMark>),
     Got(Got, PathBuf),
     /// A saved vault version, and what its key file fetch did.
     #[cfg(feature = "security-key")]
     GotKey(Got, PathBuf, setup::KeyGot),
     Synced(Vec<Outcome>, Vec<PathBuf>),
     Restarted(Restarted),
+}
+/// What the server list shows of a vault's key file: asked in the
+/// security-key build only (spec §2.29 (sync)).
+#[cfg(feature = "security-key")]
+type KeyMark = setup::ServerKey;
+#[cfg(not(feature = "security-key"))]
+type KeyMark = ();
+#[cfg(feature = "security-key")]
+fn key_marks(
+    runner: &mut dyn Runner,
+    log: &Log,
+    c: &Config,
+    entries: &[ListEntry],
+) -> Vec<KeyMark> {
+    let ids: Vec<[u8; 16]> = entries.iter().map(|e| e.id).collect();
+    setup::server_keys(runner, log, c, &ids)
+}
+#[cfg(not(feature = "security-key"))]
+fn key_marks(_: &mut dyn Runner, _: &Log, _: &Config, entries: &[ListEntry]) -> Vec<KeyMark> {
+    vec![(); entries.len()]
 }
 struct Busy {
     seq: u32,
@@ -308,7 +352,8 @@ enum Ask {
     Key,
     Install(Config),
     Trust(Config, String),
-    /// Save a server version as a new file (suggested name).
+    /// "이 PC로 가져오기": the folder and name for the server's copy
+    /// (suggested: `vault.goyo` beside the exe when free).
     Fetch([u8; 16], PathBuf),
     /// Close with unsaved changes?
     Close,
@@ -392,6 +437,9 @@ struct Row {
     live: Live,
     /// The last "sync now" result, shown for a minute.
     result: Option<(Instant, Outcome)>,
+    /// What the sync folder says of the key file (security-key build).
+    #[cfg(feature = "security-key")]
+    key: crate::keys_gui::KeyLook,
 }
 
 struct App {
@@ -424,17 +472,12 @@ struct App {
     bad: Option<Field>,
     busy: Option<Busy>,
     seq: u32,
-    /// The server list, and the settings it came from (for the fetch).
+    /// The server list, what the server holds as each one's key file, and
+    /// the settings it came from (for the fetch).
     listing: Vec<ListEntry>,
+    listing_keys: Vec<KeyMark>,
     listed: Option<Config>,
     picked: Option<usize>,
-    /// "열쇠 파일도 받기" (security-key build; not stored in goyo-sync.conf).
-    #[cfg(feature = "security-key")]
-    fetch_key: bool,
-    /// The vaults the forced-command line names in `--key-sync` (security-
-    /// key build; shown only, not stored in goyo-sync.conf).
-    #[cfg(feature = "security-key")]
-    key_sync: Vec<[u8; 16]>,
     autostart_error: Option<i32>,
     system: Arc<dyn System>,
     runner: MakeRunner,
@@ -512,12 +555,9 @@ impl App {
             busy: None,
             seq: 0,
             listing: Vec::new(),
+            listing_keys: Vec::new(),
             listed: None,
             picked: None,
-            #[cfg(feature = "security-key")]
-            fetch_key: true,
-            #[cfg(feature = "security-key")]
-            key_sync: Vec::new(),
             autostart_error: None,
             system,
             runner,
@@ -814,7 +854,7 @@ impl App {
         let fetch_x = IX + IW - 168;
         self.button(
             FETCH,
-            "서버에서 받기…",
+            "이 PC로 가져오기…",
             (fetch_x, v + 10, 168, 34),
             theme::SECONDARY,
         );
@@ -830,25 +870,24 @@ impl App {
             (fetch_x - 208, v + 10, 96, 34),
             theme::SECONDARY,
         );
-        // The security-key build's row under the list: the key-file sync
-        // tick of the selected vault and the forced-command line.
+        // The security-key build's row under the list: where key-file sync
+        // is switched (goyo-vault), and the forced-command line.
         #[cfg(feature = "security-key")]
         let list_h = {
-            let label = crate::keys_gui::ALLOW;
-            let w = self.toggle_width(label);
-            let variant = if self.key_sync_selected() {
-                theme::TOGGLE_ON
-            } else {
-                theme::TOGGLE
-            };
-            self.button(KEY_SYNC_ALLOW, label, (IX, v + 166, w, 32), variant);
+            self.text(
+                0,
+                crate::keys_gui::LINE_NOTE,
+                (IX, v + 156, IW - 216, 36),
+                small,
+                TONE_MUTED,
+            );
             self.button(
                 KEY_LINE,
                 crate::keys_gui::LINE_BUTTON,
-                (IX + IW - 200, v + 166, 200, 32),
+                (IX + IW - 200, v + 158, 200, 32),
                 theme::SECONDARY,
             );
-            104
+            98
         };
         #[cfg(not(feature = "security-key"))]
         let list_h = 144;
@@ -973,28 +1012,21 @@ impl App {
     fn build_server(&mut self) {
         let (small, strong) = (Self::font(|t| t.small()), Self::font(|t| t.strong()));
         let bottom = client_height(self.advanced) - 16;
-        self.text(0, "서버에서 받기", (IX, S + 16, 300, 22), strong, TONE_TEXT);
         self.text(
             0,
-            "받을 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
+            "이 PC로 가져오기",
+            (IX, S + 16, 300, 22),
+            strong,
+            TONE_TEXT,
+        );
+        self.text(
+            0,
+            "가져올 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
             (IX, S + 44, IW, 18),
             small,
             TONE_MUTED,
         );
         let top = S + 72;
-        // "열쇠 파일도 받기" under the list (security-key build).
-        #[cfg(feature = "security-key")]
-        let bottom_list = {
-            let label = crate::keys_gui::fetch_key_label(self.fetch_key);
-            self.button(
-                FETCH_KEY,
-                label,
-                (IX, bottom - 70 - 40, 240, 34),
-                theme::SECONDARY,
-            );
-            bottom - 70 - 48
-        };
-        #[cfg(not(feature = "security-key"))]
         let bottom_list = bottom - 70;
         let list = self.list(SERVER_LIST, (IX, top, IW, bottom_list - top));
         for e in &self.listing {
@@ -1015,7 +1047,7 @@ impl App {
         self.show_rows();
         self.text(
             0,
-            "받은 파일은 고요 금고의 '백업에서 복원'으로 엽니다. 이 PC에서 동기화할 경로로 복원하세요.",
+            "고른 폴더에 금고 파일(vault.goyo)로 저장하고 동기화 목록에 넣습니다. 그다음 할 일은 가져온 뒤 알려 드립니다.",
             (IX, bottom - 58, IW - 272, 40),
             small,
             TONE_MUTED,
@@ -1028,7 +1060,7 @@ impl App {
         );
         self.button(
             TAKE,
-            "받기…",
+            "가져오기…",
             (IX + IW - 144, bottom - 58, 144, 40),
             theme::PRIMARY,
         );
@@ -1128,7 +1160,12 @@ impl App {
                 Some((file_name(&r.path), id))
             })
             .collect();
-        let server: Vec<RowView> = self.listing.iter().map(|e| server_view(e, &mine)).collect();
+        let server: Vec<RowView> = self
+            .listing
+            .iter()
+            .enumerate()
+            .map(|(i, e)| server_view(e, &mine, self.listing_keys.get(i)))
+            .collect();
         ROWS.with(|rows| {
             if let Ok(mut rows) = rows.try_borrow_mut() {
                 *rows = [vaults, server];
@@ -1200,15 +1237,13 @@ impl App {
                 HOST | REMOTE | PYTHON | IDENTITY | INTERVAL | TIMEOUT | VAULT_LIST | ADVANCED
                 | BROWSE_KEY | ADD | REMOVE | AUTOSTART | STOP | LOG => true,
                 #[cfg(feature = "security-key")]
-                KEY_SYNC_ALLOW | KEY_LINE => true,
+                KEY_LINE => true,
                 _ => false,
             },
             Screen::Log => matches!(id, CLOSE | REFRESH | LOG_VIEW | ESCAPE),
             Screen::Server => match id {
                 TAKE => idle,
                 SERVER_LIST | CLOSE | ESCAPE => true,
-                #[cfg(feature = "security-key")]
-                FETCH_KEY => true,
                 _ => false,
             },
         }
@@ -1237,8 +1272,6 @@ impl App {
             1 if id == VAULT_LIST => {
                 let i = unsafe { SendMessageW(self.handle(VAULT_LIST), 0x188, 0, 0) };
                 self.selected = (i >= 0).then_some(i as usize);
-                #[cfg(feature = "security-key")]
-                self.show_key_sync();
                 return None;
             }
             1 if id == SERVER_LIST => {
@@ -1284,31 +1317,16 @@ impl App {
                 None
             }
             BROWSE_KEY => Some(Ask::Key),
-            // The selected vault named in `--key-sync`, or no longer.
             #[cfg(feature = "security-key")]
-            KEY_SYNC_ALLOW => {
-                let Some(row) = self.selected.and_then(|i| self.rows.get(i)) else {
-                    self.set_run_note(Note::PickFirst);
-                    return None;
-                };
-                let Some(id) = crate::keys_gui::vault_id(&row.path) else {
-                    return Some(Ask::Tell(tr(crate::keys_gui::NO_ID).to_owned()));
-                };
-                match self.key_sync.iter().position(|x| *x == id) {
-                    Some(i) => {
-                        self.key_sync.remove(i);
-                    }
-                    None => self.key_sync.push(id),
-                }
-                self.show_key_sync();
-                None
+            KEY_LINE => {
+                // What the sync folders say now, not at the last tick.
+                self.refresh_rows();
+                Some(Ask::Tell(crate::keys_gui::forced_text(
+                    &self.fields.python,
+                    &self.fields.remote,
+                    &self.key_sync_named(),
+                )))
             }
-            #[cfg(feature = "security-key")]
-            KEY_LINE => Some(Ask::Tell(crate::keys_gui::forced_text(
-                &self.fields.python,
-                &self.fields.remote,
-                &self.key_sync_ids(),
-            ))),
             ADD => Some(Ask::Vault),
             REMOVE => {
                 match self.selected.filter(|i| *i < self.rows.len()) {
@@ -1386,75 +1404,75 @@ impl App {
                 let e = self.picked.and_then(|i| self.listing.get(i))?;
                 Some(Ask::Fetch(e.id, self.suggested(&e.id)))
             }
-            #[cfg(feature = "security-key")]
-            FETCH_KEY => {
-                self.fetch_key = !self.fetch_key;
-                unsafe {
-                    SetWindowTextW(
-                        self.handle(FETCH_KEY),
-                        wide(crate::keys_gui::fetch_key_label(self.fetch_key)).as_ptr(),
-                    );
-                    InvalidateRect(self.handle(FETCH_KEY), null(), 1);
-                }
-                None
-            }
             _ => None,
         }
     }
-    /// The selected vault is named in `--key-sync` (security-key build).
+    /// The vaults the forced-command line names (security-key build, spec
+    /// §2.29 (sync)): the listed ones that use key-file sync, in the
+    /// list's order, with their file names.
     #[cfg(feature = "security-key")]
-    fn key_sync_selected(&self) -> bool {
-        self.selected
-            .and_then(|i| self.rows.get(i))
-            .and_then(|r| crate::keys_gui::vault_id(&r.path))
-            .is_some_and(|id| self.key_sync.contains(&id))
-    }
-    /// The tick follows the selected vault.
-    #[cfg(feature = "security-key")]
-    fn show_key_sync(&self) {
-        let variant = if self.key_sync_selected() {
-            theme::TOGGLE_ON
-        } else {
-            theme::TOGGLE
-        };
-        let h = self.handle(KEY_SYNC_ALLOW);
-        if h != 0 {
-            unsafe {
-                SetWindowLongPtrW(h, -21, variant);
-                InvalidateRect(h, null(), 0);
+    fn key_sync_named(&self) -> Vec<crate::keys_gui::Named> {
+        let mut named: Vec<crate::keys_gui::Named> = Vec::new();
+        for row in &self.rows {
+            if let Some((id, server)) =
+                crate::keys_gui::uses_key_sync(&row.path, &row.key, row.live)
+                && !named.iter().any(|(n, ..)| *n == id)
+            {
+                named.push((id, file_name(&row.path), server));
             }
         }
+        named
     }
-    /// The IDs the line names: the ticked vaults still in the list, in the
-    /// list's order.
-    #[cfg(feature = "security-key")]
-    fn key_sync_ids(&self) -> Vec<[u8; 16]> {
-        let mut ids: Vec<[u8; 16]> = Vec::new();
-        for id in self
-            .rows
-            .iter()
-            .filter_map(|r| crate::keys_gui::vault_id(&r.path))
-        {
-            if self.key_sync.contains(&id) && !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        ids
-    }
-    /// A new file name for a fetched copy next to the exe.
+    /// Where "이 PC로 가져오기" suggests the copy: `vault.goyo` beside the
+    /// exe, which goyo-vault opens by default, when neither it nor its sync
+    /// folder is there; else `vault-<tag>.goyo` there.
     fn suggested(&self, id: &[u8; 16]) -> PathBuf {
         let tag = tag(id);
+        let free = |p: &PathBuf| {
+            !setup::present(p) && syncfile::sync_dir(p).is_none_or(|d| !setup::present(&d))
+        };
         (1..100)
             .map(|n| {
-                let name = if n == 1 {
-                    format!("from-server-{tag}.goyo")
-                } else {
-                    format!("from-server-{tag}-{n}.goyo")
+                let name = match n {
+                    1 => "vault.goyo".to_owned(),
+                    2 => format!("vault-{tag}.goyo"),
+                    n => format!("vault-{tag}-{n}.goyo"),
                 };
                 self.dir.join(name)
             })
-            .find(|p| !setup::present(p))
-            .unwrap_or_else(|| self.dir.join("from-server.goyo"))
+            .find(free)
+            .unwrap_or_else(|| self.dir.join("vault.goyo"))
+    }
+    /// After "이 PC로 가져오기" saved `path`: it joins the vault list as an
+    /// unsaved change, as '추가…' adds one. The message's two steps: the
+    /// list, and how goyo-vault reaches the vault (spec §2.29 (sync)).
+    fn take_in(&mut self, path: &Path) -> [String; 2] {
+        let listed = match setup::vault_problem(path, &self.fields.vaults) {
+            None => {
+                self.rows.push(Row::new(path));
+                self.fields.vaults.push(path.to_owned());
+                self.selected = Some(self.rows.len() - 1);
+                self.run_note = Note::Added;
+                self.bad = None;
+                self.build();
+                tr("goyo-sync의 동기화 목록에 넣었습니다. 이 창의 '저장하고 시작'을 누르면 이 PC에서도 동기화가 시작됩니다.").to_owned()
+            }
+            Some(why) => fill(
+                "동기화 목록에는 넣지 못했습니다: {} 필요하면 '추가…'로 넣으세요.",
+                &[&vault_why(why, Some(path))],
+            ),
+        };
+        // goyo-vault opens `vault.goyo` beside it unless goyo-vault.paths
+        // names other files.
+        let beside = |p: &Path| p.to_string_lossy().to_lowercase();
+        let direct = beside(path) == beside(&self.dir.join("vault.goyo"))
+            && !setup::present(&self.dir.join("goyo-vault.paths"));
+        let open = tr(if direct {
+            "고요 금고를 열면 이 금고로 바로 이어집니다."
+        } else {
+            "고요 금고의 '다른 위치에 있는 금고 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요."
+        });
+        [listed, open.to_owned()]
     }
     /// What a dialog answered.
     fn answered(&mut self, ask: Ask, answer: Answer) -> Option<Ask> {
@@ -1509,11 +1527,11 @@ impl App {
                 if setup::key_file(&path) {
                     self.set_server_note(Note::GotWrite);
                 } else if let Some(c) = self.listed.clone() {
+                    // The security-key build brings the server's key file
+                    // along when there is one.
                     #[cfg(feature = "security-key")]
-                    if self.fetch_key {
-                        self.start(Job::FetchKey(c, id, path));
-                        return None;
-                    }
+                    self.start(Job::FetchKey(c, id, path));
+                    #[cfg(not(feature = "security-key"))]
                     self.start(Job::Fetch(c, id, path));
                 }
                 None
@@ -1626,11 +1644,12 @@ impl App {
                 });
                 None
             }
-            Done::Listed(Ok(entries), c) => {
+            Done::Listed(Ok(entries), c, keys) => {
                 if entries.is_empty() {
                     self.set_server_note(Note::ServerEmpty);
                 } else {
                     self.listing = entries;
+                    self.listing_keys = keys;
                     self.listed = Some(c);
                     self.picked = Some(0);
                     self.server_note = Note::Intro;
@@ -1639,13 +1658,17 @@ impl App {
                 }
                 None
             }
-            Done::Listed(Err(checked), c) => self.checked(checked, &c),
+            Done::Listed(Err(checked), c, _) => self.checked(checked, &c),
             Done::Got(got, path) => match got {
                 Got::Saved { version, bytes } => {
+                    let [listed, open] = self.take_in(&path);
                     self.set_server_note(Note::Got { version, bytes });
-                    Some(Ask::Tell(fill(
-                        "서버 버전 {}({}바이트)을 다음 파일로 받았습니다:\n{}\n\n이렇게 여세요.\n1. 열쇠 파일(.goyokey)을 USB 등으로 이 PC에 옮깁니다.\n2. 고요 금고에서 '백업에서 복원'을 누르고 이 파일을 고릅니다.\n3. '복원할 새 파일'은 이 PC에서 동기화할 경로(예: GoyoVault 폴더의 vault.goyo)로 정합니다.\n4. 복원한 금고 파일을 여기서 '추가…'로 넣고 '저장하고 시작'을 누릅니다.\n\n처음 받는 사본은 서버를 믿는 것이니, 연 뒤 확인 코드를 첫 PC와 비교하세요.",
-                        &[&version, &bytes, &path.display()],
+                    Some(Ask::Tell(usb_text(
+                        version,
+                        bytes,
+                        &path,
+                        [&listed, &open],
+                        "",
                     )))
                 }
                 Got::Exists => {
@@ -1666,13 +1689,22 @@ impl App {
                 }
                 Got::Cancelled => None,
             },
-            // Only a saved vault version fetches its key file.
+            // Only a saved vault version fetches its key file (any other
+            // result comes back as `Got`).
             #[cfg(feature = "security-key")]
             Done::GotKey(got, path, key) => match got {
                 Got::Saved { version, bytes } => {
+                    let [listed, open] = self.take_in(&path);
                     self.set_server_note(Note::Got { version, bytes });
+                    let usb =
+                        |reason: &str| usb_text(version, bytes, &path, [&listed, &open], reason);
                     Some(Ask::Tell(crate::keys_gui::fetched(
-                        version, bytes, &path, &key,
+                        version,
+                        bytes,
+                        &path,
+                        &key,
+                        [&listed, &open],
+                        &usb,
                     )))
                 }
                 _ => None,
@@ -1731,6 +1763,11 @@ impl App {
                     )));
                 }
             }
+            // ssh ignored the dedicated key: how to fix its file.
+            Checked::Failed(t) if t.cause == Cause::KeyPermissions => {
+                self.set_server_note(Note::Trouble(t));
+                return Some(Ask::Tell(key_permissions_text(&self.fields.identity)));
+            }
             Checked::Failed(t) => self.set_server_note(Note::Trouble(t)),
             Checked::Cancelled => {}
         }
@@ -1765,6 +1802,10 @@ impl App {
         for row in &mut self.rows {
             let live = setup::live(&row.path, now);
             let expired = row.result.is_some_and(|(t, _)| t.elapsed() >= RESULT_SHOWN);
+            #[cfg(feature = "security-key")]
+            {
+                changed |= row.key.refresh(&row.path);
+            }
             if live != row.live || expired {
                 row.live = live;
                 if expired {
@@ -1937,7 +1978,9 @@ impl App {
                 let v = vault_top(self.advanced);
                 theme::text(
                     dc,
-                    tr("아직 동기화할 금고가 없습니다. '추가…'로 금고 파일(.goyo)을 고르세요."),
+                    tr(
+                        "아직 동기화할 금고가 없습니다. 이 PC의 금고는 '추가…'로 고르고, 다른 PC의 금고는 '이 PC로 가져오기…'로 가져오세요.",
+                    ),
                     &self.r(IX + 16, v + 52, IW - 32, 144),
                     small,
                     p.muted,
@@ -1975,7 +2018,7 @@ impl App {
                     Kind::Trust => "호스트 키를 저장하고 연결 확인 중… {}초",
                     Kind::Install => "서버에 설치하는 중… {}초",
                     Kind::List => "서버의 금고 목록을 받는 중… {}초",
-                    Kind::Fetch => "서버에서 금고를 받는 중… {}초",
+                    Kind::Fetch => "서버에서 금고를 가져오는 중… {}초",
                     Kind::Sync => "모든 금고를 지금 동기화하는 중… {}초",
                     Kind::Restart => "백그라운드 동기화를 다시 시작하는 중… {}초",
                 };
@@ -2016,12 +2059,12 @@ impl App {
             Note::ServerEmpty => muted("서버에 금고가 없습니다. 첫 PC의 고요 금고에서 동기화를 켜면 올라갑니다."),
             Note::Got { version, bytes } => (
                 fill(
-                    "서버 버전 {}({}바이트)을 받았습니다. 안내대로 고요 금고의 '백업에서 복원'으로 여세요.",
+                    "가져왔습니다(서버 버전 {}, {}바이트). 안내대로 '저장하고 시작'을 누르고 고요 금고를 여세요.",
                     &[version, bytes],
                 ),
                 TONE_TEXT,
             ),
-            Note::GotExists => danger(tr("이미 있는 파일입니다. 덮어쓰지 않으니 새 이름을 고르세요.").to_owned()),
+            Note::GotExists => danger(tr("그 이름의 파일이나 동기화 폴더가 이미 있습니다. 덮어쓰지 않으니 다른 폴더를 고르세요.").to_owned()),
             Note::GotMissing => danger(tr("서버에 그 금고가 없습니다.").to_owned()),
             Note::GotWrite => danger(tr("파일을 저장할 수 없습니다. 다른 폴더나 이름을 고르세요.").to_owned()),
             Note::Idle => muted(if self.saved.is_none() && self.fields.host.is_empty() {
@@ -2078,10 +2121,16 @@ impl Drop for App {
 }
 impl Row {
     fn new(path: &Path) -> Self {
+        #[cfg(feature = "security-key")]
+        let mut key = crate::keys_gui::KeyLook::default();
+        #[cfg(feature = "security-key")]
+        key.refresh(path);
         Self {
             path: path.to_owned(),
             live: setup::live(path, crate::now()),
             result: None,
+            #[cfg(feature = "security-key")]
+            key,
         }
     }
 }
@@ -2168,6 +2217,7 @@ fn vault_why(why: Why, path: Option<&Path>) -> String {
 }
 fn trouble_text(t: &Trouble, f: &Fields) -> String {
     match (t.state, t.cause) {
+        (_, Cause::KeyPermissions) => tr("전용 SSH 키 파일을 다른 계정도 읽을 수 있어 ssh가 그 키를 쓰지 않았습니다. 내 계정만 읽게 고친 뒤 '연결 확인'을 누르세요.").to_owned(),
         (_, Cause::ScriptMissing) => fill(
             "서버에 동기화 스크립트가 없습니다({}). '서버에 설치·업데이트'로 설치하세요.",
             &[&f.remote],
@@ -2203,6 +2253,57 @@ fn fingerprint_text(t: &Trusted, host: &str) -> String {
         ),
     }
 }
+/// What "이 PC로 가져오기" says when the key file comes by USB (spec §2.29
+/// (sync)): in the default build always, in the security-key build when the
+/// server's key file did not come along (`reason` says why, ending in a line
+/// break). `steps`: the list, and how goyo-vault reaches the vault
+/// ([`App::take_in`]).
+fn usb_text(version: u64, bytes: usize, path: &Path, steps: [&str; 2], reason: &str) -> String {
+    let [listed, open] = steps;
+    let folder = path
+        .parent()
+        .map_or_else(String::new, |p| p.display().to_string());
+    let key_name = path.with_extension("goyokey");
+    let key_name = key_name
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    fill(
+        "가져왔습니다: {}\n(서버 버전 {}, {}바이트)\n\n{}이 금고를 열려면 열쇠 파일이 필요합니다. 다른 PC의 열쇠 파일(.goyokey)을 USB로 복사해 이 폴더에 {} 이름으로 넣으세요:\n{}\n\n다음 순서:\n1. {}\n2. 열쇠 파일을 넣은 뒤 {}\n3. 처음 받는 사본은 서버를 믿는 것이니, 연 뒤 고요 금고 아래쪽 상태 줄의 '동기화됨 · 확인 코드 …'를 첫 PC의 것과 비교하세요.{}",
+        &[
+            &path.display(),
+            &version,
+            &bytes,
+            &reason,
+            &key_name,
+            &folder,
+            &listed,
+            &open,
+            &other_code(),
+        ],
+    )
+}
+/// The security-key build's second code, told apart from the sync check
+/// code of step 3.
+#[cfg(feature = "security-key")]
+fn other_code() -> String {
+    format!(
+        " {}",
+        tr("('열쇠 관리'의 열쇠 확인 코드와는 다른 코드입니다.)")
+    )
+}
+#[cfg(not(feature = "security-key"))]
+fn other_code() -> String {
+    String::new()
+}
+/// After a check that ssh refused to use the dedicated key with (spec §2.29
+/// (sync)): why goyo-sync stops, and the commands that let only this
+/// Windows account read the file.
+fn key_permissions_text(identity: &str) -> String {
+    fill(
+        "ssh가 전용 SSH 키 파일을 쓰지 않았습니다. 이 PC의 다른 계정도 그 파일을 읽을 수 있게 되어 있기 때문입니다(Windows OpenSSH: bad permissions). 그대로 두면 ssh가 다른 키로 접속해 서버의 강제 명령(동기화만 허용, 열쇠 파일 동기화 --key-sync)이 적용되지 않으므로, goyo-sync는 그 연결을 쓰지 않습니다.\n\nPowerShell에서 다음 두 줄로 고친 뒤 '연결 확인'을 다시 누르세요(상속된 권한을 지우고 내 계정만 남깁니다):\n\nicacls \"{}\" /inheritance:r\nicacls \"{}\" /grant:r \"$($env:USERNAME):F\"\n\n파일 속성 > 보안에서 내 계정 말고 다른 항목(Users, Everyone 등)이 남아 있으면 지우세요.",
+        &[&identity, &identity],
+    )
+}
 fn install_question(c: &Config) -> String {
     fill(
         "{} 서버에 동기화 스크립트를 설치하거나 업데이트합니다.\n\n서버 경로: {} (/로 시작하지 않으면 홈 폴더 기준)\n확인: 보낸 스크립트를 먼저 {} -I로 selftest하고, PASS일 때만 기존 스크립트와 바꿉니다.\n\n설치에는 평소의 ssh 로그인(기본 키나 ssh-agent)을 쓰고, '전용 키 파일'은 쓰지 않습니다. 전용 키는 서버에서 동기화 명령만 실행하도록 묶여 있을 수 있기 때문입니다. 계속할까요?",
@@ -2224,6 +2325,12 @@ fn row_view(row: &Row) -> RowView {
     let (state, tone) = match row.result.filter(|(t, _)| t.elapsed() < RESULT_SHOWN) {
         Some((_, outcome)) => outcome_text(&outcome, row.live),
         None => live_text(row.live),
+    };
+    // "… · 열쇠: 서버에 있음 / 서버에 없음 / 서버가 허용 안 함".
+    #[cfg(feature = "security-key")]
+    let state = {
+        let uses = crate::keys_gui::uses_key_sync(&row.path, &row.key, row.live).is_some();
+        crate::keys_gui::with_key(state, &row.key, uses)
     };
     RowView {
         title: file_name(&row.path),
@@ -2318,9 +2425,10 @@ fn outcome_text(outcome: &Outcome, live: Live) -> (String, Tone) {
         },
     }
 }
-/// A server row: tag and version, size and time, and which vault of this
-/// PC it is (by the vault ID the helper pinned for it).
-fn server_view(e: &ListEntry, mine: &[(String, [u8; 16])]) -> RowView {
+/// A server row: tag and version, size and time, which vault of this PC it
+/// is (by the vault ID the helper pinned for it), and in the security-key
+/// build whether the server holds its key file.
+fn server_view(e: &ListEntry, mine: &[(String, [u8; 16])], key: Option<&KeyMark>) -> RowView {
     let time = utc(e.mtime).replace('T', " ");
     let time = time.trim_end_matches('Z');
     let time = time.get(..16).unwrap_or(time);
@@ -2328,6 +2436,13 @@ fn server_view(e: &ListEntry, mine: &[(String, [u8; 16])]) -> RowView {
         Some((name, _)) => (fill("이 PC의 {}와 같은 금고", &[name]), Tone::Good),
         None => (fill("금고 ID {}", &[&syncfile::hex(&e.id)]), Tone::Muted),
     };
+    #[cfg(feature = "security-key")]
+    let state = match key.and_then(|k| crate::keys_gui::server_key(*k)) {
+        Some(held) => format!("{state} · {held}"),
+        None => state,
+    };
+    #[cfg(not(feature = "security-key"))]
+    let _ = key;
     RowView {
         title: fill("{} · 버전 {}", &[&tag(&e.id), &e.head]),
         detail: fill("{} KB · {} UTC 저장", &[&e.size.div_ceil(1024), &time]),
@@ -2393,7 +2508,13 @@ fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Option<T> {
 fn run_asks(h: Hwnd, mut next: Option<Ask>) {
     while let Some(ask) = next.take() {
         let answer = match &ask {
-            Ask::Vault | Ask::Key | Ask::Fetch(..) => Answer::Path(pick(h, &ask)),
+            Ask::Vault | Ask::Key | Ask::Fetch(..) => {
+                let picked = pick(h, &ask);
+                if picked.is_none() && pick_failed() {
+                    tell(h, tr(DIALOG_FAILED));
+                }
+                Answer::Path(picked)
+            }
             Ask::Install(c) => Answer::Yes(ask_yes(h, &install_question(c))),
             Ask::Trust(_, name) => Answer::Yes(ask_yes(h, &trust_question(name))),
             Ask::Close => Answer::Yes(ask_yes(
@@ -3099,6 +3220,18 @@ mod tests {
         w.wait();
         assert_eq!(w.app(|a| a.server_note.clone()), Note::CheckOk(0));
         assert_eq!(w.app(|a| a.bad), None);
+        // A file dialog that cannot open says so, and changes nothing; a
+        // cancel says nothing.
+        let before = w.app(|a| a.fields.vaults.clone());
+        told();
+        choose(None);
+        PICK_FAILS.with(|f| f.set(true));
+        w.click(ADD);
+        assert_eq!(told(), [tr(DIALOG_FAILED)]);
+        choose(None);
+        w.click(ADD);
+        assert!(told().is_empty());
+        assert_eq!(w.app(|a| a.fields.vaults.clone()), before);
         // Vaults: a key file is refused, a vault added, then removed.
         choose(Some(other.0.join("vault.goyokey")));
         w.click(ADD);
@@ -3175,43 +3308,122 @@ mod tests {
         assert_ne!(unsafe { IsWindow(w.h) }, 0);
     }
 
-    /// Spec v3 §7.12 (security-key build): "열쇠 파일 동기화 허용 (실험)"
-    /// ticks the selected vault, and [강제 명령 줄…] shows the line with the
-    /// ticked vaults' IDs in `--key-sync`, or none; a file that is no
-    /// synced vault cannot be ticked. Nothing of it is saved.
+    /// Spec v3 §7.12, §2.29 (sync) (security-key build): [강제 명령 줄…]
+    /// names in `--key-sync` exactly the listed vaults that use key-file
+    /// sync (a GOYOKS01 header, a key request of the app, a key file the
+    /// server holds, or `nokeys`), with their names, and none otherwise;
+    /// nothing in the window switches it, and nothing is saved.
     #[cfg(feature = "security-key")]
     #[test]
-    fn the_forced_command_line_names_the_ticked_vaults() {
+    fn the_forced_command_line_names_the_vaults_that_use_key_sync() {
+        use goyo_vault::syncfile::{KEY_REQUEST, KEY_VIEW, KeyView, render_key_view};
         let _korean = KoreanAfter::hold();
         i18n::set_english(false);
-        let w = Window::with("keyline", |dir| {
+        let header = |flags: u8| {
             let mut v = b"GOYOVA04".to_vec();
             v.extend([7u8; 16]);
             v.resize(200, 0);
-            std::fs::write(dir.join("vault.goyo"), v).unwrap()
+            v[64] = flags;
+            v
+        };
+        let w = Window::with("keyline", |dir| {
+            std::fs::write(dir.join("vault.goyo"), header(1)).unwrap()
         });
         let id = syncfile::hex(&[7u8; 16]);
-        // Nothing selected: nothing is ticked.
-        w.click(KEY_SYNC_ALLOW);
-        assert!(w.app(|a| a.key_sync.is_empty()));
-        w.app(|a| a.selected = Some(0));
-        w.click(KEY_SYNC_ALLOW);
-        assert_eq!(w.app(|a| a.key_sync.clone()), vec![[7u8; 16]]);
-        assert!(w.app(|a| a.key_sync_selected()));
-        w.click(KEY_LINE);
-        let shown = told();
-        assert_eq!(shown.len(), 1);
         let line = format!(
             "command=\"python3 -I .local/share/goyo-sync/goyo-sync-server.py serve --key-sync={id}\""
         );
-        assert!(shown[0].contains(&line), "{}", shown[0]);
-        assert!(shown[0].starts_with("restrict,") || shown[0].contains("\nrestrict,"));
-        // Unticked: the line names no vault.
-        w.click(KEY_SYNC_ALLOW);
-        w.click(KEY_LINE);
-        let shown = told();
-        assert!(!shown[0].contains("--key-sync="), "{}", shown[0]);
-        assert!(shown[0].contains("goyo-sync-server.py serve\" "));
+        let shown = || {
+            w.app(|a| a.refresh_rows());
+            w.click(KEY_LINE);
+            let shown = told();
+            assert_eq!(shown.len(), 1);
+            shown.into_iter().next().unwrap()
+        };
+        // A hardware vault that keeps its key file on its PCs: no vault.
+        let text = shown();
+        assert!(!text.contains("serve --key-sync="), "{text}");
+        assert!(text.contains("goyo-sync-server.py serve\" "));
+        assert!(text.contains("열쇠 파일 동기화 켜기…"));
+        // A new PC brings the vault first, then asks again.
+        assert!(
+            text.contains("새 PC라면: 먼저 '이 PC로 가져오기…'"),
+            "{text}"
+        );
+        // Its header says GOYOKS01 (key-file sync): named, with its name.
+        std::fs::write(w.t.0.join("vault.goyo"), header(3)).unwrap();
+        let text = shown();
+        assert!(text.contains(&line), "{text}");
+        assert!(text.contains("vault.goyo (0707-0707)"), "{text}");
+        assert!(text.contains("2분 안에"), "{text}");
+        assert!(text.starts_with("서버의 ~/.ssh/authorized_keys") && text.contains("\nrestrict,"));
+        // This PC's own vault file says so: not listed as the server's word.
+        assert!(!text.contains("서버 쪽 정보"), "{text}");
+        // Not yet in the header, but the app asked for key-file sync, or
+        // the server holds the vault's key file: named too.
+        std::fs::write(w.t.0.join("vault.goyo"), header(1)).unwrap();
+        let dir = w.t.0.join("vault.goyo.sync");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join(KEY_REQUEST), b"any request").unwrap();
+        assert!(shown().contains(&line));
+        std::fs::remove_file(dir.join(KEY_REQUEST)).unwrap();
+        assert!(!shown().contains("serve --key-sync="));
+        // The server's latest copy says another PC turned it on.
+        let mut incoming = syncfile::INCOMING_MAGIC.to_vec();
+        incoming.extend([0u8; 8]);
+        incoming.extend(header(3));
+        std::fs::write(dir.join(syncfile::INCOMING), &incoming).unwrap();
+        // Only the server's side says so: named, and listed apart for the
+        // user to check (an upload with a stolen sync key could say it).
+        let text = shown();
+        assert!(text.contains(&line), "{text}");
+        assert!(
+            text.contains("그중 vault.goyo (0707-0707)은(는) 서버 쪽 정보"),
+            "{text}"
+        );
+        std::fs::remove_file(dir.join(syncfile::INCOMING)).unwrap();
+        let state = syncfile::HelperState {
+            id: Some([7u8; 16]),
+            ..Default::default()
+        };
+        syncfile::replace_file(
+            &dir.join(syncfile::HELPER_STATE),
+            &syncfile::render_helper_state(&state),
+        )
+        .unwrap();
+        // `line` 1 alone (this PC's line has no --key-sync) names nothing.
+        let off = KeyView {
+            line: 1,
+            ..KeyView::default()
+        };
+        std::fs::write(dir.join(KEY_VIEW), render_key_view(&off)).unwrap();
+        assert!(!shown().contains("serve --key-sync="));
+        assert_eq!(
+            w.app(|a| a.rows[0].key.here),
+            crate::keys_gui::Here::NotAllowed
+        );
+        // A vault that keeps its key file on its PCs shows no "not
+        // allowed" mark for it.
+        let state = ROWS.with(|r| r.borrow()[0][0].state.clone());
+        assert!(!state.contains("허용 안 함"), "{state}");
+        // `nokeys` from the helper does.
+        syncfile::replace_file(
+            &dir.join(syncfile::STATUS),
+            &syncfile::render_status(crate::now(), crate::now(), SyncState::NoKeys),
+        )
+        .unwrap();
+        assert!(shown().contains(&line));
+        assert_eq!(
+            ROWS.with(|r| r.borrow()[0][0].state.clone()),
+            crate::keys_gui::no_keys()
+        );
+        // A file that is no synced vault is never named, whatever its
+        // byte 64 holds.
+        let mut unsynced = header(3);
+        unsynced[..8].copy_from_slice(b"GOYOVA03");
+        std::fs::write(w.t.0.join("vault.goyo"), unsynced).unwrap();
+        std::fs::remove_file(dir.join(syncfile::STATUS)).unwrap();
+        assert!(!shown().contains("serve --key-sync="));
         // A script path or Python command that could close the quoted
         // command (and reopen options after `restrict`) gives no line.
         for (python, remote) in [
@@ -3233,16 +3445,90 @@ mod tests {
                 "{python} {remote}"
             );
         }
-        w.app(|a| {
-            a.fields.python = "python3".to_owned();
-            a.fields.remote = ".local/share/goyo-sync/goyo-sync-server.py".to_owned();
-        });
-        // A file that is no synced vault has no ID to name.
-        std::fs::write(w.t.0.join("vault.goyo"), b"GOYOVA03 not synced at all").unwrap();
-        w.click(KEY_SYNC_ALLOW);
-        assert_eq!(told(), [tr(crate::keys_gui::NO_ID)]);
-        assert!(w.app(|a| a.key_sync.is_empty()));
         assert!(!w.t.0.join(crate::CONFIG).exists());
+    }
+
+    /// The key-file look of a vault row (security-key build, spec §2.29
+    /// (sync)): "… · 열쇠: 서버에 있음 / 서버에 없음 / 서버가 허용 안 함"
+    /// from its key view, read again only when the listing changed.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn vault_rows_show_where_the_key_file_is() {
+        use crate::keys_gui::{Here, KeyLook};
+        use goyo_vault::syncfile::{
+            KEY_VIEW, KeyView, RecordKind, render_key_view, render_record_header,
+        };
+        const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+        let id: [u8; 16] = KS[8..24].try_into().unwrap();
+        let epoch = u64::from_le_bytes(KS[24..32].try_into().unwrap());
+        let t = Temp::new("keylook");
+        let vault = t.0.join("vault.goyo");
+        std::fs::write(&vault, b"never read").unwrap();
+        let mut look = KeyLook::default();
+        assert!(!look.refresh(&vault));
+        assert_eq!(look.here, Here::Unknown);
+        let dir = t.0.join("vault.goyo.sync");
+        std::fs::create_dir(&dir).unwrap();
+        let state = syncfile::HelperState {
+            id: Some(id),
+            ..Default::default()
+        };
+        syncfile::replace_file(
+            &dir.join(syncfile::HELPER_STATE),
+            &syncfile::render_helper_state(&state),
+        )
+        .unwrap();
+        let mut record = render_record_header(RecordKind::Key, false, 0, epoch).to_vec();
+        record.extend_from_slice(KS);
+        for (view, here) in [
+            (
+                KeyView {
+                    seq: 2,
+                    record: record.clone(),
+                    ..KeyView::default()
+                },
+                Here::Held,
+            ),
+            (KeyView::default(), Here::Missing),
+            (
+                KeyView {
+                    line: 1,
+                    seq: 2,
+                    record: record.clone(),
+                    ..KeyView::default()
+                },
+                Here::NotAllowed,
+            ),
+        ] {
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(dir.join(KEY_VIEW), render_key_view(&view)).unwrap();
+            assert!(look.refresh(&vault));
+            assert_eq!(look.here, here);
+            assert!(!look.refresh(&vault), "read again without a change");
+        }
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        // A line without --key-sync is said only for a vault that uses
+        // key-file sync; for any other it is no problem.
+        assert_eq!(
+            crate::keys_gui::with_key("정상 · 서버 버전 3".into(), &look, true),
+            "정상 · 서버 버전 3 · 열쇠: 서버가 허용 안 함"
+        );
+        assert_eq!(
+            crate::keys_gui::with_key("정상 · 서버 버전 3".into(), &look, false),
+            "정상 · 서버 버전 3"
+        );
+        look.here = Here::Held;
+        assert_eq!(
+            crate::keys_gui::with_key("정상 · 서버 버전 3".into(), &look, true),
+            "정상 · 서버 버전 3 · 열쇠: 서버에 있음"
+        );
+        assert_eq!(
+            crate::keys_gui::with_key(crate::keys_gui::no_keys().into(), &look, true),
+            crate::keys_gui::no_keys()
+        );
+        look.here = Here::Unknown;
+        assert_eq!(crate::keys_gui::with_key("x".into(), &look, true), "x");
     }
 
     /// "Save and start", then closing the window at once: the process waits
@@ -3275,8 +3561,11 @@ mod tests {
 
     /// Install (asked first, sent without the dedicated key), the first
     /// connection (asked, one accept-new call, fingerprint shown), a
-    /// changed key (explained, never asked), and getting a vault from the
-    /// server into a new file.
+    /// changed key (explained, never asked), and "이 PC로 가져오기": the
+    /// server's vaults (with their key files in the security-key build),
+    /// the copy saved as `vault.goyo` beside the exe and put in the vault
+    /// list as an unsaved change, the next steps told, and a name that is
+    /// taken refused before any call.
     #[test]
     fn server_flows() {
         let _korean = KoreanAfter::hold();
@@ -3372,6 +3661,10 @@ mod tests {
             mtime: 1_800_000_000,
         };
         w.script.push(list_ok(&[entry]));
+        // The security-key build asks what the server holds as its key
+        // file: this PC's line does not allow it.
+        #[cfg(feature = "security-key")]
+        w.script.push(reply(Status::BadRequest, 0, b""));
         w.click(FETCH);
         w.wait();
         assert_eq!(w.app(|a| a.screen), Screen::Server);
@@ -3379,19 +3672,21 @@ mod tests {
             ROWS.with(|r| r.borrow()[1][0].title.clone()),
             "A7A7-A7A7 · 버전 4"
         );
+        #[cfg(feature = "security-key")]
+        assert!(
+            ROWS.with(|r| r.borrow()[1][0].state.clone())
+                .ends_with(" · 열쇠 파일: 이 PC 줄로는 확인 안 함")
+        );
         let mut blob = Vec::from(*b"GOYOVA02");
         blob.extend_from_slice(&id);
         blob.resize(160, 1);
+        // The suggestion: vault.goyo beside the exe, which goyo-vault opens.
+        let target = w.t.0.join("vault.goyo");
+        assert_eq!(w.app(|a| a.suggested(&id)), target);
         w.script.push(reply(Status::Ok, 4, &blob));
-        let target = w.t.0.join("from-server.goyo");
-        // "열쇠 파일도 받기" starts on in the security-key build; off, the
-        // fetch is the vault file alone (no GETKEY).
+        // The security-key build brings the key file along: none here.
         #[cfg(feature = "security-key")]
-        {
-            assert!(w.app(|a| a.fetch_key));
-            w.click(FETCH_KEY);
-            assert!(!w.app(|a| a.fetch_key));
-        }
+        w.script.push(reply(Status::Empty, 0, b""));
         choose(Some(target.clone()));
         w.click(TAKE);
         w.wait();
@@ -3404,7 +3699,55 @@ mod tests {
                 bytes: 160
             }
         );
-        assert!(told().iter().any(|t| t.contains("from-server.goyo")));
+        // In the vault list, as an unsaved change.
+        assert_eq!(
+            w.app(|a| a.fields.vaults.clone()),
+            std::slice::from_ref(&target)
+        );
+        assert_eq!(w.app(|a| a.run_note.clone()), Note::Added);
+        assert!(w.app(|a| a.dirty()));
+        let shown = told();
+        assert_eq!(shown.len(), 1);
+        for words in [
+            target.display().to_string().as_str(),
+            "vault.goyokey 이름으로 넣으세요",
+            "동기화 목록에 넣었습니다",
+            "'저장하고 시작'",
+            "고요 금고를 열면 이 금고로 바로 이어집니다.",
+        ] {
+            assert!(shown[0].contains(words), "{words}: {}", shown[0]);
+        }
+        #[cfg(feature = "security-key")]
+        assert!(shown[0].contains("서버에 이 금고의 열쇠 파일이 없습니다"));
+        // Taken names are refused before any call: the file, or a sync
+        // folder left under another name; the next suggestion is free.
+        w.script.push(list_ok(&[entry]));
+        #[cfg(feature = "security-key")]
+        w.script.push(reply(Status::Empty, 0, b""));
+        w.click(FETCH);
+        w.wait();
+        assert_eq!(w.app(|a| a.screen), Screen::Server);
+        let ran = w.script.ran().len();
+        let next = w.t.0.join("vault-A7A7-A7A7.goyo");
+        assert_eq!(w.app(|a| a.suggested(&id)), next);
+        std::fs::create_dir(w.t.0.join("vault-A7A7-A7A7.goyo.sync")).unwrap();
+        for taken in [target.clone(), next.clone()] {
+            w.app(|a| {
+                a.screen = Screen::Server;
+                a.build();
+            });
+            choose(Some(taken));
+            w.click(TAKE);
+            w.wait();
+            assert_eq!(w.app(|a| a.server_note.clone()), Note::GotExists);
+        }
+        assert_eq!(w.script.ran().len(), ran);
+        assert_eq!(
+            w.app(|a| a.suggested(&id)),
+            w.t.0.join("vault-A7A7-A7A7-3.goyo")
+        );
+        assert!(!next.exists());
+        assert!(told().is_empty());
         // The log view shows the log's last lines.
         std::fs::write(w.t.0.join(crate::LOG), "first\nlast line\n").unwrap();
         w.click(LOG);
@@ -3412,6 +3755,110 @@ mod tests {
         assert!(read_text(view).ends_with("last line"));
         w.click(CLOSE);
         assert_eq!(w.app(|a| a.screen), Screen::Main);
+    }
+
+    /// "이 PC로 가져오기" with the server's key file (security-key build,
+    /// spec §2.29 (sync)): the list says the server holds it, the vault
+    /// file and the key view (never a .goyokey) land in the chosen folder,
+    /// and the message leads to goyo-vault's "서버에서 가져온 금고" screen,
+    /// through '찾기' when goyo-vault would open other files.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn a_vault_and_its_key_file_come_to_this_pc() {
+        use goyo_vault::syncfile::{KEY_VIEW, RecordKind, parse_key_view, render_record_header};
+        const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+        let id: [u8; 16] = KS[8..24].try_into().unwrap();
+        let epoch = u64::from_le_bytes(KS[24..32].try_into().unwrap());
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let w = Window::new("takekey");
+        w.type_in(HOST, "my-server");
+        let entry = ListEntry {
+            id,
+            head: 7,
+            size: 200,
+            mtime: 1_800_000_000,
+        };
+        let mut record = render_record_header(RecordKind::Key, false, 0, epoch).to_vec();
+        record.extend_from_slice(KS);
+        let mut blob = Vec::from(*b"GOYOVA04");
+        blob.extend_from_slice(&id);
+        blob.resize(200, 0);
+        for (paths, folder) in [(false, "a"), (true, "b")] {
+            if paths {
+                std::fs::write(w.t.0.join("goyo-vault.paths"), "x\ny\n").unwrap();
+            }
+            w.script.push(list_ok(&[entry]));
+            w.script.push(reply(Status::Ok, 2, &record));
+            w.click(FETCH);
+            w.wait();
+            assert!(
+                ROWS.with(|r| r.borrow()[1][0].state.clone())
+                    .ends_with(" · 열쇠 파일: 서버에 있음")
+            );
+            let target = w.t.0.join(folder).join("vault.goyo");
+            std::fs::create_dir(target.parent().unwrap()).unwrap();
+            w.script.push(reply(Status::Ok, 7, &blob));
+            w.script.push(reply(Status::Ok, 2, &record));
+            choose(Some(target.clone()));
+            w.click(TAKE);
+            w.wait();
+            assert_eq!(std::fs::read(&target).unwrap(), blob);
+            let view =
+                std::fs::read(target.with_file_name("vault.goyo.sync").join(KEY_VIEW)).unwrap();
+            assert_eq!(parse_key_view(&view, &id).unwrap().record, record);
+            assert!(!target.with_extension("goyokey").exists());
+            assert!(w.app(|a| a.fields.vaults.contains(&target)));
+            let shown = told();
+            assert_eq!(shown.len(), 1);
+            for words in [
+                "서버의 열쇠 파일도 함께 · 아직 확인 전",
+                "'서버에서 가져온 금고' 화면이 이어서 안내합니다.",
+                "열쇠 확인 코드를 입력합니다",
+                "금고 옆에 vault.goyokey 이름으로 저장되고",
+                "'다른 위치에 있는 금고 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요.",
+            ] {
+                assert!(shown[0].contains(words), "{words}: {}", shown[0]);
+            }
+            assert!(!shown[0].contains("USB"), "{}", shown[0]);
+        }
+        // Beside the exe with no goyo-vault.paths: goyo-vault opens it.
+        std::fs::remove_file(w.t.0.join("goyo-vault.paths")).unwrap();
+        let beside = w.t.0.join("vault.goyo");
+        let [_, open] = w.app(|a| {
+            a.fields.vaults.clear();
+            a.rows.clear();
+            a.take_in(&beside)
+        });
+        assert_eq!(open, "고요 금고를 열면 이 금고로 바로 이어집니다.");
+    }
+
+    /// ssh ignored the dedicated key (spec §2.29 (sync)): the check names
+    /// the cause on its line and tells how to fix the file's permissions.
+    #[test]
+    fn an_ignored_dedicated_key_is_explained() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let w = Window::new("keyperm");
+        let key = w.t.0.join("goyo_sync");
+        std::fs::write(&key, b"not read").unwrap();
+        w.type_in(HOST, "my-server");
+        w.app(|a| a.fields.identity = key.to_string_lossy().into_owned());
+        let mut ignored = hello_ok().unwrap();
+        ignored.log = format!("Load key \"{}\": bad permissions\r\n", key.display()).into_bytes();
+        w.script.push(Ok(ignored));
+        w.click(CHECK);
+        w.wait();
+        let note = w.app(|a| a.server_note.clone());
+        assert!(
+            matches!(&note, Note::Trouble(t) if t.cause == Cause::KeyPermissions),
+            "{note:?}"
+        );
+        let shown = told();
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].contains(&format!("icacls \"{}\" /inheritance:r", key.display())));
+        assert!(shown[0].contains("/grant:r \"$($env:USERNAME):F\""));
+        assert_eq!(w.script.ran().len(), 1);
     }
 
     /// Commands, clicks and text sent from another thread change nothing,
@@ -3515,6 +3962,26 @@ mod tests {
             &syncfile::render_status(crate::now(), crate::now(), SyncState::Ok),
         )
         .unwrap();
+        // The security-key build's rows say where the key file is: this
+        // vault's is on the server.
+        #[cfg(feature = "security-key")]
+        {
+            use goyo_vault::syncfile::{
+                KEY_VIEW, KeyView, RecordKind, render_key_view, render_record_header,
+            };
+            const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+            let mut file = KS.to_vec();
+            file[8..24].copy_from_slice(&[0xA7; 16]);
+            let epoch = u64::from_le_bytes(KS[24..32].try_into().unwrap());
+            let mut record = render_record_header(RecordKind::Key, false, 0, epoch).to_vec();
+            record.extend_from_slice(&file);
+            let view = KeyView {
+                seq: 2,
+                record,
+                ..KeyView::default()
+            };
+            std::fs::write(dir.join(KEY_VIEW), render_key_view(&view)).unwrap();
+        }
         w.app(|a| {
             a.fields.host = "my-server".into();
             a.fields.vaults = vec![
@@ -3580,6 +4047,10 @@ mod tests {
                     mtime: 1_790_000_000,
                 },
             ];
+            #[cfg(feature = "security-key")]
+            {
+                a.listing_keys = vec![setup::ServerKey::Held, setup::ServerKey::NotAllowed];
+            }
             a.picked = Some(0);
             a.screen = Screen::Server;
             a.build();
@@ -3684,6 +4155,11 @@ mod tests {
             cause: Cause::PythonMissing,
             detail: String::new(),
         }));
+        notes.push(Note::Trouble(Trouble {
+            state: SyncState::Auth,
+            cause: Cause::KeyPermissions,
+            detail: crate::transport::KEY_IGNORED.into(),
+        }));
         for field in [
             Field::Host,
             Field::Remote,
@@ -3787,14 +4263,40 @@ mod tests {
             size: 8_388_608,
             mtime: 1_800_000_000,
         };
-        let v = server_view(
-            &entry,
-            &[("a-long-vault-file-name.goyo".into(), [0xA7; 16])],
-        );
+        let mine = [("a-long-vault-file-name.goyo".to_owned(), [0xA7; 16])];
+        let v = server_view(&entry, &mine, None);
         states.push((v.title, v.tone));
         states.push((v.detail, v.tone));
         states.push((v.state, v.tone));
-        states.push((server_view(&entry, &[]).state, Tone::Muted));
+        states.push((server_view(&entry, &[], None).state, Tone::Muted));
+        // The security-key build adds what the server holds as the key file
+        // to server rows, and to vault rows after their state.
+        #[cfg(feature = "security-key")]
+        {
+            use crate::keys_gui::{Here, KeyLook, with_key};
+            use setup::ServerKey;
+            for key in [ServerKey::Held, ServerKey::Missing, ServerKey::NotAllowed] {
+                states.push((server_view(&entry, &mine, Some(&key)).state, Tone::Good));
+                states.push((server_view(&entry, &[], Some(&key)).state, Tone::Muted));
+            }
+            let longest = [
+                state_text(SyncState::Idle, 0).0,
+                state_text(SyncState::Offline, 0).0,
+                state_text(SyncState::Ok, 123_456).0,
+                outcome_text(
+                    &report(SyncState::Ok, 9, None, Some(123_456)),
+                    Live::NotSetUp,
+                )
+                .0,
+            ];
+            for here in [Here::Held, Here::Missing, Here::NotAllowed] {
+                let mut look = KeyLook::default();
+                look.here = here;
+                for state in &longest {
+                    states.push((with_key(state.clone(), &look, true), Tone::Good));
+                }
+            }
+        }
         states
     }
     fn questions() -> Vec<String> {
@@ -3812,13 +4314,65 @@ mod tests {
             known: Known::Unclear,
             ..keys.clone()
         };
-        vec![
+        let path = Path::new(r"C:\Users\<you>\GoyoVault\vault.goyo");
+        let steps = [
+            tr(
+                "goyo-sync의 동기화 목록에 넣었습니다. 이 창의 '저장하고 시작'을 누르면 이 PC에서도 동기화가 시작됩니다.",
+            ),
+            tr(
+                "고요 금고의 '다른 위치에 있는 금고 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요.",
+            ),
+        ];
+        let failed = fill(
+            "동기화 목록에는 넣지 못했습니다: {} 필요하면 '추가…'로 넣으세요.",
+            &[&vault_why(Why::Config(Problem::TooManyVaults), None)],
+        );
+        #[allow(unused_mut)]
+        let mut all = vec![
             install_question(&c),
             trust_question("my-server"),
             fingerprint_text(&keys, "my-server"),
             fingerprint_text(&none, "my-server"),
             tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?").to_owned(),
-        ]
+            usb_text(4, 160, path, steps, ""),
+            usb_text(
+                4,
+                160,
+                path,
+                [&failed, tr("고요 금고를 열면 이 금고로 바로 이어집니다.")],
+                "",
+            ),
+            key_permissions_text(r"C:\Users\<you>\.ssh\goyo_sync"),
+        ];
+        #[cfg(feature = "security-key")]
+        {
+            use setup::KeyGot;
+            let usb = |reason: &str| usb_text(4, 160, path, steps, reason);
+            for key in [
+                KeyGot::Written,
+                KeyGot::NoKeys,
+                KeyGot::Empty,
+                KeyGot::BadAnswer,
+                KeyGot::WriteFailed,
+                KeyGot::Failed(String::new()),
+                KeyGot::Failed("Connection refused".into()),
+            ] {
+                all.push(crate::keys_gui::fetched(4, 160, path, &key, steps, &usb));
+            }
+            let named = [
+                ([0xA7; 16], "vault.goyo".to_owned(), false),
+                ([0xB3; 16], "vault-b3b3b3.goyo".to_owned(), true),
+            ];
+            for named in [&named[..1], &named[..], &[]] {
+                all.push(crate::keys_gui::forced_text(
+                    config::DEFAULT_PYTHON,
+                    config::DEFAULT_REMOTE,
+                    named,
+                ));
+            }
+            all.push(tr(crate::keys_gui::UNSAFE_LINE).to_owned());
+        }
+        all
     }
 
     /// Every label and button fits its box at this DPI in both languages,

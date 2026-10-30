@@ -2595,7 +2595,9 @@ fn small_helpers() {
 #[cfg(feature = "security-key")]
 pub(crate) mod keys {
     use super::*;
-    use crate::engine::{BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, VIEW_STUCK, key_gate};
+    use crate::engine::{
+        BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, LINE_RETRY, VIEW_STUCK, key_gate,
+    };
     use goyo_vault::{
         syncfile::{
             KEY_REQUEST, KEY_VIEW, KeyOp, KeyOutcome, KeyRequest, KeyView, PRUNE_REQUEST,
@@ -3488,10 +3490,12 @@ pub(crate) mod keys {
         );
     }
 
-    /// A line without key ops (S6-1 #18 and #20; §14.7-7): KR's answer has
-    /// outcome 4 and `line` 1; `nokeys` for a vault that uses key-file
-    /// sync; KR and KG go again only at start and every 10 minutes, and
-    /// P3-P5 keep running without a backoff.
+    /// A line without key ops (S6-1 #18 and #20; §14.7-7; spec §2.29
+    /// (sync)): KR's answer has outcome 4 and `line` 1; `nokeys` for a vault
+    /// that uses key-file sync; KR goes again at start, every two minutes
+    /// and at once when the app writes the request again, KG for a vault
+    /// that does not use key-file sync at start and every 10 minutes; P3-P5
+    /// keep running without a backoff.
     #[test]
     fn a_line_without_key_ops_shows_nokeys() {
         let pc = pinned();
@@ -3513,22 +3517,36 @@ pub(crate) mod keys {
             (1, Some(sha), KeyOutcome::NoKeyOps)
         );
         assert_eq!(pc.status().state, Some(SyncState::NoKeys));
-        // Polls go on; key ops wait for their 10 minutes.
-        for _ in 0..9 {
-            clock.advance(60);
+        // Polls go on; key ops wait for their two minutes.
+        assert_eq!(LINE_RETRY, 120);
+        for _ in 0..2 {
+            clock.advance(59);
             e.transport
                 .replies
                 .push_back(reply(Status::NotModified, 4, b""));
             assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 4, None, None));
         }
         assert_eq!(put_keys(&e).len(), 1);
-        clock.advance(60);
-        e.transport.replies.extend([
-            reply(Status::BadRequest, 0, b""),
-            reply(Status::NotModified, 4, b""),
-        ]);
+        clock.advance(2); // 120 s after the answer: KR's retry alone
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::BadRequest, 0, b""));
         e.pass(0, false);
         assert_eq!(put_keys(&e).len(), 2);
+        assert!(e.transport.replies.is_empty());
+        // The app writes the same request again (a retry): due and sent at
+        // once, before its two minutes.
+        clock.advance(5);
+        assert!(!e.due(0));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(pc.request(&KeyRequest::put(0, 0, &file)), sha);
+        assert!(e.due(0));
+        e.transport
+            .replies
+            .push_back(reply(Status::BadRequest, 0, b""));
+        assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 4, None, None));
+        assert_eq!(put_keys(&e).len(), 3);
         // The admin adds the vault to the line: the next start sends it.
         let mut e = pc.engine(
             mock([

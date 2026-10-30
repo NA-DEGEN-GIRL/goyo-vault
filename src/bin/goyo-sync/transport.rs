@@ -79,6 +79,12 @@ pub trait Transport {
     /// `beat` is called every 50 ms or so while the exchange runs, which can
     /// take minutes for a slow upload, so the caller can show it is alive.
     fn exchange(&mut self, request: &[u8], beat: &mut dyn FnMut()) -> Result<Output, Failure>;
+    /// The dedicated key the exchanges name (`-i`, IdentitiesOnly), if
+    /// any: then an exchange in which ssh ignored that key is refused (see
+    /// [`key_ignored`]).
+    fn dedicated_key(&self) -> Option<PathBuf> {
+        None
+    }
 }
 /// Sleeps up to the given time; true if the helper was asked to stop.
 pub type Wait = Box<dyn Fn(Duration) -> bool>;
@@ -365,6 +371,50 @@ impl Transport for SshTransport {
         out.log = log.read();
         Ok(out)
     }
+    fn dedicated_key(&self) -> Option<PathBuf> {
+        self.config.identity.clone()
+    }
+}
+
+/// The detail of an exchange refused because ssh ignored the dedicated key
+/// (spec §2.29 (sync)): goyo-sync.log and the settings window name it.
+pub const KEY_IGNORED: &str = "the dedicated SSH key was ignored: bad permissions";
+/// Whether ssh's own log says it ignored a private key file because others
+/// may read it (Windows OpenSSH: "UNPROTECTED PRIVATE KEY FILE", "Load
+/// key ...: bad permissions"). ssh then logs in with any other key it
+/// finds, which the server's forced command for the dedicated key does
+/// not bind, so goyo-sync does not use such an exchange. ssh says this
+/// before it connects, so no server can write it. Only a line that names
+/// `identity` counts: ssh also loads the IdentityFile lines of
+/// ~/.ssh/config for the host, and another key's loose permissions leave
+/// the dedicated key in use. A line whose file name cannot be read counts
+/// (the safe side).
+pub fn key_ignored(log: &[u8], identity: &Path) -> bool {
+    let text = String::from_utf8_lossy(log);
+    // Case and either slash, and a doubled backslash as ssh may print it.
+    let plain = |s: &str| {
+        let mut out = s.to_lowercase().replace('/', "\\");
+        while out.contains("\\\\") {
+            out = out.replace("\\\\", "\\");
+        }
+        out
+    };
+    let ours = plain(&identity.to_string_lossy());
+    let named = |line: &str, open: &str, close: char| {
+        let start = line.find(open)? + open.len();
+        let len = line[start..].find(close)?;
+        Some(plain(&line[start..start + len]))
+    };
+    own_lines(&text).iter().any(|l| {
+        let file = if l.contains("bad permissions") {
+            named(l, "Load key \"", '"')
+        } else if l.contains("are too open") {
+            named(l, "Permissions for '", '\'')
+        } else {
+            return false;
+        };
+        file.is_none_or(|f| f == ours)
+    })
 }
 
 /// The state for an exchange without a valid response frame (spec §9.8).

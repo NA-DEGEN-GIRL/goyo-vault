@@ -57,8 +57,8 @@ pub fn fill(ko: &str, args: &[&dyn Display]) -> String {
 pub const KEEP: &[&str] = &["맑은 고딕", "고요 금고 · Goyo Vault", "한국어"];
 pub const EN: &[(&str, &str)] = &[
     (
-        "'복원할 새 파일'과 같은 이름의 파일이 이미 있습니다. 다른 이름을 지정하세요.",
-        "A file with the 'Restore to' name already exists. Choose another name.",
+        "'되살린 금고를 저장할 새 위치'에 같은 이름의 파일이 이미 있습니다. 다른 이름을 지정하세요.",
+        "A file with that name already exists at 'New location for the restored vault'. Choose another name.",
     ),
     ("+ 새 항목", "+ New entry"),
     ("12자 이상의\n긴 문장", "12+ characters,\na long phrase"),
@@ -322,8 +322,16 @@ pub const EN: &[(&str, &str)] = &[
         "Locked automatically after a period of inactivity.",
     ),
     (
-        "백업 파일 · '찾기'로 선택",
-        "Backup file · choose it with 'Browse'",
+        "금고 백업 파일 (.goyo) · '찾기'로 선택",
+        "Vault backup file (.goyo) · choose it with 'Browse'",
+    ),
+    (
+        "그 백업을 만들 때 쓰던 열쇠 파일",
+        "The key file used when that backup was made",
+    ),
+    (
+        "'금고 백업'으로 만든 파일을 새 금고 파일로 되살립니다. 백업을 만들 때 쓰던 열쇠 파일(또는 '열쇠 백업')과 그때의 비밀번호가 필요합니다.",
+        "Brings a file made with 'Back up vault' back as a new vault file. It needs the key file used when the backup was made (or a 'Back up key' copy) and the password of that time.",
     ),
     ("백업에서 복원", "Restore from backup"),
     ("복사", "Copy"),
@@ -358,7 +366,10 @@ pub const EN: &[(&str, &str)] = &[
         "복원할 백업 파일을 '찾기'로 선택하세요.",
         "Choose the backup to restore with 'Browse'.",
     ),
-    ("복원할 새 파일", "Restore to (new file)"),
+    (
+        "되살린 금고를 저장할 새 위치",
+        "New location for the restored vault",
+    ),
     (
         "붙여넣기 실패: 길이 제한, 줄바꿈, 유니코드 형식 또는 클립보드 사용 상태를 확인하세요.",
         "Paste failed: check the length limit, line breaks, Unicode format or whether the clipboard is busy.",
@@ -518,6 +529,18 @@ pub const EN: &[(&str, &str)] = &[
     ("열림 · {} · {}", "Open · {} · {}"),
     ("열쇠 백업", "Back up key"),
     (
+        "열쇠 백업 · 열쇠 파일 사본, 금고와 다른 곳에",
+        "Key backup · kept apart from the vault",
+    ),
+    (
+        "금고 백업 저장 · 항목이 담긴 금고 파일의 사본 (열려면 열쇠 파일과 비밀번호도 필요)",
+        "Save vault backup · a copy of the vault file with your entries (it also needs the key file and password to open)",
+    ),
+    (
+        "열쇠 백업 저장 · 열쇠 파일의 사본, 금고와 다른 곳(USB 등)에 보관",
+        "Save key backup · a copy of the key file; keep it away from the vault (on a USB drive, for example)",
+    ),
+    (
         "열쇠 수정 번호가 한도에 닿았습니다. 새 금고를 만들어 항목을 옮기세요.",
         "The key file's change number has reached its limit. Create a new vault and move the entries there.",
     ),
@@ -547,8 +570,24 @@ pub const EN: &[(&str, &str)] = &[
         "The key file's removal record is full (480). No more security keys can be removed. Create a new vault and move the entries there.",
     ),
     (
-        "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요.",
-        "Key file not found. If it is on a USB stick or elsewhere, choose it with 'Browse'.",
+        "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요. 다른 PC에서 가져온 금고라면 그 PC의 열쇠 파일을 USB로 가져오세요.",
+        "Key file not found. If you keep it elsewhere (a USB drive, for example), choose it with 'Browse'. If this vault came from another PC, bring that PC's key file by USB.",
+    ),
+    (
+        "열쇠 파일 {name}이(가) 보이지 않습니다. USB 등에 두었다면 꽂은 뒤 여세요. 다른 곳에 있으면 '찾기'로 고르세요.",
+        "The key file {name} is not there. If you keep it on a USB drive, plug it in and open. If it is elsewhere, choose it with 'Browse'.",
+    ),
+    (
+        "열쇠 파일이 이 PC에 없습니다. 다른 PC에서 가져온 금고라면 그 PC의 열쇠 파일을 USB로 가져와 이 금고 옆에 {name} 이름으로 두세요.",
+        "The key file is not on this PC. If this vault came from another PC, bring that PC's key file by USB and put it next to this vault as {name}.",
+    ),
+    (
+        "열쇠 파일 · 이 경로에 없습니다",
+        "Key file · not at this path",
+    ),
+    (
+        "파일을 고르는 창을 열지 못했습니다. 경로에 쓸 수 없는 문자가 있거나 폴더에 접근할 수 없을 수 있습니다. 다시 하거나 다른 폴더를 고르세요.",
+        "The file dialog could not open. The path may hold characters it cannot take, or the folder may be out of reach. Try again or pick another folder.",
     ),
     (
         "열쇠 파일이 다른 곳에서 변경되었습니다. 잠근 뒤 다시 여세요.",
@@ -857,7 +896,10 @@ pub const EN: &[(&str, &str)] = &[
     ("항목을 삭제했습니다.", "Entry deleted."),
     ("항목을 선택하세요.", "Select an entry."),
     ("항목이 너무 깁니다.", "The entry is too long."),
-    ("현재 비밀번호", "Current password"),
+    (
+        "본인 확인: 현재 비밀번호",
+        "Verify it's you: current password",
+    ),
     (
         "현재 비밀번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다.",
         "Checks the current password, then encrypts the vault again with a new key.",
@@ -945,7 +987,7 @@ pub const EN: &[(&str, &str)] = &[
         "동기화할 금고 파일 · 최대 8개",
         "Vault files to sync · up to 8",
     ),
-    ("서버에서 받기…", "Get from server…"),
+    ("이 PC로 가져오기…", "Bring to this PC…"),
     ("빼기", "Remove"),
     ("추가…", "Add…"),
     (
@@ -963,19 +1005,56 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("새로 고침", "Refresh"),
     ("아직 로그가 없습니다.", "No log yet."),
-    ("서버에서 받기", "Get from server"),
+    ("이 PC로 가져오기", "Bring to this PC"),
     (
-        "받을 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
-        "Choose the vault to get. Its tag is the one your OTP app shows as 'Goyo Vault (tag)'.",
+        "가져올 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
+        "Choose the vault to bring. Its tag is the one your OTP app shows as 'Goyo Vault (tag)'.",
     ),
     (
-        "받은 파일은 고요 금고의 '백업에서 복원'으로 엽니다. 이 PC에서 동기화할 경로로 복원하세요.",
-        "Open the file with 'Restore from backup' in Goyo Vault, restoring it to the path this PC will sync.",
+        "고른 폴더에 금고 파일(vault.goyo)로 저장하고 동기화 목록에 넣습니다. 그다음 할 일은 가져온 뒤 알려 드립니다.",
+        "It is saved as a vault file (vault.goyo) in the folder you choose and added to the sync list. What to do next is shown once it is here.",
     ),
     ("받기…", "Get…"),
+    ("가져오기…", "Bring it here…"),
     (
-        "서버 버전 {}({}바이트)을 다음 파일로 받았습니다:\n{}\n\n이렇게 여세요.\n1. 열쇠 파일(.goyokey)을 USB 등으로 이 PC에 옮깁니다.\n2. 고요 금고에서 '백업에서 복원'을 누르고 이 파일을 고릅니다.\n3. '복원할 새 파일'은 이 PC에서 동기화할 경로(예: GoyoVault 폴더의 vault.goyo)로 정합니다.\n4. 복원한 금고 파일을 여기서 '추가…'로 넣고 '저장하고 시작'을 누릅니다.\n\n처음 받는 사본은 서버를 믿는 것이니, 연 뒤 확인 코드를 첫 PC와 비교하세요.",
-        "Got server version {} ({} bytes) as:\n{}\n\nOpen it like this:\n1. Bring the key file (.goyokey) to this PC, by USB for example.\n2. In Goyo Vault, press 'Restore from backup' and choose this file.\n3. Set 'Restore to (new file)' to the path this PC will sync (for example vault.goyo in the GoyoVault folder).\n4. Add the restored vault file here with 'Add…' and press 'Save and start'.\n\nA first copy from the server trusts the server: after opening it, compare the check code with the first PC.",
+        "고요 금고 (*.goyo)\0*.goyo\0모든 파일\0*.*\0",
+        "Goyo vault (*.goyo)\0*.goyo\0All files\0*.*\0",
+    ),
+    (
+        "가져올 폴더를 고르세요 · 금고는 그 폴더에 이 이름으로 저장됩니다",
+        "Choose the folder to bring it to · the vault is saved there under this name",
+    ),
+    (
+        "goyo-sync의 동기화 목록에 넣었습니다. 이 창의 '저장하고 시작'을 누르면 이 PC에서도 동기화가 시작됩니다.",
+        "It was added to goyo-sync's sync list. Press 'Save and start' in this window to start syncing it on this PC too.",
+    ),
+    (
+        "동기화 목록에는 넣지 못했습니다: {} 필요하면 '추가…'로 넣으세요.",
+        "It could not be added to the sync list: {} Add it with 'Add…' if needed.",
+    ),
+    (
+        "('열쇠 관리'의 열쇠 확인 코드와는 다른 코드입니다.)",
+        "(This is not the key check code of 'Key management'.)",
+    ),
+    (
+        "고요 금고를 열면 이 금고로 바로 이어집니다.",
+        "open Goyo Vault: it goes straight to this vault.",
+    ),
+    (
+        "고요 금고의 '다른 위치에 있는 금고 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요.",
+        "in Goyo Vault, choose this file with 'Open a vault from another location' (or 'Browse' on the login screen).",
+    ),
+    (
+        "전용 SSH 키 파일을 다른 계정도 읽을 수 있어 ssh가 그 키를 쓰지 않았습니다. 내 계정만 읽게 고친 뒤 '연결 확인'을 누르세요.",
+        "Other accounts can read the dedicated SSH key file, so ssh did not use that key. Let only your account read it, then press 'Check connection'.",
+    ),
+    (
+        "ssh가 전용 SSH 키 파일을 쓰지 않았습니다. 이 PC의 다른 계정도 그 파일을 읽을 수 있게 되어 있기 때문입니다(Windows OpenSSH: bad permissions). 그대로 두면 ssh가 다른 키로 접속해 서버의 강제 명령(동기화만 허용, 열쇠 파일 동기화 --key-sync)이 적용되지 않으므로, goyo-sync는 그 연결을 쓰지 않습니다.\n\nPowerShell에서 다음 두 줄로 고친 뒤 '연결 확인'을 다시 누르세요(상속된 권한을 지우고 내 계정만 남깁니다):\n\nicacls \"{}\" /inheritance:r\nicacls \"{}\" /grant:r \"$($env:USERNAME):F\"\n\n파일 속성 > 보안에서 내 계정 말고 다른 항목(Users, Everyone 등)이 남아 있으면 지우세요.",
+        "ssh did not use the dedicated SSH key file, because other accounts of this PC can read it (Windows OpenSSH: bad permissions). Left like that, ssh logs in with another key, outside the server's forced command (sync only, key-file sync --key-sync), so goyo-sync does not use that connection.\n\nFix it with these two lines in PowerShell, then press 'Check connection' again (they remove the inherited permissions and keep only your account):\n\nicacls \"{}\" /inheritance:r\nicacls \"{}\" /grant:r \"$($env:USERNAME):F\"\n\nIf the file's Properties > Security still lists anything but your account (Users, Everyone and so on), remove it.",
+    ),
+    (
+        "가져왔습니다: {}\n(서버 버전 {}, {}바이트)\n\n{}이 금고를 열려면 열쇠 파일이 필요합니다. 다른 PC의 열쇠 파일(.goyokey)을 USB로 복사해 이 폴더에 {} 이름으로 넣으세요:\n{}\n\n다음 순서:\n1. {}\n2. 열쇠 파일을 넣은 뒤 {}\n3. 처음 받는 사본은 서버를 믿는 것이니, 연 뒤 고요 금고 아래쪽 상태 줄의 '동기화됨 · 확인 코드 …'를 첫 PC의 것과 비교하세요.{}",
+        "Brought here: {}\n(server version {}, {} bytes)\n\n{}To open this vault you need its key file. Copy the key file (.goyokey) of another PC by USB into this folder, named {}:\n{}\n\nNext:\n1. {}\n2. Once the key file is there, {}\n3. A first copy from the server trusts the server: after opening it, compare 'Synced · check code …' on Goyo Vault's status line at the bottom with the first PC's.{}",
     ),
     (
         "서버 호스트 키가 이 PC의 known_hosts에 저장된 키와 다릅니다.\n\n누군가 연결을 가로채고 있을 수 있어 goyo-sync는 연결하지 않으며, 이 창에서는 새 키를 받아들이지 않습니다.\n\n서버를 다시 설치했거나 키를 바꾼 것이 확실할 때만: 서버에서 직접 지문을 확인하고(예: ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub), PowerShell에서 ssh-keygen -R {} 으로 예전 키를 지운 뒤 ssh {} 로 한 번 접속해 지문을 비교하세요.",
@@ -984,8 +1063,8 @@ pub const EN: &[(&str, &str)] = &[
     ("백그라운드 동기화 실행 중", "Background sync running"),
     ("백그라운드 동기화 꺼짐", "Background sync off"),
     (
-        "아직 동기화할 금고가 없습니다. '추가…'로 금고 파일(.goyo)을 고르세요.",
-        "No vault to sync yet. Choose a vault file (.goyo) with 'Add…'.",
+        "아직 동기화할 금고가 없습니다. 이 PC의 금고는 '추가…'로 고르고, 다른 PC의 금고는 '이 PC로 가져오기…'로 가져오세요.",
+        "No vault to sync yet. Choose a vault of this PC with 'Add…', or bring another PC's vault with 'Bring to this PC…'.",
     ),
     (
         "서버를 적고 '연결 확인'을 누르세요. 서버에 스크립트가 아직 없다면 먼저 '서버에 설치·업데이트'를 누르세요.",
@@ -1002,8 +1081,8 @@ pub const EN: &[(&str, &str)] = &[
         "Getting the server's vault list… {} s",
     ),
     (
-        "서버에서 금고를 받는 중… {}초",
-        "Getting the vault from the server… {} s",
+        "서버에서 금고를 가져오는 중… {}초",
+        "Bringing the vault from the server… {} s",
     ),
     (
         "모든 금고를 지금 동기화하는 중… {}초",
@@ -1058,12 +1137,12 @@ pub const EN: &[(&str, &str)] = &[
         "The server has no vaults yet. They appear once sync is on in Goyo Vault on the first PC.",
     ),
     (
-        "서버 버전 {}({}바이트)을 받았습니다. 안내대로 고요 금고의 '백업에서 복원'으로 여세요.",
-        "Got server version {} ({} bytes). Open it with 'Restore from backup' in Goyo Vault as described.",
+        "가져왔습니다(서버 버전 {}, {}바이트). 안내대로 '저장하고 시작'을 누르고 고요 금고를 여세요.",
+        "Brought here (server version {}, {} bytes). As described, press 'Save and start' and open Goyo Vault.",
     ),
     (
-        "이미 있는 파일입니다. 덮어쓰지 않으니 새 이름을 고르세요.",
-        "That file already exists and is never overwritten. Choose a new name.",
+        "그 이름의 파일이나 동기화 폴더가 이미 있습니다. 덮어쓰지 않으니 다른 폴더를 고르세요.",
+        "A file or sync folder of that name already exists and is never overwritten. Choose another folder.",
     ),
     (
         "서버에 그 금고가 없습니다.",
@@ -1661,8 +1740,8 @@ pub const EN: &[(&str, &str)] = &[
         "This changes the key: the vault is encrypted again with a new data key, and a new key file is written.\n• Afterwards the old key file and old password (or a removed security key) cannot open what you save from now on. Backups made before the change and older versions on the server still open with an old key copy.\n• Version 0.8 and older can no longer open this vault.\n• When it is done, back up the new key file.\n• This vault syncs. Other PCs stop syncing until they take this key file (by USB, with 'Receive a new key file'). Change the key on one PC at a time, and first update the server script and every PC (Goyo Vault and goyo-sync) to 0.9.0.\nContinue?",
     ),
     (
-        "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요? 예전 열쇠 백업으로는 앞으로 저장하는 내용을 열 수 없습니다.",
-        "The key file changed. Back up the new key file now? An old key backup cannot open what you save from now on.",
+        "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요?\n이제 금고를 여는 데 필요한 것은 이 새 열쇠 파일입니다. 예전 '열쇠 백업'으로는 앞으로 저장하는 항목을 열 수 없으니, 이 PC나 열쇠 파일을 잃을 때를 대비해 새 사본을 USB 등 금고와 다른 곳에 두세요.",
+        "The key file changed. Back up the new key file now?\nThe vault now opens with this new key file. An older key backup cannot open what you save from now on, so keep a new copy away from the vault (on a USB drive, for example) in case you lose this PC or the key file.",
     ),
     (
         "열쇠 파일을 저장했는지 확인하지 못했습니다. 잠그기 전에 새 열쇠 파일을 다른 저장장치에 저장하세요. 그 파일과 새 비밀번호(와 보안 키)로 이 금고를 열 수 있습니다.\n지금 저장할까요?",
@@ -1751,7 +1830,10 @@ pub const EN: &[(&str, &str)] = &[
     ("받을 열쇠 파일", "Key file to receive"),
     ("0.8 형식 열쇠 파일", "Key file in the 0.8 format"),
     ("열쇠 파일 수정 {epoch}", "Key file revision {epoch}"),
-    ("이 PC의 현재 비밀번호", "This PC's current password"),
+    (
+        "본인 확인: 이 PC의 현재 비밀번호",
+        "Verify it's you: this PC's current password",
+    ),
     ("열기", "Open"),
     (
         "받을 열쇠 파일의 비밀번호가 이 PC와 다르면 열 때 그 비밀번호를 묻습니다.",
@@ -1785,30 +1867,42 @@ pub const EN_SK: &[(&str, &str)] = &[
         "다른 PC의 열쇠 변경을 받았습니다. 열쇠 확인 코드 {code}",
         "Took another PC's key change. Key check code {code}",
     ),
-    (
-        "확인 전에는 이 열쇠 파일과 금고를 이 PC에 저장하지도 않습니다. 확인하면 저장할 곳을 묻습니다.",
-        "Until it is confirmed, this key file and the vault are not even saved on this PC. Once confirmed, you are asked where to save them.",
-    ),
-    (
-        "서버에서 받은 이 열쇠 파일은 이 PC가 확인한 것입니다. [확인]을 누르고 이 PC에 저장할 곳을 정하세요(동기화 폴더 밖).",
-        "This key file from the server is one this PC has confirmed. Press [OK] and choose where to save it on this PC (outside the sync folder).",
-    ),
-    (
-        "열쇠 파일과 금고를 이 PC에 저장했습니다. 이제 항목을 고치고 저장할 수 있습니다. '열쇠 백업'으로 열쇠 파일 사본도 따로 두세요.",
-        "The key file and the vault were saved on this PC. Entries can now be edited and saved. Keep a separate copy of the key file with 'Key backup' too.",
-    ),
+    ("확인 전에는 이 열쇠 파일과 금고를 이 PC에 저장하지도 않습니다. 확인하면 열쇠 파일을 금고 옆에 저장합니다.", "Until then, neither this key file nor the vault is saved on this PC. Once confirmed, the key file is saved next to the vault."),
+    ("서버에서 받은 이 열쇠 파일은 이 PC가 이미 확인했습니다. 남은 일은 이 PC에 저장하는 것뿐입니다. '저장하기'를 누르세요.", "This PC already confirmed this key file from the server. All that is left is saving it on this PC: press 'Save'."),
+    ("저장하기", "Save"),
+    ("서버에서 가져온 열쇠 파일 확인", "Confirm the key file from the server"),
+    ("열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화는 지금 잠갔다가 다시 열면 시작됩니다.", "Saved the key file to {path}. You can now edit and save entries, and from now on the vault opens with this key file. Lock now and open it again to start syncing with the server on this PC."),
+    ("열쇠 파일을 금고 옆에 저장합니다:\n{path}\n\n이 PC에서 금고를 열 때마다 이 열쇠 파일이 필요합니다. 다른 곳(USB 등)에 두려면 '다른 곳에 저장…'을 누르세요.", "The key file is saved next to the vault:\n{path}\n\nOpening the vault on this PC always needs this key file. To keep it elsewhere (on a USB drive, for example), press 'Save elsewhere…'."),
+    ("코드가 맞습니다. 이 열쇠 파일은 진짜입니다.", "The code matches: this key file is genuine."),
+    ("코드 없이 이 서버를 믿기로 했습니다. 이 열쇠 파일이 진짜인지는 확인하지 않았습니다.", "You chose to trust this server without a code. Whether this key file is genuine was not checked."),
+    ("이 PC가 이미 확인한 열쇠 파일입니다.", "This PC already confirmed this key file."),
+    ("여기에 저장", "Save here"),
+    ("다른 곳에 저장…", "Save elsewhere…"),
+    ("아직 저장하지 않았습니다. 준비되면 '코드 확인'을 다시 누르세요(코드는 그대로 둡니다).", "Not saved yet. When you are ready, press 'Check code' again (the code stays in its field)."),
+    ("저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '코드 확인'을 다시 누르고 '여기에 저장'을 고르세요.", "The dialog to choose where to save could not open. Nothing was saved. Press 'Check code' again and choose 'Save here'."),
+    ("아직 저장하지 않았습니다. 준비되면 '코드 없이 받기…'를 다시 누르거나, 다른 PC의 코드를 입력하고 '코드 확인'을 누르세요.", "Not saved yet. When you are ready, press 'Accept without a code…' again, or type another PC's code and press 'Check code'."),
+    ("아직 저장하지 않았습니다. 준비되면 '저장하기'를 다시 누르세요.", "Not saved yet. When you are ready, press 'Save' again."),
+    ("저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '코드 없이 받기…'를 다시 누르고 '여기에 저장'을 고르세요.", "The dialog to choose where to save could not open. Nothing was saved. Press 'Accept without a code…' again and choose 'Save here'."),
+    ("저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '저장하기'를 다시 누르고 '여기에 저장'을 고르세요.", "The dialog to choose where to save could not open. Nothing was saved. Press 'Save' again and choose 'Save here'."),
+    ("먼저 위의 확인을 끝내세요(다른 PC의 열쇠 확인 코드 입력, 또는 '저장하기'). 그 전에는 백업하거나 열쇠를 관리하지 않습니다.", "Finish the step above first (another PC's key check code, or 'Save'). Until then, nothing is backed up and the keys are not managed."),
+    ("동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일을 '다른 위치에 있는 금고 열기'로 고르면 '서버에서 가져온 금고' 화면이 안내합니다.", "That file in the sync folder is the key file received from the server (not confirmed yet), so it is not used here. Choose that vault file with 'Open a vault from another location', and the 'Vault brought from the server' screen guides you."),
+    ("이 열쇠 파일은 서버로 동기화됩니다. 다른 PC에서 비밀번호나 열쇠를 바꾸면 아래 열쇠 파일 줄에 [받기…]가 나타납니다. USB로 가져온 열쇠 파일을 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.", "This key file syncs through the server. When another PC changes the password or the keys, [Get…] appears on the key file line below. Do not copy a key file from a USB drive over this PC's key file."),
     (
         "열쇠 파일을 저장할 곳을 고르세요 (동기화 폴더 밖)",
         "Choose where to save the key file (outside the sync folder)",
     ),
-    (
-        "서버에서 받은 열쇠 파일 (확인 전) 쓰기",
-        "Use the key file from the server (unconfirmed)",
-    ),
-    (
-        "열쇠 파일로 서버에서 받은 열쇠 파일(확인 전)을 씁니다. 복원한 뒤 다른 PC의 열쇠 확인 코드를 입력하면 이 PC에 저장합니다.",
-        "The key file from the server (unconfirmed) is used as the key file. After the restore, enter another PC's key check code to save it on this PC.",
-    ),
+    ("서버에서 가져온 금고", "Vault brought from the server"),
+    ("goyo-sync가 서버에서 이 금고와 그 열쇠 파일을 가져왔습니다. 열쇠 파일은 아직 이 PC에 저장되지 않았고, 다른 PC의 코드로 확인하기 전에는 믿지 않습니다.\n{step}\n② 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력합니다.\n③ 열쇠 파일을 금고 옆에 {name}(으)로 저장합니다.", "goyo-sync brought this vault and its key file from the server. The key file is not saved on this PC yet and is not trusted until another PC's code confirms it.\n{step}\n② Type the key check code shown under 'Key management' on another PC.\n③ The key file is saved next to the vault as {name}."),
+    ("① 비밀번호를 입력하고 '다음'을 누른 뒤 보안 키를 터치합니다.", "① Type the password, press 'Next' and touch your security key."),
+    ("① 비밀번호를 입력하고 '다음'을 누릅니다.", "① Type the password and press 'Next'."),
+    ("서버에서 가져온 금고 파일", "Vault file from the server"),
+    ("다음 · 보안 키 터치", "Next · touch the security key"),
+    ("다음", "Next"),
+    ("열쇠 파일이 있으면 그것으로 열기", "Open with a key file I have"),
+    ("금고 옆에 열쇠 파일이 있습니다. 그 열쇠 파일로 여세요.", "There is a key file next to the vault. Open the vault with it."),
+    ("이 금고의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync에서 '이 PC로 가져오기'를 다시 하거나, 다른 PC의 열쇠 파일을 USB로 가져와 금고 옆에 두세요.", "This vault's sync folder holds no key file from the server. Run 'Bring to this PC' in goyo-sync again, or bring another PC's key file by USB and put it next to the vault."),
+    ("② 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 오른쪽 칸에 입력하세요.", "② Type the key check code shown under 'Key management' on another PC into the field on the right."),
+    ("서버에서 가져온 금고이고, 이 PC에 열쇠 파일이 아직 없습니다. 위 순서대로 여세요.", "This vault came from the server and this PC has no key file for it yet. Open it with the steps above."),
     (
         "서버의 새 열쇠 파일은 이 PC의 열쇠 파일에서 이어진 것이 아니어서 열지 않았습니다. 이 PC의 비밀번호와 보안 키로 연 뒤 '열쇠 관리'를 확인하세요. 그런 변경을 한 적이 없다면 서버의 열쇠 파일이 위조되었을 수 있습니다.",
         "The server's new key file does not follow from this PC's key file, so it was not opened. Open with this PC's password and security key, then check 'Key management'. If no such change was made, the server's key file may be forged.",
@@ -1838,12 +1932,12 @@ pub const EN_SK: &[(&str, &str)] = &[
         "The key file from the server does not match this PC's record of this vault's keys, so it was not opened. Open with this PC's key file (key backup), then take it in 'Key management'.",
     ),
     (
-        "이 금고 파일의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync의 '서버에서 받기…'에서 '열쇠 파일도 받기'를 켜고 다시 받으세요.",
-        "This vault file's sync folder has no key file from the server. In goyo-sync's 'Get from server…', turn 'Also get the key file' on and get it again.",
+        "이 금고 파일의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync의 '이 PC로 가져오기…'로 다시 가져오거나, 다른 PC의 열쇠 파일을 USB로 가져와 금고 옆에 두세요.",
+        "This vault file's sync folder holds no key file from the server. Bring it again with goyo-sync's 'Bring to this PC…', or bring another PC's key file by USB and put it next to the vault.",
     ),
     (
-        "서버에서 받은 열쇠 파일을 이 PC에 저장하기 전에는 항목을 고치거나 저장하지 않습니다. 위의 [확인]으로 저장할 곳을 정하세요.",
-        "Until the key file from the server is saved on this PC, entries are not edited or saved. Choose where to save it with [OK] above.",
+        "서버에서 받은 열쇠 파일을 이 PC에 저장하기 전에는 항목을 고치거나 저장하지 않습니다. 위 칸의 '코드 확인'(또는 '저장하기')으로 먼저 저장하세요.",
+        "Until the key file from the server is saved on this PC, entries are not edited or saved. Save it first with 'Check code' (or 'Save') above.",
     ),
     (
         "열쇠 파일은 동기화 폴더 밖에 저장하세요. 다른 곳을 고르세요.",
@@ -1854,28 +1948,20 @@ pub const EN_SK: &[(&str, &str)] = &[
         "A file with that name already exists. Choose another name.",
     ),
     (
-        "열쇠 파일도 받기: 켬",
-        "Also get the key file: on",
+        "가져왔습니다: {}\n(서버 버전 {}, {}바이트, 서버의 열쇠 파일도 함께 · 아직 확인 전)\n\n다음 순서:\n1. {}\n2. {} '서버에서 가져온 금고' 화면이 이어서 안내합니다.\n3. 비밀번호와 보안 키로 연 뒤, 다른 PC의 고요 금고 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력합니다.\n4. 코드가 맞으면 열쇠 파일이 금고 옆에 {} 이름으로 저장되고, 그때부터 평소처럼 열립니다.",
+        "Brought here: {}\n(server version {}, {} bytes, with the server's key file · not confirmed yet)\n\nNext:\n1. {}\n2. Then {} The 'Vault brought from the server' screen guides you from there.\n3. Open it with the password and a security key, then enter the key check code that Goyo Vault's 'Key management' shows on another PC.\n4. If the code matches, the key file is saved next to the vault as {}, and from then on it opens as usual.",
     ),
     (
-        "열쇠 파일도 받기: 끔",
-        "Also get the key file: off",
+        "이 PC의 서버 줄이 열쇠 파일 요청을 허용하지 않아 서버에 이 금고의 열쇠 파일이 있는지 알 수 없습니다. 있다면 '강제 명령 줄…'의 줄을 서버에 넣고 '저장하고 시작'을 누르세요. 금고 목록에 '열쇠: 서버에 있음'이 보이면 고요 금고를 다시 열거나 '찾기'로 이 파일을 다시 고르세요. '서버에서 가져온 금고' 화면이 이어서 안내합니다. 아니면:\n",
+        "This PC's server line does not allow key file requests, so whether the server holds this vault's key file is unknown. If it does, put the line of 'Forced command line…' on the server and press 'Save and start'. Once the vault list shows 'key: on the server', open Goyo Vault again or choose this file again with 'Browse': the 'Vault brought from the server' screen guides you on. Otherwise:\n",
     ),
     (
-        "서버 버전 {}({}바이트)을 다음 파일로 받았습니다:\n{}\n\n서버의 열쇠 파일도 그 옆 동기화 폴더에 받았습니다(아직 확인 전).\n이렇게 여세요.\n1. 고요 금고(보안 키 빌드)에서 '백업에서 복원'을 누르고 이 파일을 고릅니다.\n2. '서버에서 받은 열쇠 파일 (확인 전) 쓰기'를 누르고, '복원할 새 파일'을 이 PC에서 동기화할 경로로 정한 뒤 비밀번호와 보안 키로 엽니다.\n3. 다른 PC의 '열쇠 관리'에 지금 보이는 열쇠 확인 코드를 입력하고, 열쇠 파일을 저장할 곳(동기화 폴더 밖)을 고릅니다.\n4. 복원한 금고 파일을 여기서 '추가…'로 넣고 '저장하고 시작'을 누릅니다.",
-        "Server version {} ({} bytes) was saved as:\n{}\n\nThe server's key file was saved too, in the sync folder next to it (not confirmed yet).\nOpen it like this:\n1. In Goyo Vault (security-key build), press 'Restore from backup' and choose this file.\n2. Press 'Use the key file from the server (unconfirmed)', set 'Restore to' to the path this PC will sync, and open with the password and a security key.\n3. Enter the key check code another PC's 'Key management' shows now, and choose where to save the key file (outside the sync folder).\n4. Add the restored vault file here with 'Add…' and press 'Save and start'.",
+        "서버에 이 금고의 열쇠 파일이 없습니다(이 금고는 열쇠 파일을 PC에만 둡니다).\n",
+        "The server holds no key file of this vault (this vault keeps its key file on PCs only).\n",
     ),
     (
-        "금고 파일은 저장했습니다. 이 PC의 서버 연결은 이 금고의 열쇠 파일 요청을 받지 않습니다(서버 강제 명령에 --key-sync=<금고 ID> 없음). 열쇠 파일은 다른 PC에서 USB로 복사하세요.",
-        "The vault file was saved. This PC's server connection does not accept key file requests for this vault (no --key-sync=<vault ID> in the forced command). Copy the key file from another PC by USB.",
-    ),
-    (
-        "금고 파일은 저장했습니다. 서버에 이 금고의 열쇠 파일이 없습니다(열쇠 파일 동기화를 쓰지 않거나 껐음). 열쇠 파일은 다른 PC에서 USB로 복사하세요.",
-        "The vault file was saved. The server has no key file of this vault (key-file sync is not used or was turned off). Copy the key file from another PC by USB.",
-    ),
-    (
-        "금고 파일은 저장했습니다. 열쇠 파일은 받지 못했습니다({reason}). 열쇠 파일은 다른 PC에서 USB로 복사하세요.",
-        "The vault file was saved. The key file could not be received ({reason}). Copy the key file from another PC by USB.",
+        "서버의 열쇠 파일은 받지 못했습니다({}).\n",
+        "The server's key file did not come ({}).\n",
     ),
     (
         "서버 응답 형식",
@@ -1885,10 +1971,38 @@ pub const EN_SK: &[(&str, &str)] = &[
         "파일 쓰기",
         "writing the file",
     ),
+    (
+        "연결",
+        "the connection",
+    ),
     // goyo-sync's window (bin/goyo-sync/keys_gui.rs).
     (
-        "서버에서 열쇠 파일 동기화 꺼짐",
-        "Key-file sync off on the server",
+        "열쇠: 서버가 허용 안 함 · '강제 명령 줄…'의 줄로 바꾸세요",
+        "key: not allowed by the server · use the 'Forced command line…' line",
+    ),
+    (
+        "열쇠: 서버에 있음",
+        "key: on the server",
+    ),
+    (
+        "열쇠: 서버에 없음",
+        "key: not on the server",
+    ),
+    (
+        "열쇠: 서버가 허용 안 함",
+        "key: not allowed by the server",
+    ),
+    (
+        "열쇠 파일: 서버에 있음",
+        "key file: on the server",
+    ),
+    (
+        "열쇠 파일: 서버에 없음 (USB로)",
+        "key file: not on the server (by USB)",
+    ),
+    (
+        "열쇠 파일: 이 PC 줄로는 확인 안 함",
+        "key file: not checked with this PC's line",
     ),
     (
         "이 열쇠 파일을 열 수 있는 보안 키가 보안 키 {n} 하나뿐입니다(나머지는 일시 정지). 이 키를 잃으면 이 금고를 열 수 없습니다. 다른 키와 '짝 맺기'를 하세요.",
@@ -2147,8 +2261,11 @@ pub const EN_SK: &[(&str, &str)] = &[
         "확인할 다른 PC가 없으면 이 열쇠 파일이 진짜인지 확인할 방법이 없습니다.\n잃어버린 보안 키와 그 PIN, 비밀번호를 가진 사람이 서버를 장악했다면 위조된 열쇠 파일일 수 있습니다(보안 키를 뺄 때 비밀번호도 바꿨다면 위조 파일은 새 비밀번호로 열리지 않습니다). 그래도 이 열쇠 파일을 믿고 쓸까요?",
         "Without another PC to check against, there is no way to tell whether this key file is genuine.\nIf someone with a lost security key, its PIN and the password took over the server, it may be forged (if the password was changed when the key was removed, a forged file does not open with the new password). Trust and use this key file anyway?",
     ),
-    ("다른 PC의 열쇠 확인 코드", "Key check code of the other PC"),
-    ("다른 PC가 없습니다…", "There is no other PC…"),
+    ("다른 PC의 열쇠 확인 코드 (예: E7 · 1A2B-3C4D-5E6F-7A8B)", "Another PC's key check code (e.g. E7 · 1A2B-3C4D-5E6F-7A8B)"),
+    ("코드 확인", "Check code"),
+    ("코드 없이 받기 (이 서버를 믿음)…", "Accept without a code (trust this server)…"),
+    ("코드 없이 이 열쇠 파일 믿기…", "Trust this key file without a code…"),
+    ("다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 위 칸에 입력한 뒤 '코드 확인'을 누르세요.", "Type the key check code shown under 'Key management' on another PC into the field above, then press 'Check code'."),
     ("잠그기", "Lock"),
     (
         "이 열쇠 파일을 확인했습니다. 이제 항목을 고치고 저장할 수 있습니다.",
@@ -2661,6 +2778,7 @@ pub const EN_SK: &[(&str, &str)] = &[
         "열쇠 확인 코드: {code}. 다른 PC는 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력하고, 제거를 받을 때는 잃어버린 키를 고릅니다. 모든 PC가 받아야 열쇠 변경이 끝난 것입니다.",
         "Key check code: {code}. Other PCs enter this code when they take a security key addition or a settings change, and pick the lost keys when they take a removal. The key change is finished once every PC has taken it.",
     ),
+    ("열쇠 확인 코드:\n{code}\n\n다른 PC가 이 변경을 받을 때 이 코드가 필요합니다. 휴대폰으로 찍어 두세요. 이 코드는 '열쇠 관리'에도 계속 보입니다.", "Key check code:\n{code}\n\nOther PCs need this code to take this change. Take a photo of it with your phone. It also stays on the 'Key management' screen."),
     (
         "터치할 키: 보안 키 {list}",
         "Key to touch: security key {list}",
@@ -2739,12 +2857,9 @@ pub const EN_SK: &[(&str, &str)] = &[
         "서버의 열쇠 파일은 이 PC가 받거나 합칠 수 있는 파일이 아닙니다. 다른 PC에서 바꾼 것이 맞다면 그 PC의 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요.",
         "The server's key file is not one this PC can take or join. If another PC really changed it, bring that PC's key file by USB and take it with 'Receive a new key file'.",
     ),
-    ("열쇠 파일 동기화: 꺼짐", "Key-file sync: off"),
-    ("열쇠 파일 동기화: 켜짐", "Key-file sync: on"),
-    (
-        "열쇠 파일 동기화: 켜짐 · 서버에 없음",
-        "Key-file sync: on · not on the server",
-    ),
+    ("열쇠 파일: 이 PC에만 보관 (다른 PC에는 USB로)", "Key file: kept on this PC only (other PCs get it by USB)"),
+    ("열쇠 파일: 서버로 동기화 (실험)", "Key file: synced through the server (experimental)"),
+    ("열쇠 파일: 서버로 동기화 (실험) · 서버에 없음", "Key file: synced through the server (experimental) · not on the server"),
     (
         "서버에 새 열쇠 파일 있음 (수정 {e})",
         "A new key file is on the server (revision {e})",
@@ -2900,10 +3015,7 @@ If the server answers this way for a vault that used key-file sync, the server s
         "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.",
         "A key file changed on another PC (revision {e}) is on the server. Press [Get…] in 'Key management'.",
     ),
-    (
-        "서버가 열쇠 파일 동기화를 받지 않습니다(강제 명령에 --key-sync 없음). docs/SECURITY_KEY.md를 보세요.",
-        "The server does not accept key-file sync (no --key-sync in the forced command). See docs/SECURITY_KEY.md.",
-    ),
+    ("서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정의 '강제 명령 줄…'이 만든 줄로 바꾸면 goyo-sync가 2분 안에 다시 확인합니다.", "The server does not take key-file sync for this vault: this PC's line in the server's authorized_keys (the forced command) lacks --key-sync=<vault ID>. Replace it with the line goyo-sync's 'Forced command line…' makes, and goyo-sync checks again within two minutes."),
     (
         "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.",
         "goyo-sync or the server did not accept this PC's key file (format or size). Meanwhile this PC's vault is not uploaded. Update goyo-sync and the server script to the same version. After the update, it is uploaded again when goyo-sync restarts or you press 'Sync now'.",
@@ -3007,31 +3119,31 @@ If the server answers this way for a vault that used key-file sync, the server s
         "The script path or the Python command in Advanced settings has characters that cannot go in the forced command line, so no line was made. Fix those two fields and press it again.",
     ),
     (
-        "열쇠 파일 동기화 허용 (실험)",
-        "Allow key-file sync (experimental)",
-    ),
-    (
         "강제 명령 줄…",
         "Forced command line…",
     ),
     (
-        "이 파일에서 금고 ID를 읽을 수 없습니다. 동기화를 켠 고요 금고 파일만 열쇠 파일 동기화에 넣을 수 있습니다.",
-        "No vault ID can be read from this file. Only a Goyo vault file with sync on can be named for key-file sync.",
+        "열쇠 파일 동기화(실험)는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.",
+        "Key-file sync (experimental) is turned on in Goyo Vault's 'Key management'. A vault with it on must also be in this PC's line on the server.",
     ),
     (
         "restrict,command=\"{}\" <이 PC 전용 키의 공개 키> goyo-sync",
         "restrict,command=\"{}\" <public key of this PC's dedicated key> goyo-sync",
     ),
     (
-        "열쇠 파일 동기화를 허용한 금고가 없어 --key-sync 없는 줄입니다. 열쇠 파일 동기화를 쓸 금고를 목록에서 고르고 '열쇠 파일 동기화 허용 (실험)'을 켜세요.",
-        "No vault allows key-file sync, so the line has no --key-sync. Select the vault that uses key-file sync in the list and turn on 'Allow key-file sync (experimental)'.",
+        "목록에 열쇠 파일 동기화를 쓰는 금고가 없어 --key-sync가 없는 줄입니다.\n· 새 PC라면: 먼저 '이 PC로 가져오기…'로 금고를 가져온 뒤 이 버튼을 다시 누르세요. 다른 PC에서 열쇠 파일 동기화를 켠 금고는 그때 줄에 들어갑니다.\n· 이 PC의 금고라면: 고요 금고의 '열쇠 관리 > 열쇠 파일 동기화 켜기…'에서 켠 뒤 이 버튼을 다시 누르세요.",
+        "No listed vault uses key-file sync, so the line has no --key-sync.\n· On a new PC: first bring the vault with 'Bring to this PC…', then press this button again. A vault another PC turned key-file sync on for goes into the line then.\n· For a vault of this PC: turn it on in Goyo Vault under 'Key management > Turn key-file sync on…', then press this button again.",
     ),
     (
-        "열쇠 파일 동기화를 쓰는 금고만 넣으세요. 금고 ID는 그 금고에서 열쇠 파일 동기화를 켜기 직전에 그 금고를 쓰는 모든 PC의 줄에 넣고, 끈 뒤 모든 PC가 받았으면 모든 PC의 줄에서 빼세요. 줄에 이름이 있는 금고는 꺼져 있어도 서버에 열쇠 기록이 남아, 그 줄의 동기화 키를 훔친 사람이 업로드를 막을 수 있습니다.",
-        "Name only vaults that use key-file sync. Add a vault's ID to the line of every PC that uses it just before turning key-file sync on there, and once it is turned off and every PC took that, remove it from every PC's line. For a vault named in a line the server keeps a key record even while it is off, so whoever steals that line's sync key can block its uploads.",
+        "그중 {}은(는) 서버 쪽 정보(서버 사본이나 서버의 열쇠 파일)만 보고 넣었습니다. 이 PC나 다른 PC에서 직접 열쇠 파일 동기화를 켠 금고가 맞는지 확인하고, 아니면 그 ID를 줄에서 빼세요.",
+        "Of these, {} went in only on the server side's word (the server's copy or key file). Check that key-file sync was really turned on for it, on this PC or another; if not, remove its ID from the line.",
     ),
     (
-        "서버의 ~/.ssh/authorized_keys에서 이 PC 전용 키의 줄을 다음처럼 쓰세요. 공개 키 자리에는 그 키의 .pub 파일 내용을 넣습니다. 이 창에서 Ctrl+C를 누르면 창의 글 전체가 복사되니, authorized_keys에는 restrict,command=로 시작하는 그 한 줄만 남기세요.\n\n{}\n\n{}",
-        "In ~/.ssh/authorized_keys on the server, write the line of this PC's dedicated key like this. In place of the public key put the content of that key's .pub file. Ctrl+C in this window copies all of its text, so keep only the one line that starts with restrict,command= in authorized_keys.\n\n{}\n\n{}",
+        "열쇠 파일 동기화를 쓰는 금고를 자동으로 넣었습니다: {}. 그 금고를 쓰는 모든 PC의 줄에 같은 금고 ID가 있어야 합니다. 줄을 바꾸면 goyo-sync가 2분 안에 다시 확인합니다(바로 확인하려면 '저장하고 시작'). 열쇠 파일 동기화를 끄고 모든 PC가 받았으면 그 ID를 줄에서 빼세요: 줄에 남은 금고는 이 PC의 동기화 키를 훔친 사람이 업로드를 막을 수 있습니다.",
+        "The vaults that use key-file sync were put in automatically: {}. Every PC that uses such a vault needs the same vault ID in its line. Once the line is changed, goyo-sync checks again within two minutes ('Save and start' checks at once). After key-file sync is turned off and every PC took that, remove the ID from the line: whoever steals this PC's sync key can block the uploads of a vault left in it.",
+    ),
+    (
+        "서버의 ~/.ssh/authorized_keys에서 이 PC 전용 키의 줄을 다음 한 줄로 바꾸세요. 공개 키 자리에는 그 키의 .pub 파일 내용을 넣습니다.\n\n{}\n\n이 줄은 이 PC의 전용 키로는 goyo-sync 동기화만 하게 묶습니다(셸·전달 금지). --key-sync=에 적힌 금고만 열쇠 파일을 서버와 주고받을 수 있습니다.\n{}\n\n이 창에서 Ctrl+C를 누르면 창의 글 전체가 복사되니, authorized_keys에는 restrict,command=로 시작하는 그 한 줄만 남기세요.",
+        "In ~/.ssh/authorized_keys on the server, replace the line of this PC's dedicated key with the line below. In place of the public key put the content of that key's .pub file.\n\n{}\n\nThis line lets this PC's dedicated key do goyo-sync's sync only (no shell, no forwarding). Only the vaults after --key-sync= can exchange key files with the server.\n{}\n\nCtrl+C in this window copies all of its text, so keep only the one line that starts with restrict,command= in authorized_keys.",
     ),
 ];

@@ -72,9 +72,6 @@ pub const KEY_PICK_LAST: i32 = KEY_PICK_ITEM + 7;
 /// (KEY_PICK's second section in §9.1): one toggle per key row, from this
 /// ID on (free: no control ID 238-245 in `main.rs`).
 pub const SHARED_ITEM: i32 = 238;
-/// Restore's key source "서버에서 받은 열쇠 파일 (확인 전)" (spec §7.17;
-/// free: no control ID 194 in `main.rs`).
-pub const FETCHED_KEY: i32 = 194;
 pub const SHARED_LAST: i32 = SHARED_ITEM + 7;
 
 /// The Reauth's life a registration needs left (spec §9.2 keys on step 3):
@@ -176,6 +173,9 @@ pub const KEYS_ON_DONE_ONE: &str = "보안 키를 켰습니다. 보안 키 1개�
 /// S-CODE-SK (spec §9.3), in the one-time dialog after a key change: the
 /// code itself stays on the Keys screen.
 pub const CODE_SK: &str = "열쇠 확인 코드: {code}. 다른 PC는 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력하고, 제거를 받을 때는 잃어버린 키를 고릅니다. 모든 PC가 받아야 열쇠 변경이 끝난 것입니다.";
+/// The code dialog after a change the other PCs take with this PC's code
+/// (spec §2.29): the code on its own line, then why it matters.
+pub const CODE_PHOTO: &str = "열쇠 확인 코드:\n{code}\n\n다른 PC가 이 변경을 받을 때 이 코드가 필요합니다. 휴대폰으로 찍어 두세요. 이 코드는 '열쇠 관리'에도 계속 보입니다.";
 /// S-ADOPT-PASS-NEW.
 pub const PASS_NEW: &str = "앞으로는 이번에 새로 정한 비밀번호로 엽니다.";
 /// S-ADD-PAIR.
@@ -407,24 +407,83 @@ pub const TOFU_PWONLY: &str = "이 열쇠 파일은 보안 키 없이 열리지�
 pub const TOFU_OTHEREPOCH: &str = "다른 PC의 코드가 다른 수정 번호(E…)로 시작하면, 이 열쇠 파일을 복사한 뒤 그 PC에서 열쇠를 다시 바꾼 것입니다. 그 PC의 지금 열쇠 파일을 다시 복사해 와서 여세요.";
 /// S-TOFU-NOPC (danger, default No).
 pub const TOFU_NOPC_TEXT: &str = "확인할 다른 PC가 없으면 이 열쇠 파일이 진짜인지 확인할 방법이 없습니다.\n잃어버린 보안 키와 그 PIN, 비밀번호를 가진 사람이 서버를 장악했다면 위조된 열쇠 파일일 수 있습니다(보안 키를 뺄 때 비밀번호도 바꿨다면 위조 파일은 새 비밀번호로 열리지 않습니다). 그래도 이 열쇠 파일을 믿고 쓸까요?";
-pub const TOFU_CODE_LABEL: &str = "다른 PC의 열쇠 확인 코드";
-pub const TOFU_OK_LABEL: &str = "확인";
-pub const TOFU_NOPC_LABEL: &str = "다른 PC가 없습니다…";
+pub const TOFU_CODE_LABEL: &str = "다른 PC의 열쇠 확인 코드 (예: E7 · 1A2B-3C4D-5E6F-7A8B)";
+pub const TOFU_OK_LABEL: &str = "코드 확인";
+/// The trust without a code (S-TOFU-NOPC behind it, danger, default No):
+/// for a key file from the server, and for any other first-seen one.
+pub const TOFU_NOPC_LABEL: &str = "코드 없이 받기 (이 서버를 믿음)…";
+pub const TOFU_NOPC_LOCAL: &str = "코드 없이 이 열쇠 파일 믿기…";
+/// [코드 확인] with nothing typed.
+pub const TOFU_CODE_EMPTY: &str =
+    "다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 위 칸에 입력한 뒤 '코드 확인'을 누르세요.";
 pub const TOFU_LOCK_LABEL: &str = "잠그기";
 pub const TOFU_PASSED: &str = "이 열쇠 파일을 확인했습니다. 이제 항목을 고치고 저장할 수 있습니다.";
 /// S-TOFU-FETCHED, after S-TOFU for a key file from the server's key view.
-pub const TOFU_FETCHED: &str =
-    "확인 전에는 이 열쇠 파일과 금고를 이 PC에 저장하지도 않습니다. 확인하면 저장할 곳을 묻습니다.";
+pub const TOFU_FETCHED: &str = "확인 전에는 이 열쇠 파일과 금고를 이 PC에 저장하지도 않습니다. 확인하면 열쇠 파일을 금고 옆에 저장합니다.";
 /// The banner of such a key file this PC confirmed already (or whose save
 /// a crash cut off after its code): only the save step is left.
-pub const FETCHED_SAVE_TEXT: &str = "서버에서 받은 이 열쇠 파일은 이 PC가 확인한 것입니다. [확인]을 누르고 이 PC에 저장할 곳을 정하세요(동기화 폴더 밖).";
-/// After the save step.
-pub const FETCHED_SAVED: &str = "열쇠 파일과 금고를 이 PC에 저장했습니다. 이제 항목을 고치고 저장할 수 있습니다. '열쇠 백업'으로 열쇠 파일 사본도 따로 두세요.";
+pub const FETCHED_SAVE_TEXT: &str = "서버에서 받은 이 열쇠 파일은 이 PC가 이미 확인했습니다. 남은 일은 이 PC에 저장하는 것뿐입니다. '저장하기'를 누르세요.";
+/// The banner's [확인] when only the save step is left.
+pub const SAVE_STEP_LABEL: &str = "저장하기";
+/// The banner's title for a key file from the server.
+pub const FETCHED_TOFU_TITLE: &str = "서버에서 가져온 열쇠 파일 확인";
+/// After the save step, with the key file's path.
+pub const FETCHED_SAVED: &str = "열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화는 지금 잠갔다가 다시 열면 시작됩니다.";
+/// The save step's question (spec §2.29): next to the vault by default,
+/// after a lead that says how this key file came to be trusted.
+pub const FETCHED_SAVE_ASK: &str = "열쇠 파일을 금고 옆에 저장합니다:\n{path}\n\n이 PC에서 금고를 열 때마다 이 열쇠 파일이 필요합니다. 다른 곳(USB 등)에 두려면 '다른 곳에 저장…'을 누르세요.";
+/// The lead after the other PC's code matched.
+pub const SAVE_LEAD_CODE: &str = "코드가 맞습니다. 이 열쇠 파일은 진짜입니다.";
+/// The lead after S-TOFU-NOPC's yes: nothing was verified.
+pub const SAVE_LEAD_NOCODE: &str =
+    "코드 없이 이 서버를 믿기로 했습니다. 이 열쇠 파일이 진짜인지는 확인하지 않았습니다.";
+/// The lead of a key file this PC confirmed before (a save that was cut
+/// off or put off): nothing is typed this time.
+pub const SAVE_LEAD_KNOWN: &str = "이 PC가 이미 확인한 열쇠 파일입니다.";
+pub const SAVE_HERE: &str = "여기에 저장";
+pub const SAVE_ELSEWHERE: &str = "다른 곳에 저장…";
+/// The save step cancelled: nothing written, the banner stays.
+pub const FETCHED_SAVE_LATER: &str =
+    "아직 저장하지 않았습니다. 준비되면 '코드 확인'을 다시 누르세요(코드는 그대로 둡니다).";
+/// The same after '코드 없이 받기…'.
+pub const FETCHED_SAVE_LATER_NOCODE: &str = "아직 저장하지 않았습니다. 준비되면 '코드 없이 받기…'를 다시 누르거나, 다른 PC의 코드를 입력하고 '코드 확인'을 누르세요.";
+/// The same when only the save step is left ('저장하기').
+pub const FETCHED_SAVE_LATER_KNOWN: &str =
+    "아직 저장하지 않았습니다. 준비되면 '저장하기'를 다시 누르세요.";
+/// The save step's file dialog could not open (spec §2.29), by the
+/// button that leads back to it.
+pub const SAVE_DIALOG_FAILED: &str = "저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '코드 확인'을 다시 누르고 '여기에 저장'을 고르세요.";
+pub const SAVE_DIALOG_FAILED_NOCODE: &str = "저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '코드 없이 받기…'를 다시 누르고 '여기에 저장'을 고르세요.";
+pub const SAVE_DIALOG_FAILED_KNOWN: &str = "저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '저장하기'를 다시 누르고 '여기에 저장'을 고르세요.";
+/// Backups and key management while the TOFU banner stands (spec §2.29):
+/// the step above comes first.
+pub const TOFU_FIRST: &str = "먼저 위의 확인을 끝내세요(다른 PC의 열쇠 확인 코드 입력, 또는 '저장하기'). 그 전에는 백업하거나 열쇠를 관리하지 않습니다.";
+/// Restore with the key view of a sync folder typed or picked as its key
+/// file: that file is the Fetched screen's alone.
+pub const RESTORE_KEY_VIEW: &str = "동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일을 '다른 위치에 있는 금고 열기'로 고르면 '서버에서 가져온 금고' 화면이 안내합니다.";
+/// "서버에서 가져온 금고" (`Screen::Fetched`, spec §2.29).
+pub const FETCHED_TITLE: &str = "서버에서 가져온 금고";
+pub const FETCHED_INTRO: &str = "goyo-sync가 서버에서 이 금고와 그 열쇠 파일을 가져왔습니다. 열쇠 파일은 아직 이 PC에 저장되지 않았고, 다른 PC의 코드로 확인하기 전에는 믿지 않습니다.\n{step}\n② 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력합니다.\n③ 열쇠 파일을 금고 옆에 {name}(으)로 저장합니다.";
+/// Step ① of FETCHED_INTRO, by whether the server's key file has
+/// security keys (no touch without them).
+pub const FETCHED_STEP_TOUCH: &str = "① 비밀번호를 입력하고 '다음'을 누른 뒤 보안 키를 터치합니다.";
+pub const FETCHED_STEP_PLAIN: &str = "① 비밀번호를 입력하고 '다음'을 누릅니다.";
+pub const FETCHED_VAULT_LABEL: &str = "서버에서 가져온 금고 파일";
+pub const FETCHED_SUBMIT: &str = "다음 · 보안 키 터치";
+pub const FETCHED_SUBMIT_PLAIN: &str = "다음";
+pub const FETCHED_OTHER_KEY: &str = "열쇠 파일이 있으면 그것으로 열기";
+/// The login after the key file appeared next to the vault meanwhile.
+pub const FETCHED_KEY_HERE: &str = "금고 옆에 열쇠 파일이 있습니다. 그 열쇠 파일로 여세요.";
+/// The vault's sync folder has no key file from the server (any more).
+pub const FETCHED_GONE: &str = "이 금고의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync에서 '이 PC로 가져오기'를 다시 하거나, 다른 PC의 열쇠 파일을 USB로 가져와 금고 옆에 두세요.";
+/// The status line once the vault is open and the code is next.
+pub const FETCHED_NEXT: &str =
+    "② 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 오른쪽 칸에 입력하세요.";
+/// The login's 찾기 picked a vault from the server with no key file here.
+pub const FETCHED_PICKED: &str =
+    "서버에서 가져온 금고이고, 이 PC에 열쇠 파일이 아직 없습니다. 위 순서대로 여세요.";
 /// The save dialog's title.
 pub const FETCHED_SAVE_TITLE: &str = "열쇠 파일을 저장할 곳을 고르세요 (동기화 폴더 밖)";
-/// The Restore screen's key source button, and what it says once chosen.
-pub const FETCHED_KEY_LABEL: &str = "서버에서 받은 열쇠 파일 (확인 전) 쓰기";
-pub const FETCHED_KEY_SET: &str = "열쇠 파일로 서버에서 받은 열쇠 파일(확인 전)을 씁니다. 복원한 뒤 다른 PC의 열쇠 확인 코드를 입력하면 이 PC에 저장합니다.";
 /// S-LOGIN-NOTE, its PIN line, and S-LOGIN-PWONLY (spec §9.1).
 pub const LOGIN_KEYS: &str = "이 열쇠 파일은 보안 키가 필요합니다(등록 {n}개). '잠금 해제'를 누르면 Windows 보안 창이 열립니다.";
 pub const LOGIN_PIN: &str = "보안 키 PIN은 Windows 창에 입력합니다.";
@@ -665,6 +724,9 @@ pub fn near_texts(s: &Session) -> Vec<String> {
 thread_local! {
     /// The vault screen shows the TOFU banner, set by a layout test.
     pub static TOFU_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// With TOFU_SHOWN: the banner as a session in TOFU shows it, and as
+    /// one whose key file came from the server's key view when this is set.
+    pub static TOFU_FETCHED_SHOWN: Cell<bool> = const { Cell::new(false) };
     /// What the review screen lists, set by a layout test in place of the
     /// session's merge log.
     pub static REVIEW_SHOWN: RefCell<Option<vault::ReviewList>> = const { RefCell::new(None) };
@@ -744,11 +806,7 @@ impl App {
                 self.text(0, &full, (40, 398, 796, 20), small, TONE_MUTED, 0);
                 // A vault that syncs gets the key-file sync line under the
                 // list (spec §9.1), which gives up 40 of its height.
-                let sync = self
-                    .session
-                    .as_ref()
-                    .and_then(Session::key_sync_view)
-                    .filter(|v| v.synced);
+                let sync = ks_view(self.session.as_ref()).filter(|v| v.synced);
                 let short = if sync.is_some() { 40 } else { 0 };
                 match &halt {
                     // A halted vault channel (spec §7.5a): its text in the
@@ -866,7 +924,7 @@ impl App {
                     (true, false) | (false, true) => 380,
                     (false, false) => 796,
                 };
-                self.password_field(CURRENT_PASS, "현재 비밀번호", 40, 608, w);
+                self.password_field(CURRENT_PASS, REAUTH_LABEL, 40, 608, w);
                 if let Some(tag) = otp {
                     let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
                     self.field(OTP, &caption, "", 40 + w + 16, 608, 180, true);
@@ -885,7 +943,7 @@ impl App {
                 let fields = 1 + 2 * usize::from(pw) + usize::from(otp.is_some());
                 let w = (796 - 16 * (fields as i32 - 1)) / fields as i32;
                 let mut x = 40;
-                self.password_field(CURRENT_PASS, "현재 비밀번호", x, 536, w);
+                self.password_field(CURRENT_PASS, REAUTH_LABEL, x, 536, w);
                 x += w + 16;
                 if pw {
                     self.password_field(PASS, NEW_PASS, x, 536, w);
@@ -934,7 +992,7 @@ impl App {
             .filter(|s| s.uses_otp())
             .map(|s| s.tag());
         let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 474, w);
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 474, w);
         if let Some(tag) = otp {
             let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
             self.field(OTP, &caption, "", AX + AW - 180, 474, 180, true);
@@ -985,29 +1043,19 @@ impl App {
     /// [이 금고의 기록 지우고 다시 확인…] in its place after an anchor
     /// refusal of exactly these files. False on any other screen.
     pub(crate) fn build_login_extra(&mut self, y: i32) -> bool {
-        // Restore: the server's key file next to the backup, if any, as the
-        // key source (spec §7.17).
-        if self.screen == Screen::Restore {
-            if vault::fetched_key(&self.backup_path).is_none() {
-                return false;
-            }
-            self.button(
-                FETCHED_KEY,
-                FETCHED_KEY_LABEL,
-                AX,
-                y,
-                AW,
-                36,
-                theme::SECONDARY,
-            );
-            return true;
-        }
         if self.screen != Screen::Login {
             return false;
         }
         let small = self.font_of(|t| t.small());
-        let text = login_note(&self.key_path);
-        self.text(LOGIN_NOTE, &text, (AX, y, AW, 54), small, TONE_MUTED, 0);
+        // A key file not on this PC says where it comes from (spec §2.29).
+        let missing = self.missing_key_note(&self.vault_path, &self.key_path);
+        let tone = if missing.is_some() {
+            TONE_DANGER
+        } else {
+            TONE_MUTED
+        };
+        let text = missing.unwrap_or_else(|| login_note(&self.key_path));
+        self.text(LOGIN_NOTE, &text, (AX, y, AW, 54), small, tone, 0);
         self.button(
             ANCHOR_FORGET,
             FORGET_BUTTON,
@@ -1039,7 +1087,7 @@ impl App {
             .filter(|s| s.uses_otp())
             .map(|s| s.tag());
         let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 566, w);
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 566, w);
         if let Some(tag) = otp {
             let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
             self.field(OTP, &caption, "", AX + AW - 180, 566, 180, true);
@@ -1069,14 +1117,55 @@ impl App {
         }
         let offered = self.forget_for.is_some();
         let h = self.handle(LOGIN_NOTE);
+        let missing = self.missing_key_note(vault, key);
+        let tone = if missing.is_some() {
+            TONE_DANGER
+        } else {
+            TONE_MUTED
+        };
+        let text = missing.unwrap_or_else(|| login_note(key));
         unsafe {
-            SetWindowTextW(h, wide(&login_note(key)).as_ptr());
+            SetWindowLongPtrW(h, -21, tone);
+            SetWindowTextW(h, wide(&text).as_ptr());
             InvalidateRect(h, null(), 1);
         }
         self.show_forget(offered);
     }
     /// Whether the vault screen shows the TOFU banner in place of the entry
     /// detail (spec §7.17).
+    /// The vault the login's (or Fetched's) 찾기 picked (spec §2.29): one
+    /// goyo-sync brought from the server with no key file on this PC opens
+    /// on "서버에서 가져온 금고", and one with a key file on the login. A
+    /// key file in the field that is there (on a USB stick, say) of a vault
+    /// this PC opened before keeps the login and is never replaced.
+    pub(crate) fn route_picked_vault(&mut self) {
+        if !matches!(self.screen, Screen::Login | Screen::Fetched) {
+            return;
+        }
+        let vault = self.vault_path.clone();
+        let own = vault.with_extension("goyokey");
+        let usable = self.key_path.is_file() || key_candidate(&vault, &self.key_path).is_some();
+        let fetched = fetched_pending(&vault, &own) && !(usable && vault::known_here(&vault));
+        if fetched != (self.screen == Screen::Fetched) {
+            if !usable {
+                self.key_path = own;
+            }
+            self.show(if fetched {
+                Screen::Fetched
+            } else {
+                Screen::Login
+            });
+            self.status = line(if fetched { FETCHED_PICKED } else { "" });
+            self.build();
+        } else if fetched {
+            self.rebuild_keeping(&[PASS, OTP]);
+        }
+    }
+    /// The vault screen's backups and key management while the TOFU
+    /// banner stands (spec §2.29): refused with TOFU_FIRST, and greyed.
+    pub(crate) fn tofu_blocks(&self, id: i32) -> bool {
+        matches!(id, BACKUP | KEYBACKUP | CHANGE) && self.tofu_banner()
+    }
     pub(crate) fn tofu_banner(&self) -> bool {
         #[cfg(test)]
         if TOFU_SHOWN.with(Cell::get) {
@@ -1088,19 +1177,35 @@ impl App {
                 .as_ref()
                 .is_some_and(|s| s.tofu() || s.fetched_unsaved())
     }
-    /// The TOFU banner (spec §7.17, §9.1): S-TOFU with the key file's own
-    /// epoch (and S-TOFU-PWONLY for a key file without keys), the code
-    /// field and its three buttons. It never shows a code.
+    /// The TOFU banner (spec §7.17, §9.1, §2.29): S-TOFU with the key
+    /// file's own epoch (and S-TOFU-PWONLY for a key file without keys),
+    /// the code field with an example of the code, [확인] and [잠그기],
+    /// and under them, in the danger tone, the trust without a code. It
+    /// never shows a code. A key file from the server's key view names the
+    /// steps left: the code, then the key file saved next to the vault.
     pub(crate) fn build_tofu(&mut self) {
         let Some(s) = self.session.as_ref() else {
             return;
         };
-        let tofu = s.tofu();
+        let (tofu, fetched) = (s.tofu(), s.fetched_unsaved());
+        // The bottom row's backups and key management wait for this step
+        // (tofu_blocks): greyed, so nothing looks pressable meanwhile.
+        for id in [BACKUP, KEYBACKUP, CHANGE] {
+            unsafe {
+                EnableWindow(self.handle(id), 0);
+            }
+        }
+        #[cfg(test)]
+        let (tofu, fetched) = if TOFU_SHOWN.with(Cell::get) {
+            (true, TOFU_FETCHED_SHOWN.with(Cell::get))
+        } else {
+            (tofu, fetched)
+        };
         let mut text = fill(TOFU, &[&s.key_state().epoch]);
         if s.keys_overview().is_none() {
             text = format!("{text}\r\n{}", tr(TOFU_PWONLY));
         }
-        if s.fetched_unsaved() {
+        if fetched {
             text = if tofu {
                 format!("{text}\r\n{}", tr(TOFU_FETCHED))
             } else {
@@ -1108,40 +1213,102 @@ impl App {
             };
         }
         let (small, strong) = (self.font_of(|t| t.small()), self.font_of(|t| t.strong()));
-        self.text(
-            0,
-            TOFU_TITLE,
-            (CARD_X, 104, CARD_W, 26),
-            strong,
-            TONE_TEXT,
-            0,
-        );
+        let title = if fetched {
+            FETCHED_TOFU_TITLE
+        } else {
+            TOFU_TITLE
+        };
+        self.text(0, title, (CARD_X, 104, CARD_W, 26), strong, TONE_TEXT, 0);
         self.text(0, &text, (CARD_X, 136, CARD_W, 154), small, TONE_DANGER, 0);
         if tofu {
             self.field(GATE_CODE, TOFU_CODE_LABEL, "", CARD_X, 298, CARD_W, false);
         }
-        self.button(TOFU_OK, TOFU_OK_LABEL, CARD_X, 378, 100, 38, theme::PRIMARY);
-        let w = CARD_W - 2 * 108;
-        if tofu {
-            self.button(
-                TOFU_NOPC,
-                TOFU_NOPC_LABEL,
-                CARD_X + 108,
-                378,
-                w,
-                38,
-                theme::SECONDARY,
-            );
-        }
+        let ok = if tofu { TOFU_OK_LABEL } else { SAVE_STEP_LABEL };
+        self.button(TOFU_OK, ok, CARD_X, 376, 240, 40, theme::PRIMARY);
         self.button(
             TOFU_LOCK,
             TOFU_LOCK_LABEL,
             CARD_X + CARD_W - 100,
-            378,
+            376,
             100,
-            38,
+            40,
             theme::SECONDARY,
         );
+        if tofu {
+            let label = if fetched {
+                TOFU_NOPC_LABEL
+            } else {
+                TOFU_NOPC_LOCAL
+            };
+            self.button(
+                TOFU_NOPC,
+                label,
+                CARD_X,
+                428,
+                CARD_W,
+                34,
+                theme::DANGER_GHOST,
+            );
+        }
+    }
+    /// "서버에서 가져온 금고" (`Screen::Fetched`, spec §2.29): what happened
+    /// and the three steps in plain words, the vault file (its own [찾기]),
+    /// the password (and OTP), [다음 · 보안 키 터치], and the links to the
+    /// login with another key file and to Restore. No key path: the key
+    /// file is the server's, in the vault's sync folder.
+    pub(crate) fn build_fetched(&mut self) {
+        let (title, small) = (self.font_of(|t| t.title()), self.font_of(|t| t.small()));
+        self.text(0, FETCHED_TITLE, (AX, 82, AW, 34), title, TONE_TEXT, 0);
+        let name = self
+            .vault_path
+            .with_extension("goyokey")
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // No security keys in the server's key file: no touch is asked.
+        let touch = vault::fetched_key_info(&self.vault_path).is_none_or(|i| i.needs_security_key);
+        let (step, submit) = if touch {
+            (FETCHED_STEP_TOUCH, FETCHED_SUBMIT)
+        } else {
+            (FETCHED_STEP_PLAIN, FETCHED_SUBMIT_PLAIN)
+        };
+        let intro = fill(FETCHED_INTRO, &[&tr(step), &name]);
+        self.text(0, &intro, (AX, 124, AW, 112), small, TONE_TEXT, 0);
+        let vault = self.vault_path.to_string_lossy().into_owned();
+        self.path_field(VPATH, BROWSE_V, FETCHED_VAULT_LABEL, &vault, 244);
+        let otp = self.key_otp();
+        self.password_field(PASS, "비밀번호", AX, 318, if otp { AW - 196 } else { AW });
+        if otp {
+            let caption = match vault_tag(&self.vault_path) {
+                Some(tag) => fill("OTP 6자리 · {tag}", &[&tag]),
+                None => "Google OTP 6자리".into(),
+            };
+            self.field(OTP, &caption, "", AX + AW - 180, 318, 180, true);
+        }
+        self.button(SUBMIT, submit, AX, 400, AW, 46, theme::PRIMARY);
+        let (_, ly, _, _) = LOGIN_LINKS;
+        let mid = AX + AW / 2;
+        self.button(
+            OPEN,
+            FETCHED_OTHER_KEY,
+            mid - 236,
+            ly + 14,
+            228,
+            30,
+            theme::LINK,
+        );
+        self.button(
+            RESTORE,
+            "백업에서 복원",
+            mid + 8,
+            ly + 14,
+            148,
+            30,
+            theme::LINK,
+        );
+        unsafe {
+            SetFocus(self.handle(PASS));
+        }
     }
     /// A toggle of this build's screens flipped (no flow: nothing is
     /// written). False for any other command.
@@ -1221,19 +1388,6 @@ impl App {
             REVIEW_LATER => self.review_later(),
             BACK if self.screen == Screen::Review => self.review_later(),
             TOFU_LOCK => self.lock("수동으로 잠갔습니다.", true),
-            FETCHED_KEY => {
-                let _ = self.paths();
-                let Some(path) = vault::fetched_key(&self.backup_path) else {
-                    return Err(vault::FETCHED_NONE);
-                };
-                unsafe {
-                    SetWindowTextW(self.handle(KPATH), wide(&path.to_string_lossy()).as_ptr());
-                }
-                self.rebuild_keeping(&[PASS, OTP]);
-                self.status = line(FETCHED_KEY_SET);
-                self.status_tone = TONE_MUTED;
-                self.build();
-            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -1296,7 +1450,10 @@ impl App {
                     .is_some_and(|s| s.gate_pending() && !s.tofu()),
             ),
             (Screen::Create, SK_TOGGLE) => Some(true),
-            (Screen::Restore, FETCHED_KEY) => Some(true),
+            (Screen::Fetched, _) => Some(matches!(
+                id,
+                SUBMIT | BROWSE_V | VPATH | PASS | PEEK_PASS | OTP | OPEN | RESTORE
+            )),
             (
                 Screen::Keys,
                 KEY_ON | KEYON_PWCHANGE | KEY_ADD | KEY_PAIR | KEY_RESEED | KEY_OFF | KEY_LOST
@@ -1307,6 +1464,7 @@ impl App {
             (Screen::Vault, TOFU_OK | TOFU_NOPC | TOFU_LOCK | GATE_CODE) => {
                 Some(self.tofu_banner())
             }
+            (Screen::Vault, _) if self.tofu_blocks(id) => Some(false),
             _ => None,
         }
     }
@@ -1348,6 +1506,7 @@ pub(crate) fn phased(a: &App, id: i32) -> bool {
             matches!(id, TOFU_OK | TOFU_NOPC) || (matches!(id, 1 | SUBMIT) && a.tofu_banner())
         }
         Screen::Login => id == ANCHOR_FORGET,
+        Screen::Fetched => matches!(id, 1 | SUBMIT),
         _ => false,
     }
 }
@@ -1357,6 +1516,7 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     match (screen, id) {
         (Some(Screen::Create), _) => create_flow(h),
         (Some(Screen::Restore), _) => restore_flow(h),
+        (Some(Screen::Fetched), _) => fetched_flow(h),
         (Some(Screen::OtpBackup), _) => otp_backup_flow(h),
         (Some(Screen::Pair), _) => pair_flow(h),
         (Some(Screen::Login), ANCHOR_FORGET) => forget_flow(h),
@@ -1640,7 +1800,7 @@ fn renewed(
             Some(n) => fill(REAUTH_AGAIN_BOTH, &[&n]),
             None => tr(REAUTH_AGAIN_OTP).to_owned(),
         };
-        match ask_input(h, InputKind::Code, &text, &[ok, CANCEL_BUTTON]) {
+        match ask_input(h, InputKind::Code(""), &text, &[ok, CANCEL_BUTTON]) {
             InputAnswer::Code(typed) => code = Some((typed, otp::now()?)),
             _ => return Ok(None),
         }
@@ -1696,6 +1856,24 @@ fn touch_of(h: Hwnd, t: &Typed, numbers: &[u8], text: &str) -> crypto::Result<Op
     };
     Ok(touch_step(h, t.screen, t.serial, request, text))
 }
+/// The dialogs after a key change (spec §2.29): for a change the other
+/// PCs of a vault that syncs take with this PC's code (`photo`), the code
+/// first, in its own words, for the user to photograph; else the rest,
+/// then the general sentence (one PC, or a key file carried by USB).
+fn code_told(code: Option<String>, photo: bool, more: Vec<String>) -> Vec<String> {
+    let mut told = Vec::new();
+    match code {
+        Some(code) if photo => {
+            told.push(fill(CODE_PHOTO, &[&code]));
+            told.extend(more);
+        }
+        code => {
+            told.extend(more);
+            told.extend(code.map(|code| fill(CODE_SK, &[&code])));
+        }
+    }
+    told
+}
 /// What a key change says once written (spec §9.2): its status lines on
 /// the Keys screen (one short line each, danger lines first: the status
 /// box holds three lines), whether one is a danger line (S-ONEKEY), and
@@ -1738,6 +1916,14 @@ fn write(
         return Ok(None);
     };
     let override_gate = t.gate.is_some();
+    // A change the other PCs take only with this PC's code (G1): an added
+    // key, a re-seed, keys on or off, key-file sync on or off. A removal
+    // is taken by picking the lost keys, a password change or a pairing
+    // with nothing (spec §7.18, §2.29).
+    let asks_code = !matches!(
+        change,
+        vault::Change::Password(_) | vault::Change::Pair | vault::Change::Remove { .. }
+    );
     let written = phase(h, t.screen, t.serial, |a| {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
         let result = s.rekey(r, extra, change, consent, override_gate);
@@ -1764,8 +1950,8 @@ fn write(
                 if rekeyed == vault::Rekeyed::VaultPending {
                     lines.push(vault::VPENDING.to_owned());
                 }
-                let mut told = more;
-                told.extend(s.key_code().map(|code| fill(CODE_SK, &[&code])));
+                let synced = s.key_sync_view().is_some_and(|v| v.synced);
+                let told = code_told(s.key_code(), asks_code && synced, more);
                 // The landed key change ends a dropped removal's [다시 하기].
                 let _ = s.take_redo();
                 a.sync_badge = s.badge();
@@ -2054,13 +2240,13 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
         a.paths()?;
         let pass = a.read(PASS)?;
         let otp = a.read(OTP)?;
+        // The server's key file in a sync folder's key view is opened only
+        // by "서버에서 가져온 금고" (spec §2.29), never as a backup's key.
+        if vault::is_fetched_key(&a.backup_path, &a.key_path) {
+            return Err(RESTORE_KEY_VIEW);
+        }
         a.check_files()?;
-        // The server's key file from the backup's key view (spec §7.17).
-        let prepared = if vault::is_fetched_key(&a.backup_path, &a.key_path) {
-            vault::prepare_restore_fetched(&a.backup_path)?
-        } else {
-            vault::prepare_restore(&a.backup_path, &a.key_path)?
-        };
+        let prepared = vault::prepare_restore(&a.backup_path, &a.key_path)?;
         let otp_time = otp::now()?;
         let auth_failure = prepared.auth_failure();
         let request = prepared.unlock_request(h);
@@ -2104,6 +2290,101 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
             None => Session::restore_from(prepared, &dest, &pass, &otp, otp_time),
         };
         a.opened(Screen::Restore, restored, auth_failure)
+    });
+    drain_pending(h);
+    result
+}
+/// A vault file with the server's key file in its key view and no key
+/// file of its own on this PC (spec §2.29): the key path is that key view,
+/// or the vault's own `<name>.goyokey`, which is not there (nor the temp
+/// file of a cut-off save).
+pub(crate) fn fetched_pending(vault: &Path, key: &Path) -> bool {
+    vault.is_file()
+        && (vault::is_fetched_key(vault, key)
+            || (key == vault.with_extension("goyokey")
+                && !key.exists()
+                && key_candidate(vault, key).is_none()))
+        && vault::fetched_key(vault).is_some()
+}
+/// SUBMIT on `Screen::Fetched` (spec §2.29, §7.17): the vault file is the
+/// Restore's source and, in place, its destination; the key file is the
+/// server's, read only from the key view. The password (and OTP), one
+/// touch, then the vault screen's TOFU banner asks for the other PC's
+/// code; nothing is written before it passes.
+fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
+    let p1 = APP.with(|cell| -> crypto::Result<_> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        a.enter(SUBMIT)?;
+        a.paths()?;
+        let vault = a.vault_path.clone();
+        let own = vault.with_extension("goyokey");
+        // The key file came by USB meanwhile: the usual login opens it.
+        if vault.is_file() && own.is_file() {
+            a.key_path = own;
+            a.show(Screen::Login);
+            a.status = line(FETCHED_KEY_HERE);
+            a.build();
+            return Ok(None);
+        }
+        if vault::fetched_key(&vault).is_none() {
+            return Err(FETCHED_GONE);
+        }
+        let pass = a.read(PASS)?;
+        let otp = a.read(OTP)?;
+        a.check_files()?;
+        let prepared = vault::prepare_restore_fetched(&vault)?;
+        let otp_time = otp::now()?;
+        let auth_failure = prepared.auth_failure();
+        let touch_request = prepared.unlock_request(h);
+        if touch_request.is_some() {
+            authenticator().map_err(FidoError::text)?;
+        }
+        a.working();
+        a.flow = Some(SUBMIT);
+        Ok(Some((
+            a.serial,
+            prepared,
+            pass,
+            otp,
+            otp_time,
+            auth_failure,
+            touch_request,
+            vault,
+        )))
+    });
+    drain_pending(h);
+    let Some((serial, prepared, pass, otp, otp_time, auth_failure, request, vault)) = p1? else {
+        return Ok(());
+    };
+    let touch = match request {
+        Some(request) => match touch_step(h, Screen::Fetched, serial, request, TOUCH) {
+            Some(touch) => Some(touch),
+            None => return Ok(()),
+        },
+        None => None,
+    };
+    unsafe {
+        UpdateWindow(h);
+    }
+    let result = APP.with(|cell| -> crypto::Result<()> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        if !a.still(Screen::Fetched, serial, false)? {
+            return Ok(());
+        }
+        let restored = match &touch {
+            Some(touch) => Session::restore_with(prepared, &vault, &pass, &otp, otp_time, touch),
+            None => Session::restore_from(prepared, &vault, &pass, &otp, otp_time),
+        };
+        a.opened(Screen::Fetched, restored, auth_failure)?;
+        // The next step on the status line too, above what the unlock said.
+        if a.session.as_ref().is_some_and(Session::tofu) {
+            let said = a.status.clone();
+            let tone = unsafe { GetWindowLongPtrW(a.handle(STATUS), -21) };
+            a.set_status(&joined(&[FETCHED_NEXT, said.as_str()]), tone);
+        }
+        Ok(())
     });
     drain_pending(h);
     result
@@ -2689,6 +2970,25 @@ pub(crate) fn ask_gate(
     epoch: u64,
     note: Option<&str>,
 ) -> Option<GateAnswer> {
+    let answer = ask_gate_typed(h, kind, choices, opened, epoch, note);
+    if !matches!(answer, Some(GateAnswer::Code(_))) {
+        TYPED_CODE.with(|c| c.borrow_mut().clear());
+    }
+    answer
+}
+thread_local! {
+    /// The key code last typed at a gate (a key code is public, as the Keys
+    /// screen shows it): asked again with it after GATE_CODE_WRONG.
+    static TYPED_CODE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+fn ask_gate_typed(
+    h: Hwnd,
+    kind: GateKind,
+    choices: &[GateChoice],
+    opened: Option<u8>,
+    epoch: u64,
+    note: Option<&str>,
+) -> Option<GateAnswer> {
     let lead = |text: String| match note {
         Some(note) => format!("{}\n\n{text}", tr(note)),
         None => text,
@@ -2748,17 +3048,30 @@ pub(crate) fn ask_gate(
             }
             GateKind::G1 => {
                 let mut format_note: Option<&str> = None;
+                // A code that did not match is asked again with what was
+                // typed, so one wrong character is corrected, not retyped.
+                let mut typed_before = if note == Some(vault::GATE_CODE_WRONG) {
+                    TYPED_CODE.with(|c| c.borrow().clone())
+                } else {
+                    String::new()
+                };
                 loop {
                     let text = fill(GATE_CODE_TEXT, &[&epoch]);
                     let text = match format_note {
                         Some(n) => format!("{}\n\n{text}", tr(n)),
                         None => lead(text),
                     };
-                    match ask_input(h, InputKind::Code, &text, &[ok, later]) {
-                        InputAnswer::Code(typed) => match vault::parse_code(&typed) {
-                            Some(code) => return Some(GateAnswer::Code(code)),
-                            None => format_note = Some(CODE_FORMAT),
-                        },
+                    match ask_input(h, InputKind::Code(&typed_before), &text, &[ok, later]) {
+                        InputAnswer::Code(typed) => {
+                            TYPED_CODE.with(|c| *c.borrow_mut() = typed.to_string());
+                            match vault::parse_code(&typed) {
+                                Some(code) => return Some(GateAnswer::Code(code)),
+                                None => {
+                                    format_note = Some(CODE_FORMAT);
+                                    typed_before = typed.to_string();
+                                }
+                            }
+                        }
                         _ => return None,
                     }
                 }
@@ -2864,10 +3177,35 @@ fn accept_flow(h: Hwnd) -> crypto::Result<()> {
     }
     Ok(())
 }
-/// The TOFU banner's [확인] and [다른 PC가 없습니다…] (spec §7.17, §9.2):
+/// The TOFU banner's [확인] and [코드 없이 받기…] (spec §7.17, §9.2):
 /// the typed code against this key file's own (G1, constant time), or
 /// S-TOFU-NOPC's yes; a mismatch adds S-TOFU-OTHEREPOCH and writes nothing.
+/// The code step is where the user looks, so a step that fails says so in
+/// a dialog as well as on the status line (spec §2.29), and the banner's
+/// field keeps the code typed.
 fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
+    match tofu_steps(h, id) {
+        Err(e) => {
+            tofu_failed(h, e);
+            Ok(())
+        }
+        ok => ok,
+    }
+}
+/// A failed TOFU step (see tofu_flow): the status line as usual, then the
+/// same text in a dialog while the banner still stands.
+fn tofu_failed(h: Hwnd, text: &str) {
+    report(h, text);
+    let shown = APP.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let a = b.as_ref()?;
+        (a.screen == Screen::Vault && a.session.is_some()).then(|| tr_lines(&a.status))
+    });
+    if let Some(shown) = shown {
+        tell(h, &shown);
+    }
+}
+fn tofu_steps(h: Hwnd, id: i32) -> crypto::Result<()> {
     let p1 = APP.with(|cell| -> crypto::Result<_> {
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
         let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
@@ -2878,11 +3216,16 @@ fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
             return Err(vault::GATE_NOT_PENDING);
         }
         let code = if id == TOFU_OK && s.tofu() {
-            Some(vault::parse_code(&a.read(GATE_CODE)?).ok_or(CODE_FORMAT)?)
+            let typed = a.read(GATE_CODE)?;
+            if typed.trim().is_empty() {
+                return Err(TOFU_CODE_EMPTY);
+            }
+            Some(vault::parse_code(&typed).ok_or(CODE_FORMAT)?)
         } else {
             None
         };
-        let default = s.path.with_extension("goyokey");
+        // Next to the vault, named as the user knows the path.
+        let default = PathBuf::from(shown(&s.path.with_extension("goyokey")));
         a.flow = Some(id);
         Ok((a.serial, code, fetched.then_some(default), s.tofu()))
     });
@@ -2894,6 +3237,11 @@ fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     // A key file from the server's key view (spec §7.17): the code first,
     // then where to save it, then the files and the anchor in one step.
     if let Some(default) = fetched {
+        let via = match (&code, tofu) {
+            (Some(_), _) => Via::Code,
+            (None, true) => Via::NoCode,
+            (None, false) => Via::Known,
+        };
         let checked = phase(h, Screen::Vault, serial, |a| {
             let s = a.session.as_ref().ok_or("금고가 잠겼습니다.")?;
             Ok(s.tofu_check(code.as_ref()))
@@ -2901,14 +3249,32 @@ fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         match checked {
             None => return Ok(()),
             Some(Err(e)) if e == vault::GATE_CODE_WRONG => {
-                report(h, &format!("{e}\r\n{TOFU_OTHEREPOCH}"));
+                tofu_failed(h, &format!("{e}\r\n{TOFU_OTHEREPOCH}"));
                 return Ok(());
             }
             Some(Err(e)) => return Err(e),
             Some(Ok(())) => {}
         }
-        let Some(path) = save_key_path(h, &default) else {
-            return Ok(());
+        let path = match save_key_path(h, &default, via) {
+            Saved::At(path) => path,
+            Saved::Cancelled => {
+                say(
+                    h,
+                    match via {
+                        Via::Code => FETCHED_SAVE_LATER,
+                        Via::NoCode => FETCHED_SAVE_LATER_NOCODE,
+                        Via::Known => FETCHED_SAVE_LATER_KNOWN,
+                    },
+                );
+                return Ok(());
+            }
+            Saved::Failed => {
+                return Err(match via {
+                    Via::Code => SAVE_DIALOG_FAILED,
+                    Via::NoCode => SAVE_DIALOG_FAILED_NOCODE,
+                    Via::Known => SAVE_DIALOG_FAILED_KNOWN,
+                });
+            }
         };
         return phase(h, Screen::Vault, serial, |a| {
             let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
@@ -2919,13 +3285,13 @@ fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
             a.key_path = path.clone();
             a.sync_badge = s.badge();
             a.show(Screen::Vault);
-            a.status = line(FETCHED_SAVED);
+            a.status = Zeroizing::new(fill(FETCHED_SAVED, &[&shown(&path)]));
             a.build();
             Ok(())
         })
         .map(|_| ());
     }
-    phase(h, Screen::Vault, serial, |a| {
+    let wrong = phase(h, Screen::Vault, serial, |a| {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
         match s.tofu_confirm(code.as_ref()) {
             Ok(()) => {
@@ -2933,40 +3299,106 @@ fn tofu_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
                 a.show(Screen::Vault);
                 a.status = line(TOFU_PASSED);
                 a.build();
-                Ok(())
+                Ok(false)
             }
-            Err(e) if e == vault::GATE_CODE_WRONG => {
-                a.error(&format!("{e}\r\n{TOFU_OTHEREPOCH}"));
-                Ok(())
-            }
+            Err(e) if e == vault::GATE_CODE_WRONG => Ok(true),
             Err(e) => Err(e),
         }
-    })
-    .map(|_| ())
+    })?;
+    if wrong == Some(true) {
+        tofu_failed(
+            h,
+            &format!("{}\r\n{TOFU_OTHEREPOCH}", vault::GATE_CODE_WRONG),
+        );
+    }
+    Ok(())
 }
 
-/// The save step's dialog (spec §7.17), defaulting to `<vault>.goyokey`
-/// next to the restored vault file. A test answers in its place.
-fn save_key_path(h: Hwnd, default: &Path) -> Option<PathBuf> {
-    #[cfg(test)]
-    {
-        let _ = (h, default, FETCHED_SAVE_TITLE);
-        SAVE_KEY.with(|p| p.borrow_mut().take())
+/// How a key file from the server came to be trusted before its save
+/// step: the other PC's code, S-TOFU-NOPC's yes, or a state this PC
+/// confirmed before (only the save was left).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Via {
+    Code,
+    NoCode,
+    Known,
+}
+/// How the save step ended.
+enum Saved {
+    At(PathBuf),
+    Cancelled,
+    /// The file dialog could not open (CommDlgExtendedError).
+    Failed,
+}
+/// The save step (spec §7.17, §2.29): the key file goes next to the vault
+/// file as `<vault>.goyokey` unless the user picks another place; the
+/// file dialog opens only for that, or when that name is taken. Never a
+/// silent end: a dialog that fails says so. A test answers in its place.
+fn save_key_path(h: Hwnd, default: &Path, via: Via) -> Saved {
+    if !default.exists() {
+        let here = DialogButton {
+            id: 1,
+            label: SAVE_HERE,
+            role: Role::Accept,
+        };
+        let elsewhere = DialogButton {
+            id: 2,
+            label: SAVE_ELSEWHERE,
+            role: Role::Switch,
+        };
+        // Only a matched code says the file is genuine.
+        let lead = match via {
+            Via::Code => SAVE_LEAD_CODE,
+            Via::NoCode => SAVE_LEAD_NOCODE,
+            Via::Known => SAVE_LEAD_KNOWN,
+        };
+        let text = format!(
+            "{}\n\n{}",
+            tr(lead),
+            fill(FETCHED_SAVE_ASK, &[&shown(default)])
+        );
+        match ask_input(
+            h,
+            InputKind::Preview { check: None },
+            &text,
+            &[here, elsewhere, CANCEL_BUTTON],
+        ) {
+            InputAnswer::Accept { .. } => return Saved::At(default.to_owned()),
+            InputAnswer::Switch(_) => {}
+            _ => return Saved::Cancelled,
+        }
     }
+    #[cfg(test)]
+    let (picked, failed) = {
+        let _ = FETCHED_SAVE_TITLE;
+        let picked = SAVE_KEY.with(|p| p.borrow_mut().take());
+        (picked, SAVE_FAILS.with(|f| f.replace(false)))
+    };
     #[cfg(not(test))]
-    pick_file(
-        h,
-        true,
-        "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0",
-        "goyokey",
-        FETCHED_SAVE_TITLE,
-        Some(default),
-    )
+    let (picked, failed) = {
+        let picked = pick_file(
+            h,
+            true,
+            "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0",
+            "goyokey",
+            FETCHED_SAVE_TITLE,
+            Some(default),
+        );
+        let failed = picked.is_none() && dialog_failed();
+        (picked, failed)
+    };
+    match picked {
+        Some(path) => Saved::At(path),
+        None if failed => Saved::Failed,
+        None => Saved::Cancelled,
+    }
 }
 #[cfg(test)]
 thread_local! {
     /// The path the save step's dialog answers with in a test.
     pub static SAVE_KEY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    /// The save step's file dialog fails to open, once.
+    pub static SAVE_FAILS: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The touch plan of a removal (spec §9.1 `Screen::LostKey` step 4, §9.2a
@@ -3883,7 +4315,7 @@ impl App {
         let fields = 1 + 2 * i32::from(new) + i32::from(otp.is_some());
         let w = (796 - 16 * (fields - 1)) / fields;
         let mut x = 40;
-        self.password_field(CURRENT_PASS, "현재 비밀번호", x, y, w);
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, x, y, w);
         x += w + 16;
         if new {
             self.password_field(PASS, NEW_PASS, x, y, w);
@@ -5101,10 +5533,28 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
 
 // Key-file sync (spec §7.8-§7.19, §9.1-§9.3; stage 6).
 
-/// The Keys screen's key-file sync line (spec §9.1).
-pub const KS_OFF: &str = "열쇠 파일 동기화: 꺼짐";
-pub const KS_SAME: &str = "열쇠 파일 동기화: 켜짐";
-pub const KS_GONE: &str = "열쇠 파일 동기화: 켜짐 · 서버에 없음";
+#[cfg(test)]
+thread_local! {
+    /// The key-file sync view a preview shows on the Keys screen.
+    pub static KS_SHOWN: std::cell::RefCell<Option<vault::KeySyncView>> = const { std::cell::RefCell::new(None) };
+}
+/// The key-file sync view the Keys screen shows (spec §9.1, §2.29): the
+/// session's, or a preview's in a test.
+pub(crate) fn ks_view(s: Option<&Session>) -> Option<vault::KeySyncView> {
+    #[cfg(test)]
+    if let Some(v) = KS_SHOWN.with(|k| *k.borrow()) {
+        return Some(v);
+    }
+    s.and_then(Session::key_sync_view)
+}
+/// The Keys screen's note when the key file syncs (spec §2.29): the other
+/// PCs' changes come from the server, never by USB over this key file.
+pub const KEYS_NOTE_SYNCED: &str = "이 열쇠 파일은 서버로 동기화됩니다. 다른 PC에서 비밀번호나 열쇠를 바꾸면 아래 열쇠 파일 줄에 [받기…]가 나타납니다. USB로 가져온 열쇠 파일을 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.";
+/// The Keys screen's key-file sync line (spec §9.1, §2.29): where this
+/// vault's key file lives, in one line, beside the one switch.
+pub const KS_OFF: &str = "열쇠 파일: 이 PC에만 보관 (다른 PC에는 USB로)";
+pub const KS_SAME: &str = "열쇠 파일: 서버로 동기화 (실험)";
+pub const KS_GONE: &str = "열쇠 파일: 서버로 동기화 (실험) · 서버에 없음";
 pub const KS_READY: &str = "서버에 새 열쇠 파일 있음 (수정 {e})";
 pub const KS_GATE: &str = "서버에 확인할 열쇠 변경 있음 (수정 {e})";
 pub const KS_FORK: &str = "서버의 열쇠 파일과 갈라짐 (수정 {e}) · [받기…]로 합치세요";
@@ -5197,7 +5647,8 @@ pub const N_GATE_PENDING: &str = "다른 PC에서 보안 키 구성이나 설정
 pub const N_GONE: &str = "서버에 이 금고의 열쇠 파일이 없습니다(다른 PC에서 열쇠 파일 동기화를 껐거나 서버에서 지움). 다른 PC에서 끈 것이라면 다시 올리지 말고 그 PC의 열쇠 파일을 USB로 받으세요. 아무도 끄지 않았는데 지워진 것이 확실할 때만 '열쇠 관리'에서 '열쇠 파일 다시 올리기'를 누르세요. 그때까지 이 PC는 서버 사본을 합치지도 올리지도 않습니다(변경은 이 PC에 저장됩니다).";
 pub const N_READY: &str =
     "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.";
-pub const N_NOKEYSYNC: &str = "서버가 열쇠 파일 동기화를 받지 않습니다(강제 명령에 --key-sync 없음). docs/SECURITY_KEY.md를 보세요.";
+/// What to fix, and that goyo-sync checks again (spec §2.29).
+pub const N_NOKEYSYNC: &str = "서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정의 '강제 명령 줄…'이 만든 줄로 바꾸면 goyo-sync가 2분 안에 다시 확인합니다.";
 pub const N_KEYUP_REFUSED: &str = "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.";
 pub const N_HELPER: &str = "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.";
 /// S-KEYSYNC-OFF-ADMIN (spec §7.16 step 7), once, after the deletion line.
@@ -5732,6 +6183,23 @@ mod tests {
         }
     }
 
+    /// The code after a key change (spec §2.29): the photo dialog first only
+    /// for a vault that syncs and a change taken with the code; else the
+    /// general sentence after the rest, and nothing without a code.
+    #[test]
+    fn the_code_photo_is_for_the_other_pcs_of_a_synced_vault() {
+        let code = "E7 · 1A2B-3C4D-5E6F-7A8B".to_owned();
+        let more = vec!["more".to_owned()];
+        assert_eq!(
+            code_told(Some(code.clone()), true, more.clone()),
+            [fill(CODE_PHOTO, &[&code]), "more".to_owned()]
+        );
+        assert_eq!(
+            code_told(Some(code.clone()), false, more.clone()),
+            ["more".to_owned(), fill(CODE_SK, &[&code])]
+        );
+        assert_eq!(code_told(None, true, more), ["more".to_owned()]);
+    }
     /// The touch plan of a removal (spec §9.1 step 4, §9.2a; S45-1 #9,
     /// round 2 finding 26): keys 1-4, key 4 a replacement paired with key 1
     /// only. Losing key 1 leaves key 4 "paired only with it"; removed with

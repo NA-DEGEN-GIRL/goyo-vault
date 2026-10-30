@@ -331,6 +331,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn GetOpenFileNameW(ofn: *mut OpenFile) -> i32;
     fn GetSaveFileNameW(ofn: *mut OpenFile) -> i32;
+    fn CommDlgExtendedError() -> u32;
 }
 type SessionNotify = unsafe extern "system" fn(Hwnd, u32) -> i32;
 type SessionUnnotify = unsafe extern "system" fn(Hwnd) -> i32;
@@ -556,8 +557,10 @@ pub enum InputKind<'a> {
     /// A masked password field under the text.
     Password,
     /// A code field under the text (a key code, an OTP code): not masked,
-    /// with the same subclass and input scope as a password field.
-    Code,
+    /// with the same subclass and input scope as a password field, holding
+    /// what was typed before when it is asked again (a code that did not
+    /// match or parse is kept for correcting, never retyped).
+    Code(&'a str),
     /// A checklist under the text: each item's label (composed by the
     /// caller) and first state. At most PICK_MAX items.
     Pick(&'a [(&'a str, bool)]),
@@ -748,7 +751,7 @@ unsafe fn build_input(
     let inner = width - 2 * margin;
     let text_h = match kind {
         InputKind::Preview { .. } => px(240),
-        InputKind::Password | InputKind::Code | InputKind::Pick(_) => unsafe {
+        InputKind::Password | InputKind::Code(_) | InputKind::Pick(_) => unsafe {
             let dc = GetDC(owner);
             let old = SelectObject(dc, font);
             let mut r = Rect {
@@ -765,7 +768,7 @@ unsafe fn build_input(
     let mut y = margin + text_h + px(12);
     let field_y = y;
     match kind {
-        InputKind::Password | InputKind::Code => y += px(26) + px(16),
+        InputKind::Password | InputKind::Code(_) => y += px(26) + px(16),
         InputKind::Pick(items) => y += items.len() as i32 * px(26) + px(8),
         InputKind::Preview { check: Some(_) } => y += px(22) + px(12),
         InputKind::Preview { check: None } => {}
@@ -900,13 +903,17 @@ unsafe fn fill_input(
     };
     ok &= guard(text_box);
     match kind {
-        InputKind::Password | InputKind::Code => {
+        InputKind::Password | InputKind::Code(_) => {
             // ES_AUTOHSCROLL, WS_TABSTOP, with a sunken edge; ES_PASSWORD
-            // for a password.
+            // for a password. A code asked again starts with the one typed.
             let password = matches!(kind, InputKind::Password);
+            let typed = match kind {
+                InputKind::Code(typed) if typed.len() <= 64 => typed,
+                _ => "",
+            };
             let edit = child(
                 "EDIT",
-                "",
+                typed,
                 if password { 0x20 } else { 0 } | 0x80 | 0x0001_0000,
                 0x200,
                 (margin, field_y, inner, px(26)),
@@ -1049,7 +1056,7 @@ unsafe fn fill_input(
     let result = match answer {
         Some((_, Role::Accept)) => match kind {
             InputKind::Password => unsafe { read_input() }.map(InputAnswer::Password),
-            InputKind::Code => unsafe { read_input() }.map(InputAnswer::Code),
+            InputKind::Code(_) => unsafe { read_input() }.map(InputAnswer::Code),
             // BM_GETCHECK of each item.
             InputKind::Pick(_) => Some(InputAnswer::Pick(
                 (0..picks.len() as u8)
@@ -1197,6 +1204,12 @@ pub fn dialog(h: Hwnd, save: bool, key: bool) -> Option<PathBuf> {
         None,
     )
 }
+/// Whether the last pick_file returned None because the dialog failed
+/// (CommDlgExtendedError), not because the user cancelled it.
+static DIALOG_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn dialog_failed() -> bool {
+    DIALOG_FAILED.load(Ordering::Relaxed)
+}
 /// An open or save file dialog. `filter` and `title` are Korean sources
 /// (passed through tr()); `ext` is added to a typed name without one ("":
 /// none); `initial` prefills the name and folder.
@@ -1211,7 +1224,17 @@ pub fn pick_file(
     use std::os::windows::ffi::OsStrExt;
     let mut file = vec![0u16; 32768];
     if let Some(initial) = initial {
-        let name: Vec<u16> = initial.as_os_str().encode_wide().collect();
+        // The common dialogs refuse a `\\?\` path and fail without showing,
+        // so a normalized path goes in as the user knows it.
+        let text = initial.to_string_lossy();
+        let plain = match text.strip_prefix("\\\\?\\") {
+            Some(rest) => match rest.strip_prefix("UNC\\") {
+                Some(share) => format!("\\\\{share}"),
+                None => rest.to_owned(),
+            },
+            None => text.into_owned(),
+        };
+        let name: Vec<u16> = std::ffi::OsStr::new(&plain).encode_wide().collect();
         if name.len() < file.len() && !name.contains(&0) {
             file[..name.len()].copy_from_slice(&name);
         }
@@ -1238,6 +1261,12 @@ pub fn pick_file(
             GetOpenFileNameW(&mut o)
         }
     });
+    // A cancel leaves no error; a dialog that could not open (a path it
+    // refuses, a buffer it cannot use) does, and its caller says so.
+    DIALOG_FAILED.store(
+        ok == 0 && unsafe { CommDlgExtendedError() } != 0,
+        Ordering::Relaxed,
+    );
     if ok == 0 {
         return None;
     }

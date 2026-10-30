@@ -13,7 +13,7 @@
 mod keys;
 use crate::{
     sys,
-    transport::{Failure, Killed, Transport, classify, first_line},
+    transport::{Failure, KEY_IGNORED, Killed, Transport, classify, first_line, key_ignored},
 };
 use goyo_vault::{
     syncfile::{
@@ -25,7 +25,7 @@ use goyo_vault::{
     },
 };
 #[cfg(all(test, feature = "security-key"))]
-pub use keys::{BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, VIEW_STUCK, key_gate};
+pub use keys::{BEHIND_HOURLY, KEY_OPENS, KEY_RETRY, KeyGate, LINE_RETRY, VIEW_STUCK, key_gate};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -230,6 +230,17 @@ fn call_with<T: Transport>(
             return Err(CallError::Failed(state, String::new()));
         }
     };
+    // ssh ignored the dedicated key (its file's permissions) and may have
+    // logged in with another one, outside the forced command: refused, as
+    // a failed login, whatever came back.
+    if let Some(identity) = transport.dedicated_key()
+        && key_ignored(&out.log, &identity)
+    {
+        log.line(&format!(
+            "{label} {op} failed state=auth ms={ms}: {KEY_IGNORED}; let only this Windows account read the key file (see goyo-sync's settings window)"
+        ));
+        return Err(CallError::Failed(SyncState::Auth, KEY_IGNORED.into()));
+    }
     // ssh's own first message, and the first stderr line, which for ssh is
     // the remote side's: shown in the log, never used to pick a state.
     let (ssh, err) = (first_line(&out.log), first_line(&out.stderr));

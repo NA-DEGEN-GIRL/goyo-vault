@@ -560,6 +560,13 @@ impl Transport for Wire<'_> {
         );
         result
     }
+    fn dedicated_key(&self) -> Option<PathBuf> {
+        if !self.args.iter().any(|a| a == "IdentitiesOnly=yes") {
+            return None;
+        }
+        let at = self.args.iter().position(|a| a == "-i")?;
+        self.args.get(at + 1).map(PathBuf::from)
+    }
 }
 
 /// A failed exchange in the words the window needs.
@@ -577,6 +584,9 @@ pub enum Cause {
     ScriptMissing,
     /// The server's shell did not find the Python command.
     PythonMissing,
+    /// ssh ignored the dedicated key: others may read its file
+    /// ([`crate::transport::KEY_IGNORED`]).
+    KeyPermissions,
 }
 impl Trouble {
     pub fn of(state: SyncState) -> Self {
@@ -591,7 +601,9 @@ impl Trouble {
 /// missing script or Python (both are `server` to the helper).
 pub fn trouble(state: SyncState, stderr: &[u8], detail: String) -> Trouble {
     let text = String::from_utf8_lossy(stderr);
-    let (state, cause) = if text.contains("can't open file") {
+    let (state, cause) = if detail == crate::transport::KEY_IGNORED {
+        (state, Cause::KeyPermissions)
+    } else if text.contains("can't open file") {
         (SyncState::Server, Cause::ScriptMissing)
     } else if state == SyncState::Server
         && (text.contains("command not found")
@@ -975,7 +987,9 @@ pub enum Got {
 /// Fetches the head into `path`, a new file chosen in a save dialog. The
 /// user may have picked an existing file, perhaps a vault in use, so its
 /// presence is read from the folder listing, never with a handle on it; the
-/// new file is created with CREATE_NEW, which fails on one that exists.
+/// new file is created with CREATE_NEW, which fails on one that exists. A
+/// sync folder left under that name (`<path>.sync`) is refused too: the
+/// helper would take its state for the new file's (spec §2.29 (sync)).
 pub fn fetch(
     runner: &mut dyn Runner,
     log: &Log,
@@ -983,7 +997,7 @@ pub fn fetch(
     id: [u8; 16],
     path: &Path,
 ) -> Got {
-    if present(path) {
+    if present(path) || syncfile::sync_dir(path).is_some_and(|d| present(&d)) {
         return Got::Exists;
     }
     let mut wire = Wire::new(
@@ -1002,9 +1016,10 @@ pub fn fetch(
         }
     }
 }
-/// What "열쇠 파일도 받기" did once the vault version was saved (spec
-/// §7.12 "Setup and GUI", §7.17; S6-3 #20): the server's key file written
-/// as the key view next to it, or why not. The vault file stays either way.
+/// What "이 PC로 가져오기" did with the key file once the vault version was
+/// saved (spec §7.12 "Setup and GUI", §7.17; S6-3 #20): the server's key
+/// file written as the key view next to it, or why not. The vault file
+/// stays either way.
 #[cfg(feature = "security-key")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyGot {
@@ -1080,6 +1095,82 @@ pub fn fetch_key(
         return KeyGot::WriteFailed;
     }
     KeyGot::Written
+}
+/// What the server holds as a vault's key file, as this PC's line lets it
+/// see (the server list of "이 PC로 가져오기", security-key build).
+#[cfg(feature = "security-key")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerKey {
+    /// A key record of this vault on top.
+    Held,
+    /// None (EMPTY, or a cut on top).
+    Missing,
+    /// BAD_REQUEST: this PC's line has no `--key-sync` for the vault.
+    NotAllowed,
+    /// Not asked, or the exchange or its answer failed.
+    Unknown,
+}
+/// The server list asks this many vaults' key files at most, one ssh
+/// login each after the LIST, so a listing stays quick; the rest show
+/// nothing.
+#[cfg(feature = "security-key")]
+pub const MAX_KEY_ASKS: usize = 4;
+/// GETKEY with nothing held for each listed vault, one exchange each and
+/// nothing written: what [`ServerKey`] each one is. After a failed
+/// exchange the rest are not asked.
+#[cfg(feature = "security-key")]
+pub fn server_keys(
+    runner: &mut dyn Runner,
+    log: &Log,
+    config: &Config,
+    ids: &[[u8; 16]],
+) -> Vec<ServerKey> {
+    use goyo_vault::{
+        syncfile::{RecordKind, parse_record},
+        vault::keyfile::is_sync_key_file,
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    let mut failed = false;
+    for (n, id) in ids.iter().enumerate() {
+        if n >= MAX_KEY_ASKS || failed {
+            out.push(ServerKey::Unknown);
+            continue;
+        }
+        let mut wire = Wire::new(
+            runner,
+            ssh_options(config),
+            Duration::from_secs(config.timeout),
+        );
+        let held = match call(
+            &mut wire,
+            &Request::get_key(*id, 0, None),
+            "window getkey",
+            log,
+        ) {
+            Ok(reply) => match reply.status {
+                Status::Ok => match parse_record(reply.blob(), reply.version, id) {
+                    Some(r) if r.kind == RecordKind::Key && !r.damaged => {
+                        if is_sync_key_file(r.payload, id).is_some() {
+                            ServerKey::Held
+                        } else {
+                            ServerKey::Unknown
+                        }
+                    }
+                    Some(_) => ServerKey::Missing,
+                    None => ServerKey::Unknown,
+                },
+                Status::Empty => ServerKey::Missing,
+                Status::BadRequest => ServerKey::NotAllowed,
+                _ => ServerKey::Unknown,
+            },
+            Err(_) => {
+                failed = true;
+                ServerKey::Unknown
+            }
+        };
+        out.push(held);
+    }
+    out
 }
 /// Whether the folder of `path` lists something by its name (file, folder
 /// or link); read from the listing alone, like [`engine::listed`].
@@ -2226,7 +2317,8 @@ pub(crate) mod tests {
         assert!(log_tail(&t.0.join("none"), 5).is_empty());
     }
 
-    /// "열쇠 파일도 받기" (spec §7.12, §7.17; S6-3 #20): a key record of
+    /// "이 PC로 가져오기" with the key file (spec §7.12, §7.17; S6-3 #20): a
+    /// key record of
     /// the vault becomes the key view in a sync folder made for it (`line`
     /// 0, nothing answered), never a `.goyokey`; BAD_REQUEST is NoKeys,
     /// EMPTY or a cut is Empty, another vault's or a broken file and a
@@ -2275,6 +2367,123 @@ pub(crate) mod tests {
         assert_eq!(v.record, served);
         assert!(!t.0.join("from-server.goyokey").exists());
     }
+    /// ssh ignored the dedicated key (its file's permissions, spec §2.29
+    /// (sync)): with a dedicated key the exchange is refused as a failed
+    /// login whatever came back, and the window learns why; without one
+    /// (the user's usual ssh keys) the same words change nothing. A server
+    /// cannot raise it: words after the remote side's version line are not
+    /// ssh's own.
+    #[test]
+    fn an_ignored_dedicated_key_is_refused() {
+        let t = Temp::new("keyperm");
+        let log = log(&t);
+        let said = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\r\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\nPermissions for 'C:\\Users\\me\\.ssh\\goyo_sync' are too open.\r\nThis private key will be ignored.\r\nLoad key \"C:\\Users\\me\\.ssh\\goyo_sync\": bad permissions\r\n";
+        let ours = Path::new(r"C:\Users\me\.ssh\goyo_sync");
+        assert!(crate::transport::key_ignored(said.as_bytes(), ours));
+        // The same file as ssh may print it: other case, forward slashes.
+        assert!(crate::transport::key_ignored(
+            b"Load key \"c:/users/ME/.ssh/goyo_sync\": bad permissions\r\n",
+            ours
+        ));
+        assert!(!crate::transport::key_ignored(
+            b"Received disconnect from 1.2.3.4: bad permissions\r\n",
+            ours
+        ));
+        // Another key of ~/.ssh/config with loose permissions: the
+        // dedicated key was still used.
+        let other = "Permissions for 'C:\\Users\\me\\.ssh\\id_ed25519' are too open.\r\nThis private key will be ignored.\r\nLoad key \"C:\\Users\\me\\.ssh\\id_ed25519\": bad permissions\r\n";
+        assert!(!crate::transport::key_ignored(other.as_bytes(), ours));
+        let key = t.0.join("goyo_sync");
+        fs::write(&key, b"not read").unwrap();
+        let dedicated = server_config(&Fields {
+            identity: key.to_string_lossy().into_owned(),
+            ..fields()
+        })
+        .unwrap();
+        // ssh's words about the dedicated key itself.
+        let said = said.replace(r"C:\Users\me\.ssh\goyo_sync", &key.to_string_lossy());
+        let ignored = || {
+            let mut o = hello_ok().unwrap();
+            o.log = said.as_bytes().to_vec();
+            Ok(o)
+        };
+        // Another key's words leave the check going on.
+        let s = Script::with([
+            {
+                let mut o = hello_ok().unwrap();
+                o.log = other.as_bytes().to_vec();
+                Ok(o)
+            },
+            list_ok(&[]),
+        ]);
+        assert_eq!(
+            check(&mut s.clone(), &log, &dedicated),
+            Checked::Ok { vaults: 0 }
+        );
+        let s = Script::with([ignored()]);
+        match check(&mut s.clone(), &log, &dedicated) {
+            Checked::Failed(t) => {
+                assert_eq!((t.state, t.cause), (SyncState::Auth, Cause::KeyPermissions));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(s.ran().len(), 1, "nothing after the refused exchange");
+        assert!(
+            fs::read_to_string(t.0.join(crate::LOG))
+                .unwrap()
+                .contains(crate::transport::KEY_IGNORED)
+        );
+        // Without a dedicated key: the check goes on.
+        let s = Script::with([ignored(), list_ok(&[])]);
+        assert_eq!(
+            check(&mut s.clone(), &log, &config()),
+            Checked::Ok { vaults: 0 }
+        );
+    }
+    /// The server list's key files (security-key build, spec §2.29 (sync)):
+    /// one GETKEY per vault, read only; a failed exchange leaves the rest
+    /// unasked.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn the_server_list_asks_each_vaults_key_file() {
+        use goyo_vault::syncfile::{RecordKind, render_record_header};
+        const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+        let id: [u8; 16] = KS[8..24].try_into().unwrap();
+        let epoch = u64::from_le_bytes(KS[24..32].try_into().unwrap());
+        let t = Temp::new("serverkeys");
+        let log = log(&t);
+        let mut record = render_record_header(RecordKind::Key, false, 0, epoch).to_vec();
+        record.extend_from_slice(KS);
+        let cut = render_record_header(RecordKind::Cut, false, 3, epoch).to_vec();
+        let s = Script::with([
+            reply(Status::Ok, 2, &record),
+            reply(Status::Ok, 3, &cut),
+            reply(Status::Empty, 0, b""),
+            reply(Status::BadRequest, 0, b""),
+        ]);
+        // MAX_KEY_ASKS exchanges at most.
+        let ids = [id; 6];
+        assert_eq!(
+            server_keys(&mut s.clone(), &log, &config(), &ids),
+            [
+                ServerKey::Held,
+                ServerKey::Missing,
+                ServerKey::Missing,
+                ServerKey::NotAllowed,
+                ServerKey::Unknown,
+                ServerKey::Unknown,
+            ]
+        );
+        assert_eq!(s.ran().len(), MAX_KEY_ASKS);
+        // A failed exchange leaves the rest unasked.
+        let s = Script::with([reply(Status::Empty, 0, b""), ssh_said("Connection refused")]);
+        assert_eq!(
+            server_keys(&mut s.clone(), &log, &config(), &[id; 3]),
+            [ServerKey::Missing, ServerKey::Unknown, ServerKey::Unknown]
+        );
+        assert_eq!(s.ran().len(), 2);
+        assert!(!t.0.join("vault.goyo.sync").exists());
+    }
     /// The server list and a fetch through the window's jobs; a target that
     /// exists is never written, before any network call.
     #[test]
@@ -2299,6 +2508,13 @@ pub(crate) mod tests {
         let s = Script::default();
         assert_eq!(fetch(&mut s.clone(), &log, &c, id, &target), Got::Exists);
         assert!(s.ran().is_empty());
+        // A sync folder left under the name is refused the same way (spec
+        // §2.29 (sync)): the helper would take its state for the new file.
+        let left = t.0.join("left.goyo");
+        fs::create_dir(t.0.join("left.goyo.sync")).unwrap();
+        assert_eq!(fetch(&mut s.clone(), &log, &c, id, &left), Got::Exists);
+        assert!(s.ran().is_empty());
+        assert!(!left.exists());
         let other = t.0.join("other.goyo");
         assert_eq!(
             fetch(

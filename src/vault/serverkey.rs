@@ -330,9 +330,9 @@ pub const FETCHED_OLDER: &str = "서버의 열쇠 파일이 이 PC의 금고보�
 /// (a fork, an older state, or one that needs a gate): not restored from.
 pub const FETCHED_HELD: &str = "서버에서 받은 열쇠 파일이 이 PC가 기록해 둔 이 금고의 열쇠와 맞지 않아 열지 않았습니다. 이 PC의 열쇠 파일(열쇠 백업)로 연 뒤 '열쇠 관리'에서 받으세요.";
 /// No key file from the server next to the vault file.
-pub const FETCHED_NONE: &str = "이 금고 파일의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync의 '서버에서 받기…'에서 '열쇠 파일도 받기'를 켜고 다시 받으세요.";
+pub const FETCHED_NONE: &str = "이 금고 파일의 동기화 폴더에 서버에서 받은 열쇠 파일이 없습니다. goyo-sync의 '이 PC로 가져오기…'로 다시 가져오거나, 다른 PC의 열쇠 파일을 USB로 가져와 금고 옆에 두세요.";
 /// What a session from the server's key file holds until it is saved.
-pub const FETCHED_UNSAVED: &str = "서버에서 받은 열쇠 파일을 이 PC에 저장하기 전에는 항목을 고치거나 저장하지 않습니다. 위의 [확인]으로 저장할 곳을 정하세요.";
+pub const FETCHED_UNSAVED: &str = "서버에서 받은 열쇠 파일을 이 PC에 저장하기 전에는 항목을 고치거나 저장하지 않습니다. 위 칸의 '코드 확인'(또는 '저장하기')으로 먼저 저장하세요.";
 /// The save step's path is in a sync folder.
 pub const FETCHED_IN_SYNC: &str = "열쇠 파일은 동기화 폴더 밖에 저장하세요. 다른 곳을 고르세요.";
 /// The save step never replaces a file.
@@ -402,7 +402,22 @@ pub fn fetched_key_info(vault: &Path) -> Option<super::KeyInfo> {
     let (path, bytes) = fetched(vault)?;
     super::keyfile::key_info_of(&path, bytes)
 }
-/// Whether `key` is the key view Restore offers for `vault`.
+/// Whether this PC's record of vaults (the anchor) holds a confirmed line
+/// of `vault`'s vault: this PC opened it before, so it is no new PC. A
+/// line that only waits (a save cut off after its code) is not one.
+pub fn known_here(vault: &Path) -> bool {
+    let Some(id) = super::vault_id(vault) else {
+        return false;
+    };
+    let Some(dir) = super::anchor::locate() else {
+        return false;
+    };
+    matches!(
+        super::anchor::read(&dir),
+        Ok(super::anchor::Parsed::Doc(doc)) if doc.lines(&id).vault.is_some()
+    )
+}
+/// Whether `key` is the key view in `vault`'s sync folder.
 pub fn is_fetched_key(vault: &Path, key: &Path) -> bool {
     syncfile::sync_dir(vault).is_some_and(|d| d.join(KEY_VIEW) == key)
 }

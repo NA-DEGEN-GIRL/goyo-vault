@@ -24,6 +24,12 @@ use std::{io::Read, path::Path, time::Duration};
 /// again on a line without key ops, and a PRUNE that line refused goes
 /// again: at helper start, then every ten minutes.
 pub const KEY_RETRY: u64 = RETRY_HELD;
+/// While this PC's line serves no key ops for a vault that uses key-file
+/// sync (a request, or flags bit1 on its last upload), KR and KG ask again
+/// this often instead, so a line fixed on the server is seen within two
+/// minutes (spec §2.29 (sync)). A request the app writes again goes at
+/// once.
+pub const LINE_RETRY: u64 = 120;
 /// A KEY_BEHIND upload waits this long while the key view cannot show the
 /// server's floor (absent, or `line` 1); otherwise it waits for the view to
 /// change (S6R2 #9).
@@ -343,7 +349,7 @@ impl<T: Transport> Pass<'_, T> {
             }
             None => false,
         };
-        let nokeys = k.line_off() && (k.req.is_some() || self.v.out_flags & 2 != 0);
+        let nokeys = k.line_off() && self.uses_key_sync();
         if refused {
             self.set(SyncState::Refused);
         }
@@ -368,6 +374,11 @@ impl<T: Transport> Pass<'_, T> {
             (self.v.queued, self.queued_now, self.downloaded) = (None, false, None);
             self.note("server copy not written: the key view after it is not current; fetched again later");
         }
+    }
+    /// The vault uses key-file sync: the app wrote a request, or the last
+    /// upload's flags say GOYOKS01.
+    fn uses_key_sync(&self) -> bool {
+        self.v.keys.req.is_some() || self.v.out_flags & 2 != 0
     }
     /// KP, then what `Engine::due` compares the listing with.
     pub(super) fn keys_last(&mut self, id: &[u8; 16]) {
@@ -546,10 +557,11 @@ impl<T: Transport> Pass<'_, T> {
             return Kr::NotRun;
         };
         let skip = if k.view.answered == Some(g.sha) {
-            // Answered: only outcomes 3 and 4 go again, at start and every
-            // 10 minutes (S6-2 #7, S6-1 #18).
+            // Answered: only outcomes 3 and 4 go again, at start, at their
+            // retry (S6-2 #7, S6-1 #18) and when the app wrote the request
+            // again (spec §2.29 (sync)).
             let again = matches!(k.view.outcome, KeyOutcome::Refused | KeyOutcome::NoKeyOps)
-                && passed(k.kr_retry, self.now, KEY_RETRY);
+                && (fresh || passed(k.kr_retry, self.now, KEY_RETRY));
             !again || self.waiting()
         } else {
             !fresh && self.waiting() || k.limited(&g.sha, self.now)
@@ -640,10 +652,11 @@ impl<T: Transport> Pass<'_, T> {
                     fetched_key,
                 }
             }
-            // This line serves no key ops for the vault: no backoff, and
-            // KR, KG and KP ask again at start and every 10 minutes.
+            // This line serves no key ops for the vault: no backoff; KR and
+            // KG ask again at start and every two minutes (LINE_RETRY), KP
+            // every 10.
             Status::BadRequest => {
-                (self.v.keys.kr_retry, self.v.keys.kg_retry) = (now + KEY_RETRY, now + KEY_RETRY);
+                (self.v.keys.kr_retry, self.v.keys.kg_retry) = (now + LINE_RETRY, now + LINE_RETRY);
                 Update {
                     answer: answer(KeyOutcome::NoKeyOps),
                     ..Update::line(1)
@@ -675,7 +688,8 @@ impl<T: Transport> Pass<'_, T> {
     /// in every pass where P5 runs or P4 has an upload (`wanted`); after a
     /// KR in this pass only once it was answered; never while this PC's
     /// CUT is unanswered; and while `line` is 1 only at start and every 10
-    /// minutes. Returns the order rule (S6R2 #1): P4 and P5 run only after
+    /// minutes (two for a vault that uses key-file sync). Returns the order
+    /// rule (S6R2 #1): P4 and P5 run only after
     /// KG wrote `kview` or found it current, except while a CUT is
     /// unanswered or `line` is 1, where this PC has no KeySyncGone hold.
     fn key_get(&mut self, id: &[u8; 16], kr: Kr, wanted: bool) -> bool {
@@ -719,7 +733,12 @@ impl<T: Transport> Pass<'_, T> {
                 ..Update::line(0)
             },
             Status::BadRequest => {
-                self.v.keys.kg_retry = self.time() + KEY_RETRY;
+                let wait = if self.uses_key_sync() {
+                    LINE_RETRY
+                } else {
+                    KEY_RETRY
+                };
+                self.v.keys.kg_retry = self.time() + wait;
                 Update::line(1)
             }
             _ => {

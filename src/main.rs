@@ -236,6 +236,12 @@ enum Screen {
     /// S-REVIEW: what came in by sync since the day before a loss.
     #[cfg(feature = "security-key")]
     Review,
+    /// "서버에서 가져온 금고" (spec §2.29): a vault file goyo-sync fetched
+    /// with the server's key file in its sync folder and no key file on
+    /// this PC; the password, the touch, then the TOFU banner's code and
+    /// the key file saved next to the vault.
+    #[cfg(feature = "security-key")]
+    Fetched,
 }
 /// The command whose phased flow runs (see App::flow).
 type FlowId = i32;
@@ -508,6 +514,20 @@ thread_local! {
 }
 /// The login screen's note under the button (the security-key build's
 /// S-LOGIN-NOTE and S-LOGIN-PWONLY take its place for such key files).
+/// Every re-authentication's password field (spec §2.29): an open vault
+/// asks again to make sure it is its owner at the keyboard.
+const REAUTH_LABEL: &str = "본인 확인: 현재 비밀번호";
+const REAUTH_LABEL_ADOPT: &str = "본인 확인: 이 PC의 현재 비밀번호";
+/// Restore's labels and note (spec §2.29): a backup made with "금고 백업",
+/// the key file it was made with, and where the vault comes back to.
+const RESTORE_BACKUP_LABEL: &str = "금고 백업 파일 (.goyo) · '찾기'로 선택";
+const RESTORE_KEY_LABEL: &str = "그 백업을 만들 때 쓰던 열쇠 파일";
+const RESTORE_DEST_LABEL: &str = "되살린 금고를 저장할 새 위치";
+const RESTORE_NOTE: &str = "'금고 백업'으로 만든 파일을 새 금고 파일로 되살립니다. 백업을 만들 때 쓰던 열쇠 파일(또는 '열쇠 백업')과 그때의 비밀번호가 필요합니다.";
+/// The login's note when the key file is not on this PC (spec §2.29).
+const KEY_MISSING_NOTE: &str = "열쇠 파일이 이 PC에 없습니다. 다른 PC에서 가져온 금고라면 그 PC의 열쇠 파일을 USB로 가져와 이 금고 옆에 {name} 이름으로 두세요.";
+/// The same for a key file kept elsewhere (a USB stick not plugged in).
+const KEY_ELSEWHERE_NOTE: &str = "열쇠 파일 {name}이(가) 보이지 않습니다. USB 등에 두었다면 꽂은 뒤 여세요. 다른 곳에 있으면 '찾기'로 고르세요.";
 const LOGIN_PLAIN_NOTE: &str = "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠·OTP를 우회하는 복구 기능은 없습니다.";
 /// S-OLDER (spec §5.1): asked before a login opens a vault file saved
 /// under an older key of the key file, default No.
@@ -519,7 +539,14 @@ const OLDER_DECLINED: &str = "열지 않았습니다. 백업에서 복원이나 
 const ROTATE_QUESTION: &str = "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n계속할까요?";
 const ROTATE_QUESTION_SYNCED: &str = "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n• 동기화 중인 금고입니다. 다른 PC는 이 열쇠 파일을 받을 때까지 동기화를 멈춥니다(USB로 '새 열쇠 파일 받기'). 열쇠는 한 번에 한 PC에서만 바꾸고, 서버 스크립트와 모든 PC(고요 금고·goyo-sync)를 먼저 0.9.0으로 업데이트하세요.\n계속할까요?";
 /// S-BACKUP: asked after a key change wrote a new key file.
-const BACKUP_QUESTION: &str = "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요? 예전 열쇠 백업으로는 앞으로 저장하는 내용을 열 수 없습니다.";
+const BACKUP_QUESTION: &str = "열쇠 파일이 바뀌었습니다. 새 열쇠 파일을 지금 백업할까요?\n이제 금고를 여는 데 필요한 것은 이 새 열쇠 파일입니다. 예전 '열쇠 백업'으로는 앞으로 저장하는 항목을 열 수 없으니, 이 PC나 열쇠 파일을 잃을 때를 대비해 새 사본을 USB 등 금고와 다른 곳에 두세요.";
+/// The save dialogs of "금고 백업" and "열쇠 백업": what each file is and
+/// where to keep it (spec §2.29).
+const VAULT_BACKUP_TITLE: &str =
+    "금고 백업 저장 · 항목이 담긴 금고 파일의 사본 (열려면 열쇠 파일과 비밀번호도 필요)";
+const KEY_BACKUP_TITLE: &str = "열쇠 백업 저장 · 열쇠 파일의 사본, 금고와 다른 곳(USB 등)에 보관";
+/// A file dialog that could not open (spec §2.29: never a silent end).
+const DIALOG_FAILED: &str = "파일을 고르는 창을 열지 못했습니다. 경로에 쓸 수 없는 문자가 있거나 폴더에 접근할 수 없을 수 있습니다. 다시 하거나 다른 폴더를 고르세요.";
 /// S-KEYDAMAGED-SAVE as a question (spec §5.5 S2): whether the new key
 /// file was saved is unknown, so it is saved from memory before the lock.
 const KEY_DAMAGED_SAVE: &str = "열쇠 파일을 저장했는지 확인하지 못했습니다. 잠그기 전에 새 열쇠 파일을 다른 저장장치에 저장하세요. 그 파일과 새 비밀번호(와 보안 키)로 이 금고를 열 수 있습니다.\n지금 저장할까요?";
@@ -880,7 +907,11 @@ impl App {
     /// one. When the chosen key file needs the other layout, rebuilds the
     /// form keeping the typed password. True if the OTP field was added.
     fn fit_otp_field(&mut self) -> bool {
-        if !matches!(self.screen, Screen::Login | Screen::Restore) {
+        #[cfg(feature = "security-key")]
+        let fetched = self.screen == Screen::Fetched;
+        #[cfg(not(feature = "security-key"))]
+        let fetched = false;
+        if !matches!(self.screen, Screen::Login | Screen::Restore) && !fetched {
             return false;
         }
         let wanted = self.key_otp();
@@ -898,9 +929,10 @@ impl App {
         } else {
             &self.vault_path
         };
-        // The server's key file in the backup's key view (spec §7.17).
+        // The server's key file in the fetched vault's key view (spec
+        // §7.17, §2.29).
         #[cfg(feature = "security-key")]
-        if self.screen == Screen::Restore && vault::is_fetched_key(vault, &self.key_path) {
+        if self.screen == Screen::Fetched {
             return vault::fetched_key_info(vault);
         }
         let key = key_candidate(vault, &self.key_path).unwrap_or_else(|| self.key_path.clone());
@@ -955,6 +987,28 @@ impl App {
         }
         Ok(())
     }
+    /// The login's note for a key file that is not on this PC (spec §2.29):
+    /// the vault file is there, and neither its key file nor the temp file
+    /// of a cut-off save.
+    fn missing_key_note(&self, vault: &Path, key: &Path) -> Option<String> {
+        if self.screen != Screen::Login
+            || !vault.is_file()
+            || key.as_os_str().is_empty()
+            || key.is_file()
+            || key_candidate(vault, key).is_some()
+            || leftover_temp(key)
+        {
+            return None;
+        }
+        let own = vault.with_extension("goyokey");
+        let synced = syncfile::sync_dir(vault).is_some_and(|d| d.is_dir());
+        if key != own && !synced {
+            let name = key.file_name()?.to_string_lossy().into_owned();
+            return Some(fill(KEY_ELSEWHERE_NOTE, &[&name]));
+        }
+        let name = own.file_name()?.to_string_lossy().into_owned();
+        Some(fill(KEY_MISSING_NOTE, &[&name]))
+    }
     /// Key path caption; warns when the placement undoes the key file's
     /// protection. Refreshed whenever a path field changes.
     fn refresh_key_note(&mut self) {
@@ -979,13 +1033,25 @@ impl App {
                 "열쇠 파일 · 금고와 함께 클라우드 동기화 폴더에 있습니다"
             }
             (None, true) => "새 열쇠 파일 · 금고와 다른 곳(USB 등)에 두세요",
+            (None, false) if self.screen == Screen::Restore => RESTORE_KEY_LABEL,
+            (None, false)
+                if self
+                    .missing_key_note(Path::new(vault.as_str()), Path::new(key.as_str()))
+                    .is_some() =>
+            {
+                "열쇠 파일 · 이 경로에 없습니다"
+            }
             (None, false) => "열쇠 파일",
         };
         unsafe {
             SetWindowLongPtrW(
                 h,
                 -21,
-                if warning.is_some() {
+                if warning.is_some()
+                    || self
+                        .missing_key_note(Path::new(vault.as_str()), Path::new(key.as_str()))
+                        .is_some()
+                {
                     TONE_DANGER
                 } else {
                     TONE_MUTED
@@ -1121,6 +1187,12 @@ impl App {
     /// Login when a vault exists at the current path (or only its temp file,
     /// which the unlock takes back), otherwise Welcome.
     fn home(&self) -> Screen {
+        // A vault goyo-sync brought from the server with its key file, which
+        // this PC has not saved yet (spec §2.29).
+        #[cfg(feature = "security-key")]
+        if keys_ui::fetched_pending(&self.vault_path, &self.key_path) {
+            return Screen::Fetched;
+        }
         if self.vault_path.is_file() || vault_candidates(&self.vault_path) {
             Screen::Login
         } else {
@@ -1205,6 +1277,13 @@ impl App {
         }
     }
     fn build(&mut self) {
+        // The TOFU banner's code survives a rebuild (a sync event, a failed
+        // step): it is public, and retyping it is where users give up.
+        #[cfg(feature = "security-key")]
+        let code = (self.screen == Screen::Vault)
+            .then(|| self.read(keys_ui::GATE_CODE).ok())
+            .flatten()
+            .filter(|c| !c.is_empty());
         self.clear_controls();
         self.input_failed = false;
         match self.screen {
@@ -1222,6 +1301,8 @@ impl App {
             Screen::LostKey | Screen::KeyRemove => self.build_remove(),
             #[cfg(feature = "security-key")]
             Screen::Review => self.build_review(),
+            #[cfg(feature = "security-key")]
+            Screen::Fetched => self.build_fetched(),
         }
         let small = self.font_of(|t| t.small());
         let status = tr_lines(&self.status);
@@ -1246,6 +1327,14 @@ impl App {
             self.button(id, name, x + 2 + i as i32 * 73, y + 2, 71, 32, variant);
         }
         self.theme_scrollbars();
+        #[cfg(feature = "security-key")]
+        if let Some(code) = code
+            && self.handle(keys_ui::GATE_CODE) != 0
+        {
+            unsafe {
+                SetWindowTextW(self.handle(keys_ui::GATE_CODE), wide(&code).as_ptr());
+            }
+        }
         unsafe {
             InvalidateRect(self.hwnd, null(), 0);
         }
@@ -1371,7 +1460,7 @@ impl App {
                 "새 열쇠 파일 · 금고와 따로 보관하면 더 안전합니다",
             )
         } else if restore {
-            ("백업 파일 · '찾기'로 선택", "열쇠 파일")
+            (RESTORE_BACKUP_LABEL, RESTORE_KEY_LABEL)
         } else {
             ("금고 파일", "열쇠 파일")
         };
@@ -1379,7 +1468,7 @@ impl App {
         self.path_field(KPATH, BROWSE_K, key_label, &key_path, 220);
         let mut y = 292;
         if restore {
-            self.path_field(DEST, BROWSE_D, "복원할 새 파일", &dest_path, y);
+            self.path_field(DEST, BROWSE_D, RESTORE_DEST_LABEL, &dest_path, y);
             y += 72;
         }
         if create {
@@ -1479,7 +1568,23 @@ impl App {
             #[cfg(not(feature = "security-key"))]
             let keyed = false;
             if !keyed {
-                self.note(LOGIN_PLAIN_NOTE, AX, y + 62, AW, 40);
+                // Restore says what it does; a login whose key file is not
+                // on this PC says where it comes from (spec §2.29).
+                let missing = self.missing_key_note(&self.vault_path, &self.key_path);
+                let note = if restore {
+                    tr(RESTORE_NOTE).to_owned()
+                } else {
+                    missing
+                        .clone()
+                        .unwrap_or_else(|| tr(LOGIN_PLAIN_NOTE).to_owned())
+                };
+                let small = self.font_of(|t| t.small());
+                let tone = if missing.is_some() && !restore {
+                    TONE_DANGER
+                } else {
+                    TONE_MUTED
+                };
+                self.text(0, &note, (AX, y + 62, AW, 40), small, tone, 0);
             }
             if !restore {
                 // Secondary tasks under a painted divider (see LOGIN_LINKS).
@@ -1583,9 +1688,9 @@ impl App {
         self.button(NEXT, "›", 772, 322, 40, 36, theme::GHOST);
         self.button(BACKUP, "금고 백업", 40, 642, 112, 34, theme::SECONDARY);
         self.button(KEYBACKUP, "열쇠 백업", 160, 642, 104, 34, theme::SECONDARY);
-        self.button(CHANGE, "열쇠 관리", 272, 642, 140, 34, theme::SECONDARY);
+        self.button(CHANGE, "열쇠 관리", 272, 642, 148, 34, theme::SECONDARY);
         if self.session.as_ref().is_some_and(Session::uses_otp) {
-            self.button(OTP_SETUP, "OTP 백업", 420, 642, 104, 34, theme::SECONDARY);
+            self.button(OTP_SETUP, "OTP 백업", 428, 642, 104, 34, theme::SECONDARY);
         }
         self.text(0, "자동 잠금", (536, 650, 90, 20), small, TONE_MUTED, 2);
         let (x, y, _, _) = AUTO_LOCK_SWITCH;
@@ -1603,6 +1708,12 @@ impl App {
             self.build_tofu();
         }
         self.sync_detail();
+        // The banner's code field is the next step (spec §2.29).
+        #[cfg(feature = "security-key")]
+        let list = match self.handle(keys_ui::GATE_CODE) {
+            0 => list,
+            code => code,
+        };
         unsafe {
             SetFocus(list);
         }
@@ -1694,7 +1805,7 @@ impl App {
             AW,
             22,
         );
-        self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 160, AW);
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 160, AW);
         self.password_field(PASS, "새 비밀번호 · 12자 이상", AX, 232, AW);
         self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
         if let Some(tag) = otp {
@@ -1766,13 +1877,16 @@ impl App {
         let (x, w) = if hardware { (40, 796) } else { (AX, AW) };
         self.text(0, "열쇠 관리", (x, 80, w - 100, 34), title, TONE_TEXT, 0);
         self.button(BACK, "‹ 뒤로", x + w - 84, 84, 84, 32, theme::GHOST);
-        self.note(
-            "다른 PC에서 비밀번호를 바꿨다면 그 PC의 새 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.",
-            x,
-            124,
-            w,
-            40,
-        );
+        // A key file that syncs takes the other PCs' changes from the
+        // server ([받기…] below), not by USB.
+        let usb = "다른 PC에서 비밀번호를 바꿨다면 그 PC의 새 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요. 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.";
+        #[cfg(feature = "security-key")]
+        let usb = if keys_ui::ks_view(self.session.as_ref()).is_some_and(|v| v.on) {
+            keys_ui::KEYS_NOTE_SYNCED
+        } else {
+            usb
+        };
+        self.note(usb, x, 124, w, 40);
         let half = (w - 16) / 2;
         let right = x + half + 16;
         self.label("비밀번호", x, 178, half);
@@ -1795,7 +1909,7 @@ impl App {
             38,
             theme::SECONDARY,
         );
-        self.label("열쇠 백업", x, 254, half);
+        self.label("열쇠 백업 · 열쇠 파일 사본, 금고와 다른 곳에", x, 254, half);
         self.button(KEYBACKUP, "열쇠 백업", x, 276, half, 38, theme::SECONDARY);
         if let Some(code) = &view.code {
             self.label("열쇠 확인 코드", right, 254, half);
@@ -1843,7 +1957,7 @@ impl App {
                     .filter(|s| s.uses_otp())
                     .map(|s| s.tag());
                 let w = if otp.is_some() { AW - 196 } else { AW };
-                self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 516, w);
+                self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 516, w);
                 if let Some(tag) = otp {
                     let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
                     self.field(OTP, &caption, "", AX + AW - 180, 516, 180, true);
@@ -1911,7 +2025,7 @@ impl App {
             .filter(|s| s.uses_otp())
             .map(|s| s.tag());
         let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, "이 PC의 현재 비밀번호", AX, 268, w);
+        self.password_field(CURRENT_PASS, REAUTH_LABEL_ADOPT, AX, 268, w);
         if let Some(tag) = otp {
             let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
             self.field(OTP, &caption, "", AX + AW - 180, 268, 180, true);
@@ -1958,7 +2072,7 @@ impl App {
                 AW,
                 40,
             );
-            self.password_field(CURRENT_PASS, "현재 비밀번호", AX, 172, AW);
+            self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 172, AW);
             self.note(
                 "OTP 등록 정보는 두 번째 잠금 수단이라 금고가 열려 있어도 비밀번호를 다시 확인합니다.",
                 AX,
@@ -2570,12 +2684,12 @@ impl App {
                 return Err(if leftover_temp(&self.key_path) {
                     LEFTOVER_TEMP
                 } else {
-                    "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요."
+                    "열쇠 파일을 찾을 수 없습니다. USB 등 다른 곳에 두었다면 '찾기'로 선택하세요. 다른 PC에서 가져온 금고라면 그 PC의 열쇠 파일을 USB로 가져오세요."
                 });
             }
             Screen::Restore if self.dest_path.exists() => {
                 return Err(
-                    "'복원할 새 파일'과 같은 이름의 파일이 이미 있습니다. 다른 이름을 지정하세요.",
+                    "'되살린 금고를 저장할 새 위치'에 같은 이름의 파일이 이미 있습니다. 다른 이름을 지정하세요.",
                 );
             }
             Screen::Create if self.new_vault_path.exists() || self.new_key_path.exists() => {
@@ -2738,7 +2852,7 @@ impl App {
             (2, Screen::Edit | Screen::Password | Screen::OtpBackup) => CANCEL,
             (2, Screen::Keys | Screen::Adopt) => BACK,
             #[cfg(feature = "security-key")]
-            (1, Screen::Pair | Screen::LostKey | Screen::KeyRemove) => SUBMIT,
+            (1, Screen::Pair | Screen::LostKey | Screen::KeyRemove | Screen::Fetched) => SUBMIT,
             #[cfg(feature = "security-key")]
             (2, Screen::Pair | Screen::LostKey | Screen::KeyRemove | Screen::Review) => BACK,
             (2, Screen::Vault) => LOCK,
@@ -2746,6 +2860,10 @@ impl App {
             (1 | 2, _) => return Ok(()),
             _ => id,
         };
+        #[cfg(feature = "security-key")]
+        if self.tofu_blocks(id) {
+            return Err(keys_ui::TOFU_FIRST);
+        }
         if !self.allows(id) {
             return Err("현재 화면에서 허용되지 않는 작업입니다.");
         }
@@ -2835,6 +2953,11 @@ impl App {
                     CREATE => Screen::Create,
                     RESTORE => Screen::Restore,
                     OPEN => Screen::Login,
+                    // Back from the login opened from "서버에서 가져온 금고".
+                    #[cfg(feature = "security-key")]
+                    _ if self.screen == Screen::Login && self.home() == Screen::Fetched => {
+                        Screen::Fetched
+                    }
                     _ if self.screen == Screen::Login => Screen::Welcome,
                     _ => self.home(),
                 });
@@ -3119,7 +3242,11 @@ impl App {
             Screen::Adopt => matches!(id, BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT | OTP),
             // Decided by allows_sk.
             #[cfg(feature = "security-key")]
-            Screen::Pair | Screen::LostKey | Screen::KeyRemove | Screen::Review => false,
+            Screen::Pair
+            | Screen::LostKey
+            | Screen::KeyRemove
+            | Screen::Review
+            | Screen::Fetched => false,
         }
     }
     fn reset_copy(&mut self) {
@@ -3471,18 +3598,13 @@ impl App {
                     let card = self.r(AX, self.password_card_y(), AW, 80);
                     theme::round(dc, &card, self.px(10), Some(p.bg), Some(p.border));
                 }
+                #[cfg(feature = "security-key")]
+                Screen::Fetched => {
+                    let (x, y, w, h) = LOGIN_LINKS;
+                    theme::fill(dc, &self.r(x, y, w, h), p.border);
+                }
                 Screen::Create if !self.create_otp => self.draw_otp_offer(dc, &p, small),
                 _ => {}
-            }
-            let focus = GetFocus();
-            for (frame, h) in &self.frames {
-                let border = if *h == focus && *h != self.handle(LIST) {
-                    p.focus
-                } else {
-                    p.border
-                };
-                let r = self.scaled(frame);
-                theme::round(dc, &r, self.px(8), Some(p.bg), Some(border));
             }
             if self.screen == Screen::Create
                 && self.create_otp
@@ -3501,6 +3623,19 @@ impl App {
             }
             if self.screen == Screen::Vault {
                 self.draw_detail(dc, small, title);
+            }
+            // Every field's frame last, over any card painted under it (the
+            // TOFU banner's code field sits on the detail card): a field is
+            // never drawn without its outline (spec §2.29).
+            let focus = GetFocus();
+            for (frame, h) in &self.frames {
+                let border = if *h == focus && *h != self.handle(LIST) {
+                    p.focus
+                } else {
+                    p.border
+                };
+                let r = self.scaled(frame);
+                theme::round(dc, &r, self.px(8), Some(p.bg), Some(border));
             }
         }
     }
@@ -3862,8 +3997,16 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     let prepared = APP.with(|cell| -> crypto::Result<_> {
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
         let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
-        if a.closing || !a.allows(id) {
+        if a.closing {
             return Err("종료 중입니다.");
+        }
+        // The backups wait for the TOFU banner's step (spec §2.29).
+        #[cfg(feature = "security-key")]
+        if a.tofu_blocks(id) {
+            return Err(keys_ui::TOFU_FIRST);
+        }
+        if !a.allows(id) {
+            return Err("현재 화면에서 허용되지 않는 작업입니다.");
         }
         if matches!(id, BACKUP | KEYBACKUP | DELETE | KEY_ADOPT) && a.session.is_none() {
             return Err("금고가 잠겼습니다.");
@@ -3910,7 +4053,32 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     } else {
         let save = matches!(id, BACKUP | KEYBACKUP | BROWSE_D) || screen == Screen::Create;
         let key = matches!(id, KEYBACKUP | BROWSE_K | KEY_ADOPT);
-        let Some(p) = dialog(h, save, key) else {
+        // The two backups say in their dialog what each file is and where
+        // it belongs (spec §2.29).
+        let picked = match id {
+            BACKUP => pick_file(
+                h,
+                true,
+                "고요 금고/백업 (*.goyo)\0*.goyo\0모든 파일\0*.*\0",
+                "goyo",
+                VAULT_BACKUP_TITLE,
+                None,
+            ),
+            KEYBACKUP => pick_file(
+                h,
+                true,
+                "고요 열쇠 파일 (*.goyokey)\0*.goyokey\0모든 파일\0*.*\0",
+                "goyokey",
+                KEY_BACKUP_TITLE,
+                None,
+            ),
+            _ => dialog(h, save, key),
+        };
+        let Some(p) = picked else {
+            // A dialog that could not open is not a cancel.
+            if dialog_failed() {
+                return Err(DIALOG_FAILED);
+            }
             return Ok(());
         };
         Some(p)
@@ -3996,6 +4164,10 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                 // The change notice arrived while the state was busy.
                 if !(field == KPATH && a.fit_otp_field()) {
                     a.refresh_key_note();
+                }
+                #[cfg(feature = "security-key")]
+                if field == VPATH {
+                    a.route_picked_vault();
                 }
                 if let Some(refusal) = refusal {
                     a.set_status(refusal, TONE_DANGER);
@@ -6301,6 +6473,36 @@ mod tests {
             }
         }
     }
+    /// The login's note for a key file that is not there (spec §2.29):
+    /// "next to the vault" only for the vault's own key name or a synced
+    /// vault; a key kept elsewhere (an unplugged stick) is to be plugged in
+    /// or picked, never moved next to the vault.
+    #[test]
+    fn a_missing_key_note_fits_where_the_key_is_kept() {
+        let _korean = KoreanAfter::hold();
+        let dir = test_dir("missing-key-note");
+        let vault = dir.join("vault.goyo");
+        std::fs::write(&vault, b"any vault bytes").unwrap();
+        let mut app = App::new(0);
+        app.screen = Screen::Login;
+        let own = dir.join("vault.goyokey");
+        assert_eq!(
+            app.missing_key_note(&vault, &own),
+            Some(fill(KEY_MISSING_NOTE, &[&"vault.goyokey"]))
+        );
+        let stick = Path::new(r"Q:\keys\home.goyokey");
+        assert_eq!(
+            app.missing_key_note(&vault, stick),
+            Some(fill(KEY_ELSEWHERE_NOTE, &[&"home.goyokey"]))
+        );
+        // A synced vault: its key file belongs on each PC.
+        std::fs::create_dir(dir.join("vault.goyo.sync")).unwrap();
+        assert_eq!(
+            app.missing_key_note(&vault, stick),
+            Some(fill(KEY_MISSING_NOTE, &[&"vault.goyokey"]))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn first_run_starts_on_welcome() {
         let dir = std::env::temp_dir().join(format!(
@@ -6413,11 +6615,20 @@ mod tests {
                 (Screen::Welcome, "welcome"),
                 (Screen::Login, "login"),
                 (Screen::Restore, "restore"),
+                // A vault from the server with no key file here (spec §2.29).
+                #[cfg(feature = "security-key")]
+                (Screen::Fetched, "fetched"),
             ] {
                 app.screen = screen;
                 app.build();
                 visit(&mut app, name);
             }
+            // The login of a vault whose key file is not on this PC.
+            let key = std::mem::replace(&mut app.key_path, dir.join("missing.goyokey"));
+            app.screen = Screen::Login;
+            app.build();
+            visit(&mut app, "login-no-key");
+            app.key_path = key;
             app.provision = Some(Provision::new().unwrap());
             for otp in [false, true] {
                 app.screen = Screen::Create;
@@ -6451,6 +6662,11 @@ mod tests {
                 keys_ui::TOFU_SHOWN.with(|t| t.set(true));
                 app.build();
                 visit(&mut app, "vault-tofu");
+                // A key file from the server: its title and the steps left.
+                keys_ui::TOFU_FETCHED_SHOWN.with(|t| t.set(true));
+                app.build();
+                visit(&mut app, "vault-tofu-fetched");
+                keys_ui::TOFU_FETCHED_SHOWN.with(|t| t.set(false));
                 keys_ui::TOFU_SHOWN.with(|t| t.set(false));
             }
             session = app.session.take().unwrap();
@@ -6684,9 +6900,23 @@ mod tests {
             "16-key-remove",
             "17-pair",
             "19-keys-undone",
+            "23-keys-ks-off",
+            "24-keys-ks-on",
         ]
         .iter()
         .any(|f| file.ends_with(f));
+        // A vault that syncs, its key file kept on this PC or synced: the
+        // one line and the one switch (spec §2.29), and the note above.
+        let ks = ["23-keys-ks-off", "24-keys-ks-on"]
+            .iter()
+            .position(|f| file.ends_with(f))
+            .map(|on| vault::KeySyncView {
+                on: on == 1,
+                synced: true,
+                helper: true,
+                ..vault::KeySyncView::default()
+            });
+        keys_ui::KS_SHOWN.with(|k| *k.borrow_mut() = ks);
         if shown {
             KEYS_VIEW.with(|v| {
                 *v.borrow_mut() = Some(KeysView {
@@ -6945,6 +7175,57 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+    /// Every field on every screen shows its outline (spec §2.29): the
+    /// frames are painted after the cards under them, so the TOFU banner's
+    /// code field on the vault screen's detail card has one too.
+    #[test]
+    fn every_field_shows_its_frame() {
+        #[link(name = "gdi32")]
+        unsafe extern "system" {
+            fn GetPixel(dc: isize, x: i32, y: i32) -> u32;
+        }
+        let _korean = KoreanAfter::hold();
+        let dir = test_dir("frames");
+        let mut seen = vec![];
+        let mut check = |app: &mut App, name: &str| unsafe {
+            let screen = GetDC(app.hwnd);
+            let dc = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, 1600, 1400);
+            ReleaseDC(app.hwnd, screen);
+            let old = SelectObject(dc, bmp);
+            let p = theme::palette();
+            let all = Rect {
+                left: 0,
+                top: 0,
+                right: 1600,
+                bottom: 1400,
+            };
+            theme::fill(dc, &all, p.bg);
+            app.draw_screen(dc);
+            for (frame, _) in &app.frames {
+                let r = app.scaled(frame);
+                let x = (r.left + r.right) / 2;
+                let outlined = (0..2).any(|dy| {
+                    let c = GetPixel(dc, x, r.top + dy);
+                    c == p.border || c == p.focus
+                });
+                assert!(
+                    outlined,
+                    "{name}: a field at {:?} has no outline",
+                    frame.top
+                );
+            }
+            seen.push(name.to_owned());
+            SelectObject(dc, old);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+        };
+        unsafe { each_screen(&dir, &mut check) };
+        #[cfg(feature = "security-key")]
+        assert!(seen.iter().any(|n| n == "vault-tofu"));
+        assert!(seen.iter().any(|n| n == "login"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
     /// The source files whose Korean literals english_is_complete checks,
     /// by their path under src/ (spec §9.3).
@@ -8285,6 +8566,11 @@ mod tests {
                 ("17-pair", Screen::Pair),
                 ("18-review", Screen::Review),
                 ("19-keys-undone", Screen::Keys),
+                ("20-fetched", Screen::Fetched),
+                ("21-vault-tofu-fetched", Screen::Vault),
+                ("22-vault-tofu", Screen::Vault),
+                ("23-keys-ks-off", Screen::Keys),
+                ("24-keys-ks-on", Screen::Keys),
             ]);
             for (dark, (file, screen)) in [true, false]
                 .into_iter()
@@ -8350,6 +8636,24 @@ mod tests {
                     KEYS_VIEW.with(|v| *v.borrow_mut() = rollback);
                     #[cfg(feature = "security-key")]
                     preview_keys(a, file);
+                    // The TOFU banner of a vault from the server, and of a
+                    // key file copied by USB, with a code half typed.
+                    #[cfg(feature = "security-key")]
+                    {
+                        let fetched = file.ends_with("21-vault-tofu-fetched");
+                        let banner = fetched || file.ends_with("22-vault-tofu");
+                        keys_ui::TOFU_SHOWN.with(|t| t.set(banner));
+                        keys_ui::TOFU_FETCHED_SHOWN.with(|t| t.set(fetched));
+                        if file.ends_with("20-fetched") {
+                            // Locked, as the screen is before the unlock.
+                            if let Some(s) = a.session.take() {
+                                session = Some(s);
+                            }
+                            a.status = line(keys_ui::FETCHED_PICKED);
+                        } else if banner {
+                            a.status = line(keys_ui::FETCHED_NEXT);
+                        }
+                    }
                     a.otp_setup = file.ends_with("10-otp-backup").then(|| {
                         let s = a.session.as_ref().unwrap();
                         s.otp_setup("synthetic preview password").unwrap()
@@ -8361,6 +8665,11 @@ mod tests {
                     if file.ends_with("6-vault-revealed") {
                         a.copy_until = Some(Instant::now() + Duration::from_secs(30));
                         a.set_toggle(true);
+                    }
+                    #[cfg(feature = "security-key")]
+                    if file.ends_with("vault-tofu-fetched") {
+                        let sample = wide("E5 · 7F2A-90C4");
+                        SetWindowTextW(a.handle(keys_ui::GATE_CODE), sample.as_ptr());
                     }
                     if file.ends_with("9-password") {
                         // One field shown with the eye button, one still masked.
@@ -9494,7 +9803,6 @@ mod tests {
             use keys_ui::*;
             match screen {
                 Screen::Create => vec![SK_TOGGLE],
-                Screen::Restore => vec![FETCHED_KEY],
                 Screen::Keys => vec![
                     KEY_ON,
                     KEY_ADD,
@@ -9563,6 +9871,13 @@ mod tests {
                     BACK, SUBMIT, BROWSE_V, BROWSE_K, BROWSE_D, VPATH, KPATH, DEST, PASS,
                     PEEK_PASS, OTP,
                 ],
+            ),
+            // The vault fetched from the server (spec §2.29): no key path,
+            // and the links to the login and to Restore.
+            #[cfg(feature = "security-key")]
+            (
+                Screen::Fetched,
+                &[SUBMIT, BROWSE_V, VPATH, PASS, PEEK_PASS, OTP, OPEN, RESTORE][..],
             ),
         ] {
             app.screen = screen;
@@ -10923,7 +11238,7 @@ mod tests {
                     tried.unwrap_or_else(|e| std::panic::resume_unwind(e))
                 });
                 let kind = if code {
-                    InputKind::Code
+                    InputKind::Code("")
                 } else {
                     InputKind::Pick(&items)
                 };
@@ -12236,10 +12551,23 @@ mod tests {
             set(h, CURRENT_PASS, newpass);
             auth.plan(&[Some(k1), Some(k3), Some(k3), Some(k3)]);
             every_answer(&asked, |_| false);
+            let told = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = told.clone();
+            every_input(move |_, text, _| {
+                record.borrow_mut().push(text.to_owned());
+                InputAnswer::Accept { checked: false }
+            });
             press(h, keys_ui::KEY_ADD);
             stop_answers();
+            INPUT_ANSWER.with(|i| i.borrow_mut().take());
             assert_eq!(*asked.borrow(), [keys_ui::ADD_PAIR, keys_ui::BACKUP_SHORT]);
             asked.borrow_mut().clear();
+            // A vault that does not sync: the code in the general sentence,
+            // no "other PCs need it" photo dialog (spec §2.29).
+            let code = with_app(|a| a.session.as_ref().unwrap().key_code()).unwrap();
+            assert_eq!(told.borrow().len(), 1);
+            assert!(told.borrow()[0].ends_with(&fill(keys_ui::CODE_SK, &[&code])));
+            assert!(!told.borrow()[0].contains(&fill(keys_ui::CODE_PHOTO, &[&code])));
             let o = overview().unwrap();
             assert_eq!(numbers(&Some(o.clone())), [1, 2, 3]);
             assert_eq!(o.full, [1]);
@@ -12384,7 +12712,14 @@ mod tests {
                 status(),
                 format!("{}\r\n{}", vault::GATE_CODE_WRONG, keys_ui::TOFU_OTHEREPOCH)
             );
-            with_app(|a| assert!(a.session.as_ref().unwrap().tofu()));
+            // The code stays in its field, also across a rebuild (spec
+            // §2.29).
+            with_app(|a| {
+                assert!(a.session.as_ref().unwrap().tofu());
+                a.build();
+                let kept = a.read(keys_ui::GATE_CODE).unwrap();
+                assert_eq!(kept.as_str(), "E1 · 0000-0000-0000-0000");
+            });
             // Enter in the code field is [확인].
             set(h, keys_ui::GATE_CODE, &code_e1.to_lowercase());
             press(h, 1);
@@ -12502,7 +12837,7 @@ mod tests {
             let behind = std::rc::Rc::new(RefCell::new(Vec::new()));
             let record = behind.clone();
             every_input(move |n, _, kind| {
-                assert!(matches!(kind, InputKind::Code));
+                assert!(matches!(kind, InputKind::Code(_)));
                 record.borrow_mut().push(status());
                 match n {
                     0 => InputAnswer::Code(Zeroizing::new("E3 · 0123-4567-89AB-CDEF".into())),
@@ -12533,8 +12868,12 @@ mod tests {
             let record = texts.clone();
             let digits = code_e3.split(" · ").nth(1).unwrap().to_owned();
             every_input(move |n, text, kind| {
-                assert!(matches!(kind, InputKind::Code));
-                record.borrow_mut().push(text.to_owned());
+                let InputKind::Code(typed) = kind else {
+                    panic!("not a code");
+                };
+                record
+                    .borrow_mut()
+                    .push((text.to_owned(), typed.to_string()));
                 InputAnswer::Code(Zeroizing::new(match n {
                     0 => "not a code".to_owned(),
                     1 => "E3 · 0123-4567-89AB-CDEF".to_owned(),
@@ -12544,7 +12883,11 @@ mod tests {
             press(h, keys_ui::KEY_ACCEPT);
             stop_answers();
             {
-                let texts = texts.borrow();
+                // Each code asked again starts with the one typed before
+                // (spec §2.29).
+                let typed: Vec<String> = texts.borrow().iter().map(|t| t.1.clone()).collect();
+                assert_eq!(typed, ["", "not a code", "E3 · 0123-4567-89AB-CDEF"]);
+                let texts: Vec<String> = texts.borrow().iter().map(|t| t.0.clone()).collect();
                 assert_eq!(texts.len(), 3);
                 let code_text = fill(keys_ui::GATE_CODE_TEXT, &[&3]);
                 assert_eq!(texts[0], code_text);
@@ -13619,7 +13962,7 @@ mod tests {
                     (0, InputKind::Preview { check: None }) => {
                         InputAnswer::Switch(keys_ui::FORK_OPT2)
                     }
-                    (1, InputKind::Code) => InputAnswer::Code(Zeroizing::new(code_a.clone())),
+                    (1, InputKind::Code(_)) => InputAnswer::Code(Zeroizing::new(code_a.clone())),
                     (2, InputKind::Preview { .. }) => InputAnswer::Accept { checked: false },
                     // S-SUSPEND: [계속].
                     (3, InputKind::Preview { check: None }) => {
@@ -13733,7 +14076,7 @@ mod tests {
             set(h, CURRENT_PASS, pass);
             let typed = code_a.clone();
             every_input(move |n, text, kind| match (n, kind) {
-                (0, InputKind::Code) => InputAnswer::Code(Zeroizing::new(typed.clone())),
+                (0, InputKind::Code(_)) => InputAnswer::Code(Zeroizing::new(typed.clone())),
                 (1, InputKind::Preview { .. }) => InputAnswer::Accept { checked: false },
                 _ => panic!("unexpected input {n}: {text}"),
             });
@@ -13987,7 +14330,7 @@ mod tests {
             every_input(move |_, text, kind| {
                 record.borrow_mut().push(text.to_owned());
                 match kind {
-                    InputKind::Code => InputAnswer::Code(Zeroizing::new(again.clone())),
+                    InputKind::Code(_) => InputAnswer::Code(Zeroizing::new(again.clone())),
                     _ => InputAnswer::Accept { checked: false },
                 }
             });
@@ -14350,7 +14693,7 @@ mod tests {
                         InputAnswer::Switch(keys_ui::FORK_OPT2)
                     }
                     (1, InputKind::Pick(_)) => InputAnswer::Switch(keys_ui::GATE_TO_CODE),
-                    (2, InputKind::Code) => InputAnswer::Code(Zeroizing::new(typed.clone())),
+                    (2, InputKind::Code(_)) => InputAnswer::Code(Zeroizing::new(typed.clone())),
                     (3, InputKind::Password) => InputAnswer::Password(Zeroizing::new(pass.into())),
                     (4, InputKind::Preview { .. }) => InputAnswer::Switch(keys_ui::PREVIEW_BACK),
                     (5, InputKind::Preview { check: None }) => {
@@ -14938,12 +15281,14 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);
         }
-        /// A new PC from the server (spec §7.17, §9.1; §14.10 walkthrough
-        /// 4): the vault file fetched with "열쇠 파일도 받기" offers the
-        /// key source "서버에서 받은 열쇠 파일 (확인 전)" on Restore; the
-        /// restore writes nothing outside the sync folder and shows the
-        /// TOFU banner with S-TOFU-FETCHED; A's code, then the save dialog,
-        /// writes the key file and the restored vault file.
+        /// A new PC from the server (spec §7.17, §2.29; §14.10 walkthrough
+        /// 4): the vault file goyo-sync brought into a folder with the
+        /// server's key file opens on "서버에서 가져온 금고"; the password
+        /// and the touch write nothing and show the TOFU banner with the
+        /// code field framed and focused; a wrong code is said in a dialog
+        /// and kept in the field; A's code, then the save step next to the
+        /// vault (a cancel and a failed file dialog write nothing), writes
+        /// the key file and the vault file in place.
         #[test]
         fn a_new_pc_restores_from_the_server_key_file() {
             let _korean = KoreanAfter::hold();
@@ -14987,34 +15332,41 @@ mod tests {
             );
             let code = a.key_code().unwrap();
             drop(a);
-            // PC C: the fetched vault file and the server's key file in its
-            // view; its own anchor, empty.
+            // PC C: goyo-sync's "이 PC로 가져오기" put the vault file into the
+            // folder picked, as vault.goyo next to its sync folder with the
+            // server's key file in its view; no key file, its own anchor,
+            // empty.
             let anchor_c = dir_c.join("anchor");
             vault::set_anchor_dir(Some(anchor_c.clone()));
-            let fetched = dir_c.join("from-server.goyo");
-            std::fs::copy(&va, &fetched).unwrap();
-            server.helper(&fetched);
-            key_view(&fetched, 1, &std::fs::read(&ka).unwrap());
-            let (dest, key) = (dir_c.join("vault.goyo"), dir_c.join("vault.goyokey"));
+            let (vc, key) = (dir_c.join("vault.goyo"), dir_c.join("vault.goyokey"));
+            std::fs::copy(&va, &vc).unwrap();
+            server.helper(&vc);
+            key_view(&vc, 1, &std::fs::read(&ka).unwrap());
+            let fetched = std::fs::read(&vc).unwrap();
             let auth = Scripted::new(fake.clone());
-            let h = window("GoyoCeremonyFetched", &fetched, &key, auth.clone(), &clock);
+            let h = window("GoyoCeremonyFetched", &vc, &key, auth.clone(), &clock);
             let guard = Window(h);
+            // Restore never takes the server's key file from a sync folder:
+            // it points at "서버에서 가져온 금고", and writes nothing.
+            let view = syncfile::sync_dir(&vc).unwrap().join(syncfile::KEY_VIEW);
             with_app(|a| {
-                a.backup_path = fetched.clone();
-                a.dest_path = dest.clone();
                 a.show(Screen::Restore);
+                a.backup_path = vc.clone();
+                a.key_path = view.clone();
+                a.dest_path = dir_c.join("restored.goyo");
                 a.build();
-                assert!(a.handle(keys_ui::FETCHED_KEY) != 0);
             });
-            press(h, keys_ui::FETCHED_KEY);
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            assert_eq!(status(), keys_ui::RESTORE_KEY_VIEW);
+            assert!(!dir_c.join("restored.goyo").exists());
+            with_app(|a| a.key_path = key.clone());
+            // The app opens on "서버에서 가져온 금고", which has no key path.
             with_app(|a| {
-                assert_eq!(
-                    a.key_path,
-                    syncfile::sync_dir(&fetched)
-                        .unwrap()
-                        .join(syncfile::KEY_VIEW)
-                );
-                assert_eq!(*a.status, keys_ui::FETCHED_KEY_SET);
+                a.show(a.home());
+                a.build();
+                assert!(a.screen == Screen::Fetched);
+                assert!(a.handle(KPATH) == 0 && a.handle(DEST) == 0);
             });
             auth.plan(&[Some(devices[1])]);
             set(h, PASS, pass);
@@ -15023,21 +15375,115 @@ mod tests {
                 let s = a.session.as_ref().expect("restored");
                 assert!(s.tofu() && s.fetched_unsaved(), "{}", *a.status);
                 assert!(a.screen == Screen::Vault && a.tofu_banner());
+                assert!(a.status.starts_with(keys_ui::FETCHED_NEXT), "{}", *a.status);
+                // The code field is framed, and it has the focus.
+                let field = a.handle(keys_ui::GATE_CODE);
+                assert!(a.frames.iter().any(|(_, f)| *f == field));
+                assert_eq!(unsafe { GetFocus() }, field);
             });
-            assert!(!dest.exists() && !key.exists() && !anchor_c.join("goyo-vault.keys").exists());
-            // The code, then the save dialog.
+            assert!(!key.exists() && !anchor_c.join("goyo-vault.keys").exists());
+            assert_eq!(std::fs::read(&vc).unwrap(), fetched);
+            // The vault file restored in place is locked as a login's is,
+            // so no other instance saves it before the TOFU pass.
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dir_c.join("vault.goyo.goyolock"))
+                .unwrap();
+            assert!(lock.try_lock().is_err());
+            drop(lock);
+            // A wrong code says so in a dialog too, writes nothing, and the
+            // field keeps what was typed.
+            let mut wrong = code.clone();
+            let last = if wrong.pop() == Some('0') { '1' } else { '0' };
+            wrong.push(last);
+            let told = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = told.clone();
+            every_input(move |_, text, _| {
+                record.borrow_mut().push(text.to_owned());
+                InputAnswer::Cancel(2)
+            });
+            set(h, keys_ui::GATE_CODE, &wrong);
+            press(h, keys_ui::TOFU_OK);
+            with_app(|a| {
+                assert_eq!(a.read(keys_ui::GATE_CODE).unwrap().as_str(), wrong);
+                assert!(a.session.as_ref().unwrap().tofu());
+            });
+            assert!(told.borrow()[0].starts_with(vault::GATE_CODE_WRONG));
+            assert!(!key.exists());
+            // The backups and key management wait for this step: greyed,
+            // and refused with the reason if sent anyway.
+            with_app(|a| {
+                for id in [BACKUP, KEYBACKUP, CHANGE] {
+                    assert!(!a.allows(id), "{id}");
+                }
+                assert_eq!(a.command(CHANGE, 0), Err(keys_ui::TOFU_FIRST));
+            });
+            // (A refused backup says so in a message box: called directly.)
+            assert_eq!(modal_command(h, BACKUP), Err(keys_ui::TOFU_FIRST));
+            assert_eq!(modal_command(h, KEYBACKUP), Err(keys_ui::TOFU_FIRST));
+            assert!(!dir_c.join("backup.goyo").exists());
+            // The right code: the save step asks to save next to the vault;
+            // a cancel writes nothing, and a file dialog that fails says so.
             set(h, keys_ui::GATE_CODE, &code);
-            keys_ui::SAVE_KEY.with(|p| *p.borrow_mut() = Some(key.clone()));
+            press(h, keys_ui::TOFU_OK);
+            assert_eq!(status(), keys_ui::FETCHED_SAVE_LATER);
+            assert!(told.borrow()[1].contains(&*key.to_string_lossy()));
+            assert!(told.borrow()[1].starts_with(keys_ui::SAVE_LEAD_CODE));
+            assert!(!key.exists());
+            // No code (S-TOFU-NOPC's yes): the save step says nothing was
+            // verified, never that the file is genuine; its cancel points
+            // back at the same button.
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |_| true);
+            press(h, keys_ui::TOFU_NOPC);
+            assert_eq!(asked.borrow().as_slice(), [keys_ui::TOFU_NOPC_TEXT]);
+            assert_eq!(status(), keys_ui::FETCHED_SAVE_LATER_NOCODE);
+            let nocode = told.borrow()[2].clone();
+            assert!(nocode.starts_with(keys_ui::SAVE_LEAD_NOCODE), "{nocode}");
+            assert!(!nocode.contains(keys_ui::SAVE_LEAD_CODE), "{nocode}");
+            assert!(!key.exists());
+            with_app(|a| assert!(a.session.as_ref().unwrap().tofu()));
+            every_input(|_, _, _| InputAnswer::Switch(2));
+            keys_ui::SAVE_FAILS.with(|f| f.set(true));
+            press(h, keys_ui::TOFU_OK);
+            assert_eq!(status(), keys_ui::SAVE_DIALOG_FAILED);
+            assert!(!key.exists());
+            every_input(|_, _, _| InputAnswer::Accept { checked: false });
             press(h, keys_ui::TOFU_OK);
             with_app(|a| {
                 let s = a.session.as_ref().unwrap();
                 assert!(!s.tofu() && !s.fetched_unsaved(), "{}", *a.status);
-                assert_eq!(*a.status, keys_ui::FETCHED_SAVED);
+                assert_eq!(*a.status, fill(keys_ui::FETCHED_SAVED, &[&shown(&key)]));
                 assert!(!a.tofu_banner());
                 assert_eq!(a.key_path, key);
             });
             assert_eq!(std::fs::read(&key).unwrap(), std::fs::read(&ka).unwrap());
-            assert!(dest.exists());
+            assert_ne!(std::fs::read(&vc).unwrap(), fetched);
+            // The next start is a plain login of the saved pair.
+            assert!(!keys_ui::fetched_pending(&vc, &key));
+            // That key file moved to a stick: picking the vault on the
+            // login keeps it, though the vault's sync folder still has the
+            // server's key file; with no key file at all, the server's
+            // way in comes back.
+            let stick = dir_c.join("stick");
+            std::fs::create_dir(&stick).unwrap();
+            let moved = stick.join("vault.goyokey");
+            std::fs::rename(&key, &moved).unwrap();
+            with_app(|a| {
+                a.lock("synthetic lock", true);
+                a.vault_path = vc.clone();
+                a.key_path = moved.clone();
+                a.show(Screen::Login);
+                a.build();
+                a.route_picked_vault();
+                assert!(a.screen == Screen::Login);
+                assert_eq!(a.key_path, moved);
+                a.key_path = stick.join("gone.goyokey");
+                a.route_picked_vault();
+                assert!(a.screen == Screen::Fetched);
+                assert_eq!(a.key_path, key);
+            });
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_c);
