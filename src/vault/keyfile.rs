@@ -1256,7 +1256,11 @@ impl KeyInfo {
 }
 /// None if `path` is missing or does not start like a key file (GOYOK…).
 pub fn key_info(path: &Path) -> Option<KeyInfo> {
-    let bytes = read_head(path, KEY_FILE_LIMIT).ok()?;
+    key_info_of(path, read_head(path, KEY_FILE_LIMIT).ok()?)
+}
+/// The same for key file bytes read elsewhere (the server's key file in a
+/// key view, spec §7.17).
+pub fn key_info_of(path: &Path, bytes: Vec<u8>) -> Option<KeyInfo> {
     let magic: [u8; 8] = bytes.get(..8)?.try_into().ok()?;
     if !magic.starts_with(b"GOYOK") {
         return None;

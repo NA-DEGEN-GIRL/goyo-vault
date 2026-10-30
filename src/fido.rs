@@ -26,9 +26,15 @@ pub const HMAC_SECRET_VALUES_FLAG: u32 = 0x0010_0000;
 pub const E_CANCELLED: i32 = 0x8007_04C7_u32 as i32;
 /// The key already holds a credential of the exclude list.
 pub const NTE_EXISTS: i32 = 0x8009_000F_u32 as i32;
+/// NTE_INVALID_PARAMETER: Windows refused the request before any dialog.
+/// On a real YubiKey 5C NFC (Windows 11 26200, API 9) MakeCredential and
+/// GetAssertion with no owner window (hWnd 0) fail with it at once; it
+/// says nothing about the key, least of all a full store.
+pub const NTE_INVALID_PARAMETER: i32 = 0x8009_0027_u32 as i32;
 /// A full store of discoverable credentials. A placeholder with the
 /// customer bit set (never a Windows code) until a real key records the
-/// HRESULT (spec §16-18); the fake fails with it.
+/// HRESULT (spec §16-18); the fake fails with it. Until then a real full
+/// store shows as "other" with its code.
 pub const STORE_FULL: i32 = 0x2000_0028;
 /// `dwUsedTransport` values.
 pub const USB: u32 = 0x01;
@@ -50,7 +56,10 @@ pub const EXISTS: &str = "이 보안 키는 이미 이 금고에 등록되어 �
 /// S-KEYSTORE-FULL.
 pub const KEYSTORE_FULL: &str = "이 보안 키에 등록할 자리가 다 찼을 수 있습니다. 쓰지 않는 등록(뺀 키, 실패한 등록, 쓰지 않는 웹사이트 패스키)을 키 제조사의 관리 도구로 지우거나 다른 키를 쓰세요.";
 pub const NO_HMAC_SECRET: &str = "이 보안 키는 hmac-secret(FIDO2 확장)을 지원하지 않습니다.";
-pub const NO_CRED_PROTECT: &str = "이 보안 키는 PIN 필수 보호(credProtect)를 지원하지 않습니다. 'PIN도 사용'을 끄거나 다른 키를 쓰세요.";
+pub const NO_CRED_PROTECT: &str =
+    "이 보안 키는 PIN 필수 보호(credProtect)를 지원하지 않습니다. 다른 키를 쓰세요.";
+/// S-REJECTED: NTE_INVALID_PARAMETER, a request Windows refused at once.
+pub const REJECTED: &str = "Windows가 보안 키 요청을 거부했습니다(코드 0x80090027). 고요 금고를 다시 시작한 뒤 다시 하세요. 그래도 같으면 이 코드와 Windows 버전을 알려 주세요.";
 pub const TRANSPORT: &str = "USB·NFC 보안 키만 쓸 수 있습니다(Windows Hello·휴대폰 제외).";
 /// S-SYNCEDPASSKEY.
 pub const SYNCED_PASSKEY: &str =
@@ -78,6 +87,9 @@ pub enum FidoError {
     /// The key already holds a credential of the exclude list.
     Exists,
     StoreFull,
+    /// NTE_INVALID_PARAMETER: Windows refused the request itself (no
+    /// owner window, a malformed option), never the key's answer.
+    Rejected,
     /// No or a short hmac-secret output at a registration's check.
     NoHmacSecret,
     /// PIN mode, and the key cannot require credProtect 3.
@@ -105,6 +117,7 @@ impl FidoError {
             E_CANCELLED => Self::Cancelled,
             NTE_EXISTS => Self::Exists,
             STORE_FULL => Self::StoreFull,
+            NTE_INVALID_PARAMETER => Self::Rejected,
             _ => Self::Other(hr),
         }
     }
@@ -114,6 +127,7 @@ impl FidoError {
             Self::Cancelled => CANCELLED,
             Self::Exists => EXISTS,
             Self::StoreFull => KEYSTORE_FULL,
+            Self::Rejected => REJECTED,
             Self::NoHmacSecret => NO_HMAC_SECRET,
             Self::NoCredProtect => NO_CRED_PROTECT,
             Self::Transport => TRANSPORT,
@@ -133,8 +147,12 @@ impl FidoError {
     }
 }
 
-/// The user verification a request asks for: required in PIN mode, else
-/// discouraged; never "preferred" (spec §8.3).
+/// The user verification a request asks for, never "preferred" (spec
+/// §8.3): required at every registration and for every key file in PIN
+/// mode; discouraged only to open a key file without the PIN bit, which
+/// only a pre-release build wrote (spec §2.28: Windows sets a PIN at a
+/// resident registration and verifies it from then on, so the app writes
+/// PIN mode only).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Uv {
     Required = 1,
@@ -477,9 +495,22 @@ pub struct Registration {
     first: Option<(Box<Zeroizing<[u8; 32]>>, bool)>,
 }
 impl Registration {
-    /// Step 1: the seed, drawn before MakeCredential, and its request.
-    /// `registered` is the time its name shows, taken once.
+    /// Step 1: the seed, drawn before MakeCredential, and its request:
+    /// always with the key's PIN, UV required and credProtect 3 required
+    /// (spec §2.28). `registered` is the time its name shows, taken once;
+    /// `owner` is the app's top-level window, never 0 (Windows refuses 0).
     pub fn new(
+        vault_id: &[u8; 16],
+        number: u8,
+        registered: u64,
+        exclude: Vec<Vec<u8>>,
+        owner: isize,
+    ) -> Result<(Self, MakeRequest)> {
+        Self::with_mode(vault_id, number, registered, true, exclude, owner)
+    }
+    /// The request in either mode: only the tests' `register` asks for the
+    /// no-PIN one, for the key files a pre-release build wrote.
+    fn with_mode(
         vault_id: &[u8; 16],
         number: u8,
         registered: u64,
@@ -552,8 +583,11 @@ impl Registration {
     }
 }
 /// The three calls of a registration one after the other, each with its
-/// own cancel token: for the library's tests and flows that run no
-/// ceremony of their own. The app runs each as its own ceremony.
+/// own cancel token, for the tests (a debug build only). The app runs each
+/// as its own ceremony, always in PIN mode; `pin` false makes the no-PIN
+/// registration of a pre-release key file, which the tests of such files
+/// still need.
+#[cfg(debug_assertions)]
 pub fn register(
     auth: &dyn Authenticator,
     vault_id: &[u8; 16],
@@ -564,7 +598,7 @@ pub fn register(
 ) -> std::result::Result<NewKey, FidoError> {
     let other = |_| FidoError::Other(0);
     let (mut reg, request) =
-        Registration::new(vault_id, number, registered, pin, exclude, 0).map_err(other)?;
+        Registration::with_mode(vault_id, number, registered, pin, exclude, 0).map_err(other)?;
     let raw = auth.make_credential(&request, &auth.new_cancel()?)?;
     reg.made(&raw)?;
     loop {
@@ -673,14 +707,15 @@ mod tests {
         assert_eq!(stamp(951_782_399), "20000228-235959");
         assert_eq!(stamp(951_782_400), "20000229-000000");
         assert_eq!(stamp(4_102_444_799), "20991231-235959");
-        let (_, r) = Registration::new(&[0xab; 16], 3, 1_767_225_601, true, vec![], 42).unwrap();
+        let (_, r) = Registration::new(&[0xab; 16], 3, 1_767_225_601, vec![], 42).unwrap();
         assert_eq!(r.name, "goyo-ABABABAB-3-20260101-000001");
         assert_eq!(r.display_name, "Goyo Vault ABABABAB key 3 20260101-000001");
         assert_eq!(
             (r.owner, r.uv, r.cred_protect),
             (42, Uv::Required, (3, true))
         );
-        let (_, r) = Registration::new(&[0xab; 16], 3, 0, false, vec![], 42).unwrap();
+        // Only the tests' pre-release mode asks without the PIN.
+        let (_, r) = Registration::with_mode(&[0xab; 16], 3, 0, false, vec![], 42).unwrap();
         assert_eq!((r.uv, r.cred_protect), (Uv::Discouraged, (2, false)));
     }
 
@@ -825,6 +860,12 @@ mod tests {
         assert_eq!(FidoError::from_hresult(E_CANCELLED).text(), CANCELLED);
         assert_eq!(FidoError::from_hresult(NTE_EXISTS), FidoError::Exists);
         assert_eq!(FidoError::from_hresult(STORE_FULL), FidoError::StoreFull);
+        // A request Windows refused (hWnd 0) is no full store.
+        assert_eq!(
+            FidoError::from_hresult(NTE_INVALID_PARAMETER),
+            FidoError::Rejected
+        );
+        assert_eq!(FidoError::Rejected.text(), REJECTED);
         assert_eq!(FidoError::from_hresult(5), FidoError::Other(5));
         assert!(FidoError::UvChanged.delays() && !FidoError::BadAnswer.delays());
     }

@@ -590,6 +590,18 @@ impl Session {
             return Err(AUTH_ERROR);
         }
         let opened = other.open(password, touch)?;
+        self.other_opened(other, opened, password, touch)
+    }
+    /// The other file as `opened` opened it with `password` (and `touch`):
+    /// the same ID key and TOTP secret, and the touched key's records. The
+    /// login of the second entry point (spec §5.2) opened it already.
+    pub(in crate::vault) fn other_opened(
+        &self,
+        other: &KeyFile,
+        opened: Opened,
+        password: &str,
+        #[cfg_attr(not(feature = "security-key"), allow(unused_variables))] touch: Option<&Touch>,
+    ) -> Result<OtherOpened> {
         let otp = match (opened.bundle.otp(), self.keys.otp()) {
             (Some(a), Some(b)) => ct_eq(a, b),
             (a, b) => a.is_none() && b.is_none(),
@@ -673,7 +685,9 @@ impl Session {
         let GatePass::NotNeeded { .. } = gate;
         #[cfg(feature = "security-key")]
         self.judge_gate(check, &gate, option, &opened)?;
-        let equal = ct_eq(r.password.as_bytes(), opened.password.as_bytes());
+        // The second entry point's password opened only the other file, so
+        // it is never this PC's (spec §7.15 step 4: E5 holds trivially).
+        let equal = r.own_password && ct_eq(r.password.as_bytes(), opened.password.as_bytes());
         // E5 (spec §5.8): a successor, or a union that takes the other
         // file's password as it is, must not claim a password change that
         // keeps this PC's password.

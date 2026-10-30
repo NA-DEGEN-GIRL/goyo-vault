@@ -38,12 +38,13 @@ To go back to the default build, first use **Turn off keys** in the security-key
 
 ## Turning it on
 
-**A new vault.** In 'Create', turn on **Security keys too (experimental)** and leave **Key PIN too (recommended)** on.
+**A new vault.** In 'Create', turn on **Security keys too (experimental)**. The key PIN is always used (see PIN below).
 
-**A vault you already use.** In 'Key management', check **Also use the key PIN (recommended)** and **Also change the password (recommended)**, enter the current password (and OTP), and press **Turn on security keys**. The data key changes too.
+**A vault you already use.** In 'Key management', check **Also change the password (recommended)**, enter the current password (and OTP), and press **Turn on security keys**. The data key changes too.
 
 - **Why change the password too:** the key files made before keys were on, and their backups (the 0.8 key file, a `GOYOKE03` from an earlier password change), open with the password alone. If you keep the password, whoever finds such a copy can keep guessing that password offline, and once they guess it only a registered key (and its PIN) is left. If you keep the password, delete those old copies.
-- **Registration:** each key opens three Windows windows (one registration, two checks). Touch the same key each time, and enter its PIN if PIN is on.
+- **Registration:** each key opens three Windows windows (one registration, two checks). Touch the same key each time and enter its PIN. For a key without a PIN, Windows has you set one in the first window.
+- **NFC:** unplug a key you will hold to an NFC reader **before** the Windows window opens. If it is plugged into USB when the window opens, Windows uses that connection and the reader gets no answer. Over NFC too, type the PIN on screen first, then hold the key to the reader.
 - **Register 2 or more, together, on one PC.** Keys registered together **pair** with each other (below). With only one key, every unlock shows a red warning.
 - **Give every key its own PIN.** With one PIN on every key, whoever holds a lost key and its PIN can clone another key just by getting hold of it briefly.
 - **Write the key number on each key.** The app calls them only 'security key 1, 2, …'.
@@ -53,15 +54,14 @@ To go back to the default build, first use **Turn off keys** in the security-key
 
 ## PIN
 
-- With PIN on (the default, recommended), the key's PIN is typed into the **Windows Security window**. It is another process, so Goyo Vault's screen-capture blocking does not cover it.
-- Without a PIN, someone who has the key file and the key can guess the password offline after one touch. Someone who borrows the key just long enough to touch it has, in effect, cloned it.
+- **The PIN is always used.** There is no choice to turn it off. A registration that stores an entry on the key makes Windows have you set a PIN on a key without one, and once a key has a PIN Windows asks for it every time, even when the app does not require it (checked on a real key). So a no-PIN mode cannot hold on Windows. Every registration requires the PIN (user verification required) and PIN-required protection (credProtect 3, required), and key files are always written in PIN mode.
+- The key's PIN is typed into the **Windows Security window**. It is another process, so Goyo Vault's screen-capture blocking does not cover it.
 - Eight wrong PINs lock the key. A FIDO reset of a locked key removes its registration, so it can no longer open this vault.
-- A key registered without a PIN may stop opening the vault once you set a PIN on it later. Open with another key, then remove that key and register it again.
-- Key-file sync (below) needs every key registered with a PIN.
+- A key file a pre-release test build wrote without the PIN (the feature never shipped that way) still opens and changes as before. Keys added to it are registered with the PIN, and key-file sync can be turned on only for a PIN-mode file whose keys were all registered with a PIN. Turning security keys off and on again makes such a vault PIN-mode.
 
 ## Opening and 'Key management'
 
-The login screen says the key file needs a security key (and how many are registered); pressing 'Unlock' opens the Windows Security window. Plug in any registered key and touch it.
+The login screen says the key file needs a security key (and how many are registered); pressing 'Unlock' opens the Windows Security window. Plug in any registered key, enter its PIN and touch it (unplug a key you will hold to an NFC reader first). The Windows window always belongs to Goyo Vault's window. Called with no owner window, Windows refuses at once (0x80090027), and the app then says "Windows rejected the security key request".
 
 The lower part of 'Key management' is the security-key section:
 
@@ -92,7 +92,7 @@ Keys touched together at one place **pair** with each other. Paired keys can pas
 3. **Roughly when was it lost?** Leave it empty if you do not know (the review list below then shows the whole record).
 4. **Could someone else know the PIN or the password?** 'Yes' if someone saw it, it was written down with the key, or you use it elsewhere too. With 'Yes' or 'Not sure':
    - it asks for the other keys that share that PIN; those are marked 'possibly cloned';
-   - **Change the password too (recommended)** is turned on. Choose a new password. A key file made by whoever holds the lost key then does not open with the new password. The screen says that if the server hides this change, the new password fails on another PC and shows it; in this build other PCs open with the old password, so it does not show that way. How to notice a hidden change is under [The limit of a freeze](#the-limit-of-a-freeze).
+   - **Change the password too (recommended)** is turned on. Choose a new password. A key file made by whoever holds the lost key then does not open with the new password. In a vault with key-file sync, another PC opened with the new password opens through the server's new key file, so if the server hides this change, the new password works nowhere and that shows it (see [The limit of a freeze](#the-limit-of-a-freeze)).
 5. Check 'Key to touch' on the right, enter the current password (and OTP), press **Remove** and touch one staying key.
 
 **One touch, and this PC is protected from that moment.** A new keyset secret and a new data key are made, and the lost key gets nothing of them. No key has to be carried to another place. A key never authorizes its own removal, so a key file made with the lost key cannot remove that key.
@@ -105,10 +105,10 @@ Keys touched together at one place **pair** with each other. Paired keys can pas
 **No design can make a removal reach another PC with no action there.** Until you act on that PC, a server that hides the change (a freeze) keeps that PC open to whoever holds the lost key with its PIN and the password. On every other PC, do one of these:
 
 - **Take the change.** Before taking it, that PC asks you to **pick the lost keys**, and shows nothing about the change before you pick. It passes only if your pick matches the removed keys exactly (see [The gate on other PCs](#the-gate-on-other-pcs)). A wrong pick cannot be retried; then only typing the key check code shown on the first PC is left.
-  - **A vault with key-file sync:** open that PC as usual (if the password was changed at the removal, that PC still opens with the old one) and it says that a key file with changed security keys or settings is on the server. Press **Get…** in 'Key management', pick the lost keys, touch a key, and type the new password if it was changed.
+  - **A vault with key-file sync:** it is taken when you open that PC. If the password was changed at the removal, open with the **new password**: that PC's own key file does not open with it, so it asks "Try the server's new key file?"; answer Yes and pick the lost keys, and the same touch takes it and opens. Opened with the old password, it asks for the lost keys right after the unlock and for the new password while taking it. If you pressed 'Later', take it with **Get…** in 'Key management'.
   - **A vault whose key file stays on the PCs:** carry the first PC's new key file by USB and take it with 'Key management' › **Receive a new key file…**, then pick the lost keys. One carry is enough.
 - **Remove it on that PC too.** If that PC must be protected right now (you cannot carry the file, or you do not trust the server), run **Remove a lost key** there as well. That PC is protected at once. The two PCs' key files now diverge and are joined later:
-  - with key-file sync, one PC's 'Key management' shows that it split from the server's key file and to join it with [Get…]. Press **Get…** and choose **Join both**;
+  - with key-file sync, when both PCs only removed keys from the same state, the PC whose upload came second joins them by itself at its next unlock ('While it is on' below). If one side also changed the password, that PC's 'Key management' shows that it split from the server's key file and to join it with [Get…]; press **Get…**;
   - with the key file on the PCs only, sync resumes once each PC has taken the other's key file once with 'Receive a new key file'.
 
 ### Afterwards
@@ -125,8 +125,8 @@ That place's PC cannot unlock until a key gets there, whatever the design. The r
 
 1. On the other place's PC, **Remove a lost key**, pick every lost key and touch one staying key.
 2. On the same PC, with that place's keys plugged in, register a new key with **Add key** (it pairs with them at once, so no later pairing visit is needed).
-3. Carry **the new key together with that PC's new key file**, and note that PC's key check code.
-4. On the PC that lost its keys, choose the carried key file at login and open with the new key. The key file holds a key that PC has never seen (the new key), so it asks for a key check code: type the one you noted. That PC's own key file does not list the new key, so it cannot open with it, and 'Receive a new key file' works only on an open vault.
+3. Carry **the new key together with that PC's new key file**, and note that PC's key check code. With key-file sync there is no need to carry the key file: on the PC that lost its keys press 'Unlock' as usual and cancel Windows' security window (which looks for a key that PC knows); it then asks "…try it?" for a key only the server's key file lists. Press [Touch], touch the new key and type the noted code: it opens and takes the new key file too.
+4. If you carried the key file, choose it at login on the PC that lost its keys and open with the new key. The key file holds a key that PC has never seen (the new key), so it asks for a key check code: type the one you noted. That PC's own key file does not list the new key, so it cannot open with it, and 'Receive a new key file' works only on an open vault.
 
 ## Example: 4 keys, 2 places
 
@@ -136,15 +136,15 @@ At home (A) are PC_A and security keys 1 and 2; at the office (B) are PC_B and s
 
 **Key 1 lost at home.**
 1. PC_A: **Remove a lost key** → security key 1 → the date → "Could someone else know the PIN or the password?" **Not sure** (the password change turns on; choose a new password) → the current password → **one touch of key 2**. PC_A is protected from this moment. No key is carried.
-2. PC_B with key-file sync: open as usual with the old password and a touch of key 3 (or 4). 'Key management' › **Get…** → pick security key 1 (nothing is shown before) → touch key 3 → type the new password. Afterwards both PCs show the same key check code, and the review of what came in by sync appears.
+2. PC_B with key-file sync: open with key 3 (or 4). Opened with the **new password**, answer Yes to "Try the server's new key file?"; opened with the old one, it asks right after the unlock. Pick security key 1 (nothing is shown before) and the unlock's own touch takes it (opened with the old password, type the new one while taking it). There is no second touch. Only if you pressed 'Later', take it with **Get…** in 'Key management'. Afterwards both PCs show the same key check code, and the review of what came in by sync appears.
 3. PC_B with the key file on the PCs only: PC_B says "Another PC changed this vault's key, so sync stopped…" and stops syncing. Bring PC_A's new key file by USB → **Receive a new key file** → pick security key 1 → touch key 3 → the new password. If PC_B must be protected before that, run **Remove a lost key** on PC_B too (security key 1, touch key 3), and later each PC takes the other's key file once.
 
-**Totals.** Keys carried: 0. At home: 1 touch. At the office: the normal unlock, plus one pick and one touch.
+**Totals.** Keys carried: 0. At home: 1 touch. At the office: the normal unlock, plus one pick (with key-file sync the unlock's touch is enough; carried by USB, one more touch).
 
 **A spare key 5 added at home later.**
 1. PC_A: **Add key**, one touch of key 2 + three for registering key 5. Key 5 opens the vault at once. The list says key 5 needs pairing with keys 3 and 4.
-2. PC_B takes this addition by typing PC_A's key check code (a photo of the screen helps). With key-file sync it takes it with **Get…** in 'Key management'; otherwise carry PC_A's new key file by USB and use **Receive a new key file** (until then PC_B stops syncing). An addition is taken only with the code, never with a pick.
-3. When convenient, take key 5 to the office once and, on PC_B, **Pair keys** with keys 5, 3 and 4 (3 touches). PC_A takes that pairing write without a question: with key-file sync through **Get…**, otherwise by carrying PC_B's key file by USB and using **Receive a new key file** (a pairing write changes the key file too, so until then PC_A stops syncing).
+2. PC_B takes this addition by typing PC_A's key check code (a photo of the screen helps). With key-file sync it is asked for the code at its next unlock (after 'Later', **Get…** in 'Key management'); otherwise carry PC_A's new key file by USB and use **Receive a new key file** (until then PC_B stops syncing). An addition is taken only with the code, never with a pick.
+3. When convenient, take key 5 to the office once and, on PC_B, **Pair keys** with keys 5, 3 and 4 (3 touches). PC_A takes that pairing write without a question: with key-file sync at its next unlock, otherwise by carrying PC_B's key file by USB and using **Receive a new key file** (a pairing write changes the key file too, so until then PC_A stops syncing).
 4. Before that visit: a password change at the office with key 3 cannot pass the new key on to key 5, so it asks for a touch of key 5 too (without key 5, cancel and do it at home with key 2). A removal made at the office suspends key 5 after asking.
 
 **A second loss before the pairing visit** can leave key 5 on its own, so do not put the visit off too long.
@@ -157,6 +157,7 @@ A key file in which another PC changed the security keys (added or removed one) 
 - **An added key, a settings change, the removal of a key this PC has never seen, a new PC, a key file carried by USB:** type the **key check code** that the changing PC's 'Key management' shows now (`E{revision} · XXXX-XXXX-XXXX-XXXX`). If its revision differs, that PC changed the key again in the meantime.
 - **Later** puts it off; **Get…** in 'Key management' asks again.
 - **Don't take…** only when you are sure the change is forged. If it was real, this PC stays stopped (you can still take it by USB later).
+- If the PC that made a change that needs the code can no longer be used, so its code cannot be read (a dead disk, say), a vault with key-file sync offers **Upload this PC's state, no other PC…** in 'Key management': it uploads this PC's key file again at a higher revision than that change (a danger question, default No, the password and one touch). The change (for example a key added on that PC) is lost, so make it again if needed. The button is not offered for a change that removes one of this PC's keys, or that carries the removal of a key this PC never knew; then run 'Remove a lost key' or turn key-file sync off. The last vault copy that PC uploaded is overwritten with this PC's state. On a PC that kept its key file on this PC only, this turns key-file sync on there too, and that consent is asked first.
 - With no other PC to check against (a new PC and every other PC gone), **There is no other PC…** lets you trust it, but there is no way to check that it is genuine. If the password was changed at the removal, a forged key file does not open with the new password.
 
 ## Removing keys and keys you no longer use
@@ -197,14 +198,14 @@ A per-vault option of the security-key build. It is off by default; when on, the
 2. If the server or a sync SSH key is compromised, the attacker's only remaining barriers are the password and the security key + PIN. The key file stops being a third barrier.
 3. A key file once uploaded can be kept by whoever had server access at that time. Removing a key or changing the password protects only what is saved afterwards. If a security key was lost and the password may be known, change the secrets themselves (move funds, reissue keys).
 4. After a key removal, the removal is complete only once every PC has taken it (by picking the lost key or typing the code). The same key check code on two PCs means the same key state.
-5. A new PC must type another PC's key check code before first use. Carry the first copy by USB (in this build that is the only way).
+5. A new PC must type another PC's key check code before first use. Carrying the first copy by USB is recommended; starting from the server works too (see 'A new PC' below).
 6. The server copy is not a backup. A USB key-file backup and 2 or more security keys stay mandatory. There is no recovery code.
 7. The PIN is mandatory. Use 6 or more characters, different from the password. Eight wrong tries lock the key, and a reset key can no longer open this vault.
 8. On a key you no longer use, delete this vault's registration (a FIDO reset only for a key used nowhere else). Otherwise, with the password, it opens the old key files left on the server.
 9. If a PC is lost, delete that PC's `authorized_keys` line at once. Use one server account per person: another sync key of the same account can fetch your key file too.
 10. A key-file copy sits in each PC's sync folder (`incoming.goyokeysync`). That weakens the separation of keeping the key file on a USB stick only.
 11. Phone passkeys and Windows Hello cannot be used. Only USB or NFC security keys.
-12. After a key change the other PCs take it, after their next unlock, with [Get…] in 'Key management': a removal by picking the lost key, an added key or a settings change by typing the changing PC's code. Nothing about the change is shown before.
+12. After a key change the other PCs take it at their next unlock (or later with [Get…] in 'Key management'): a removal by picking the lost key, an added key or a settings change by typing the changing PC's code. Nothing about the change is shown before.
 13. Turning security keys off, or key-file sync off, means the other PCs need the key file by USB again.
 14. The gain: no USB carry after a change. Only with an honest server, though; when the server is attacked, sync stops (no data is lost).
 
@@ -212,7 +213,7 @@ A per-vault option of the security-key build. It is off by default; when on, the
 
 1. Update the server script to 0.9.0 ('Install or update on server' in goyo-sync's window).
 2. Find the vault ID (32 lower-case hex digits): the second column of `goyo-sync.exe --list | Out-Host`.
-3. In the dedicated-key line of **every PC** that uses that vault ([SYNC.en.md](SYNC.en.md), 'Dedicated key with a forced command'), add `--key-sync=<vault ID>` after `serve`. For several vaults, join the IDs with commas (up to 64, no spaces).
+3. In the dedicated-key line of **every PC** that uses that vault ([SYNC.en.md](SYNC.en.md), 'Dedicated key with a forced command'), add `--key-sync=<vault ID>` after `serve`. For several vaults, join the IDs with commas (up to 64, no spaces). The settings window of the security-key build's goyo-sync writes this line: select a vault in the vault list, turn on **Allow key-file sync (experimental)**, then press **Forced command line…** for the line with that PC's Python command, script path and the IDs of the vaults turned on (Ctrl+C copies it; fill in the public key yourself). None of this is saved.
    ```
    restrict,command="/usr/bin/python3 -I /home/<user>/.local/share/goyo-sync/goyo-sync-server.py serve --key-sync=0123456789abcdef0123456789abcdef" ssh-ed25519 AAAA… goyo-sync-pc1
    ```
@@ -227,18 +228,33 @@ A per-vault option of the security-key build. It is off by default; when on, the
 - Conditions: security keys on in PIN mode with every key registered with a PIN; sync on for that vault; this Windows reports how the key is connected (USB/NFC); the security-key build's goyo-sync checked the server within the last 10 minutes; the server holds no key file of this vault yet (if another PC turned it on, take that file with [Get…]).
 - 'Key management' › **Turn key-file sync on…** → a danger question (default No) that shortens the 14 points to 10 → the password and one touch. The key file is written again (the data key stays) and goyo-sync uploads it.
 - Other PCs take this change by typing this PC's key check code, and see the same explanation of the risks.
+- On a vault with key-file sync, the PC that changed the keys (on, a key added or removed, a pairing, re-locking every key, a password change, uploading this PC's state) says at every unlock, in the status line, "Not yet confirmed that the other PCs took this key change…" ("…this removal…" in red for a removal), and the top of the list in 'Key management' says what each other PC must do to take it (a removal: pick the removed keys, or type this PC's code on a PC that never knew a removed key; a key added or every key re-locked: type this PC's code; on, a re-upload or uploading this PC's state: the next unlock, and a PC that kept its key file to itself types the code; a password change or a pairing: the next unlock). Once every PC took it, press **All PCs confirmed** in 'Key management'. Until then the change is not complete. This reminder lives only in this PC's key record and is not protected cryptographically.
 
 ### While it is on
 
-- After a key change, the other PCs' 'Key management' says a new key file, or a key change to confirm, is on the server; take it with **Get…** (the gate above). While it waits, that PC neither uploads nor merges.
-- If two PCs change the key at once, it says the key file split from the server's and sync stops. Join them on one PC with **Get…** (**Use the other PC's** or **Join both**). The same lost key removed on two PCs separately is joined the same way. If nothing like that happened, the server copy may be forged.
+- After a key change, the other PCs take it **when they unlock**. A change that needs no gate (a password change, say) is taken with the unlock's own touch; one that needs a gate asks for the lost keys or the code right after the unlock. Opening with the **new password** set on another PC works too: this PC's own key file does not open with it, so it asks "Try the server's new key file?", and Yes takes the server's key file with the same touch and opens. If it was not taken then, 'Key management' says a new key file, or a key change to confirm, is on the server; take it with **Get…** (the gate above). While it waits, that PC neither uploads nor merges.
+- If you only have a key newly registered on another PC, cancel Windows' security window at 'Unlock'. When the server's key file lists that key, it asks "…try it?"; touch the new key and type that PC's code to take it and open.
+- If two PCs change the key at once, it says the key file split from the server's and sync stops. Join them on one PC with **Get…** (**Use the other PC's** or **Join both**). If nothing like that happened, the server copy may be forged.
+- When two PCs **only removed keys** from the same state (the same lost key removed on each PC), they join by themselves. The PC whose upload came second opens the other PC's key file at its next unlock with that unlock's touch and password and, asking nothing, writes a key file that joins both (a new data key). The status line says "Merged the key removals made apart on two PCs…", and the PC that uploaded first takes the result at its next unlock with no confirmation. If one side also changed the password, or this PC's key is out of that key file, it cannot be opened without a question, so it is not joined by itself; when "…they can be merged with [Get…]" shows, join them with **Get…** (it asks for the other password or another key). If that key file does not open with this PC's security key and password, nothing is written, it is refused as "a forged link", and it is not tried again until Goyo Vault restarts.
 - While the server refuses this PC's key file, this PC's vault does not go up either (goyo-sync state `keyfile` or `refused`). Bring goyo-sync and the server script to the same version.
 - If the server no longer has this vault's key file ('Key-file sync: on · not on the server'), another PC may have turned it off. Then do not upload it again; take that PC's key file by USB. Press **Upload the key file again** only when you are sure nobody turned it off and it was deleted. Until then this PC neither merges nor uploads server copies.
-- If the PC that made a waiting change is gone and you are sure that change is forged, end it with **Don't take…**. If it was a real change, take that PC's key file by USB or turn key-file sync off.
+- If the PC that made a waiting change is gone, use **Upload this PC's state, no other PC…** (see 'The gate on other PCs' above). For a change with no such button (one that removes a key of this PC, say), run 'Remove a lost key' or turn key-file sync off. End it with **Don't take…** only when you are sure the change is forged.
 
 ### A new PC
 
-Carry the key file to a new PC **by USB** the first time (starting a new PC from the server's key file is not in this build). The first time it opens, that key file is new to it, so type another PC's key check code. With no other PC, trusting it is the only option ('There is no other PC…' above).
+Recommended: carry the key file to a new PC **by USB** the first time. The first time it opens, that key file is new to it, so type another PC's key check code.
+
+**Starting from the server** (the same for a PC that lost its key file):
+
+1. In the security-key build's goyo-sync settings window press **Get from server…**, check that **Also get the key file: on** under the list is set, and pick the vault. The vault file is saved under the name you choose, and the server's key file goes only into the sync folder next to it (`<vault file>.sync\incoming.goyokeysync`). No key file (`.goyokey`) is made.
+2. In Goyo Vault press **Restore from backup**, choose the fetched vault file and press **Use the key file from the server (unconfirmed)**. Set 'Restore to (new file)' and open with the password and a security key.
+3. The opened vault is read-only for now. Until you type the key check code another PC's 'Key management' shows now, no entry can be edited, and neither the key file nor the restored vault file is saved on this PC.
+4. Once the code matches, it asks where to save the key file (outside the sync folder, never over an existing file). It then writes the key file, the restored vault file and this PC's key record, in that order. If that is cut short:
+   - If the key file and the restored vault file **both** exist already, do not restore again: open those two files at the login screen as usual. Opening them finishes this PC's key record.
+   - Otherwise restore the same way again. It does not ask for the code again and starts with where to save. Choose the same 'Restore to (new file)' name as before (if it does not exist yet), and choose **the same name** for the key file: a key file written there before the cut is used as it is (if its content differs at all, it is not overwritten and you are asked for another name).
+5. If this PC still has the vault file (only the key file was lost), that vault file is the floor: a server key file older than it is not opened. Nor is a key file that does not match this PC's record of the keys (a split or an older one).
+
+With no other PC, trusting it is the only option ('There is no other PC…' above). Use **Back up key** after saving.
 
 ### Turning it off
 
@@ -259,15 +275,15 @@ Delete that PC's `authorized_keys` line **at once**. That PC's sync key can fetc
 
 If the server keeps hiding a key change from a PC (a freeze), that PC stays in the old state until you act there. Meanwhile whoever holds the lost key, its PIN and the password can read what that PC saves and slip changes in through the server. Key changes they make stop at the gate. The way out is **Remove a lost key** on that PC.
 
-**How to notice it.** In this build other PCs open with the old password (taking the server's new key file at login is not built). So even if the password was changed at the removal, a failing new password tells you nothing. Instead, after the removal, open the other PC and give sync time to run once. If none of the notices below appears, the server may be hiding the change: run **Remove a lost key** on that PC.
+**How to notice it.** If the password was changed at the removal, open the other PC with the **new password**. If the server is hiding the change, the new password does not open it and "Try the server's new key file?" does not appear either; then open with the old password and run **Remove a lost key** there. If the password was not changed, open the other PC after the removal and give sync time to run once. If none of the notices below appears, the server may be hiding the change: run **Remove a lost key** on that PC too.
 
 - A vault with key-file sync: "A key file in which another PC changed the security keys or a setting is on the server…", or "A key change to confirm is on the server" in 'Key management'.
 - A vault whose key file is on the PCs only: "Another PC changed this vault's key, so sync stopped…".
 
 ## Remaining risks
 
-- **Not verified with real keys.** Whether a key's answer stays the same over time, whether the PIN requirement (credProtect) is really enforced, whether only USB/NFC is accepted, and more, are confirmed only once the checklist below passes.
-- **A key answer obtained once lasts.** Whoever briefly had the key with its PIN and touched it (or briefly had a key without a PIN) has, in effect, a clone until that key is removed or 'Re-lock all keys' runs. Such a clone can pass the 'pick the lost keys' gate too; only typing the code stops it. Give every key its own PIN.
+- **Only partly verified with real keys.** That a key's answer is the same at every touch and over USB and NFC, credProtect 3, two salt values in one touch and an allow list of two keys were checked on a YubiKey 5C NFC. Whether the answer stays the same across reboots, PIN changes and months, whether a lookup without the PIN really fails, whether phones and Windows Hello are refused, and more, are confirmed only once the 'not run' items of the checklist below pass.
+- **A key answer obtained once lasts.** Whoever briefly had the key with its PIN and touched it has, in effect, a clone until that key is removed or 'Re-lock all keys' runs. Such a clone can pass the 'pick the lost keys' gate too; only typing the code stops it. Give every key its own PIN.
 - **Freeze** (above). No design avoids it.
 - **A new PC or a disaster recovery with no other PC to check against** can only trust.
 - **Old history.** Everything saved before a key's removal can be read by whoever has that key with its PIN, the password and an old key file. With key-file sync, the server's old key files are such copies.
@@ -282,17 +298,6 @@ If the server keeps hiding a key change from a PC (a freeze), that PC stays in t
 
 The detailed threat analysis is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md) ('0.9.0 change: security keys (experimental) and key-file sync (experimental)', in Korean), the file formats in [FORMAT.md](FORMAT.md) (Korean).
 
-## Not yet in this build
-
-These are in the design but not in this build; the text above describes how to work without them.
-
-- Taking the server's new key file **at login** (logging in with the new password, opening with another key). For now, open with the old key file, then take it with [Get…] in 'Key management'.
-- **Joining by itself** when the same key was removed on two PCs separately. For now, join on one PC with [Get…].
-- 'No other PC: upload this PC's state' when the PC that made a change is gone. For now, use [Don't take…] or turn key-file sync off.
-- Starting a new PC, or recovering a lost key file, from the server's key file. For now, use a USB copy or a key backup.
-- goyo-sync's window writing the forced-command line with `--key-sync`. For now, write it by hand as above.
-- A reminder that tells you when every PC has taken a change made under key-file sync.
-
 ## What the default build does with a security-key file
 
 The `goyo-vault.exe` of the release ZIP does not open a key file locked by a security key (one whose first 8 bytes start with `GOYOKH` or `GOYOKS`). As soon as you choose such a file, and when you press 'Open' or 'Restore', it looks at the first 8 bytes only, before checking any password, and says "This key file opens only with a security key (YubiKey or similar)…". It never says the password is wrong, does not count a failed attempt and starts no retry delay. If the file is cut short, or a newer version made it so that it fails the format check, it adds "The file may also be damaged, or made by a newer version." The default build cannot tell whether such a file is damaged, so it never replaces it with a temp file (`.goyotmp`) left by an interrupted save either. A vault file saved under a security-key file, opened with a key file that lacks its key, gets "This vault file was saved with a key file locked by a security key…" and is not opened. Opening any of these files needs a build with the security-key feature.
@@ -303,25 +308,25 @@ If a received key file is refused as "an unexplained change" (another PC set the
 
 Before security keys can be on by default, or key-file sync can leave 'experimental', all of the following must pass on real keys. Any failure keeps the feature off by default. If Windows cannot enforce the PIN, USB/NFC only and the raw key answer, key-file sync is not offered at all.
 
-**Result: none yet (not run).** The developer has no real security key.
+**Result: partly run.** Every 'passed' below was checked on a **YubiKey 5C NFC, Windows 11 26200, API 9** (six keys, an HID OMNIKEY 5022 NFC reader). The rest was not run. What the checks changed: security keys always use the PIN (PIN above), every Windows call names Goyo Vault's window as its owner (owner 0 fails at once with 0x80090027), and a key used over NFC is unplugged before the window opens.
 
 |#|Check|Result|
 |---|---|---|
-|1|hmac-secret really comes back through webauthn.dll (API 9), is 32 bytes, and stays the same across unlocks, reboots, PIN changes and months (YubiKey 5 firmware 5.2-5.6 and 5.7+)|not run|
+|1|hmac-secret really comes back through webauthn.dll (API 9), is 32 bytes, and stays the same across unlocks, reboots, PIN changes and months (YubiKey 5 firmware 5.2-5.6 and 5.7+)|partly passed: the 32-byte value for one salt is the same at every touch, and the same over USB and NFC (verified on YubiKey 5C NFC, Windows 11 26200, API 9); unlocks, reboots, PIN changes, months and firmware versions not run|
 |2|Whether Windows ignores hmac-secret for non-discoverable credentials (register with resident key on and off, then GetAssertion)|not run|
-|3|`HMAC_SECRET_VALUES_FLAG` is honored, so both computations agree for Goyo's PRF input (API 9; 4-8 if possible)|not run|
+|3|`HMAC_SECRET_VALUES_FLAG` is honored, so both computations agree for Goyo's PRF input (API 9; 4-8 if possible)|passed: the flag with SHA-256("WebAuthn PRF\0"‖s) gives the value of s without the flag (verified on YubiKey 5C NFC, Windows 11 26200, API 9); API 4-8 not run|
 |4|The WebAuthn API version on Windows 11 builds 22000, 22621, 22631, 26100 (only 26200 = API 9 was measured)|not run|
-|5|RP ID `goyo-vault.invalid` is accepted; how it shows in the Windows window and in ykman's list; whether Windows Settings' passkey list shows security-key entries|not run|
-|6|Behavior with uv=discouraged on a key with a PIN, after setting a PIN later, with alwaysUv, and whether CTAP 2.1 keys give different outputs with and without the PIN|not run|
-|7|Whether Windows forces PIN setup when a key without a PIN is used in PIN mode|not run|
-|8|credProtect 3 (required) is accepted and really enforced (an assertion without the PIN fails), level 2 works, a key without credProtect fails cleanly|not run|
-|9|With 2 keys registered, the per-credential salts reach the right key, both keys plugged in at once works, and the answering key is identified|not run|
-|10|One touch returns two salt values (`pbSecond`) equal to single-salt answers; otherwise two touches replace it|not run|
-|11|The exact error when an already registered key is registered again|not run|
+|5|RP ID `goyo-vault.invalid` is accepted; how it shows in the Windows window and in ykman's list; whether Windows Settings' passkey list shows security-key entries|partly passed: the RP ID is accepted (verified on YubiKey 5C NFC, Windows 11 26200, API 9); how it shows in the window, in ykman and in Windows Settings not run|
+|6|Behavior with uv=discouraged on a key with a PIN, after setting a PIN later, with alwaysUv, and whether CTAP 2.1 keys give different outputs with and without the PIN|partly passed: on a key with a PIN, Windows asks for the PIN and reports UV=1 even with uv=discouraged (verified on YubiKey 5C NFC, Windows 11 26200, API 9), so the no-PIN mode was removed; alwaysUv and output differences with and without the PIN not run|
+|7|Whether Windows forces PIN setup when a key without a PIN is used in PIN mode|passed: registering a discoverable credential on a key without a PIN makes Windows have the user set one (that registration's flags are UP only, UV=0) (verified on YubiKey 5C NFC, Windows 11 26200, API 9)|
+|8|credProtect 3 (required) is accepted and really enforced (an assertion without the PIN fails), level 2 works, a key without credProtect fails cleanly|partly passed: a registration with credProtect 3 required and UV required succeeds and its extension output is credProtect=3 (verified on YubiKey 5C NFC, Windows 11 26200, API 9); a lookup without the PIN failing, level 2 and a key without credProtect not run|
+|9|With 2 keys registered, the per-credential salts reach the right key, both keys plugged in at once works, and the answering key is identified|passed: with two keys in one allow list Windows reports the answering credential correctly, and the values differ per key (verified on YubiKey 5C NFC, Windows 11 26200, API 9)|
+|10|One touch returns two salt values (`pbSecond`) equal to single-salt answers; otherwise two touches replace it|partly passed: one touch returns both 32-byte values (`pbSecond`) (verified on YubiKey 5C NFC, Windows 11 26200, API 9); equality with single-salt answers not run|
+|11|The exact error when an already registered key is registered again|passed: registering an already registered key again with the exclude list fails as "already registered" (NTE_EXISTS) (verified on YubiKey 5C NFC, Windows 11 26200, API 9)|
 |12|Error codes: user cancel, timeout, app cancel, PIN locked, cancel during PIN entry, a key without hmac-secret|not run|
 |13|Three registration windows in a row (no re-plugging), the flow of windows, equal values|not run|
-|14|Transport values for USB and NFC; phones and Windows Hello refused; BE and BS are 0 on a YubiKey 5; synced passkeys refused|not run|
-|15|The Windows window comes to the front, owner disabling breaks nothing, away and idle timers pause, and the 150 s cap works|not run|
+|14|Transport values for USB and NFC; phones and Windows Hello refused; BE and BS are 0 on a YubiKey 5; synced passkeys refused|partly passed: USB is 0x1 and NFC 0x2, BE and BS are always 0, the AAGUID is zero (no attestation); NFC works with the PIN typed first; a key plugged into USB when the window opens is used over USB (verified on YubiKey 5C NFC, Windows 11 26200, API 9); phones, Windows Hello and synced passkeys refused not run|
+|15|The Windows window comes to the front, owner disabling breaks nothing, away and idle timers pause, and the 150 s cap works|partly passed: with owner window 0 MakeCredential fails at once with 0x80090027, with a real window it works (verified on YubiKey 5C NFC, Windows 11 26200, API 9); coming to the front, the timers and the 150 s cap not run|
 |16|Thread and handle hygiene after many touches, no DLL loaded from beside the exe, `check_dll_planting.py --webauthn` passes|not run|
 |17|The Windows window and error after a FIDO reset of a registered key; failure at the same step as a wrong password; removal with another key and re-adding|not run|
 |18|Credential slot counts (about 25 / 100), the error when they are full, deleting one entry with `ykman fido credentials delete`, and whether Windows Settings can delete one|not run|

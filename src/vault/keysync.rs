@@ -13,7 +13,7 @@ use super::{
     Session,
     anchor::{self, GateState, Ks, VaultLine},
     gate::{self, GateKind},
-    keyfile::{EPOCH_SILENT, EPOCH_WINDOW, KeyFile, KeyState, Magic, is_sync_key_file},
+    keyfile::{EPOCH_SILENT, EPOCH_WINDOW, KeyFile, KeyState, Kind, Magic, is_sync_key_file},
     sha256,
     sync::{SyncLink, SyncNotice, key_inside},
 };
@@ -47,6 +47,8 @@ pub const KEYSYNC_NOT_ON: &str = "이 열쇠 파일은 열쇠 파일 동기화�
 pub const KEYSYNC_NOT_GONE: &str = "서버에 이 금고의 열쇠 파일이 있어 다시 올릴 필요가 없습니다.";
 /// KeyFileRefused's reasons that only this module gives.
 pub const USER_DROPPED: &str = "사용자가 받지 않음";
+/// The kind-9 merge's other file did not open (spec §5.8).
+pub const FORGED_LINK: &str = "위조된 연결";
 pub const TOO_FAR: &str = "수정 번호가 너무 큼";
 /// A pending gate holds every key change but the lost-key flow and the off
 /// (spec §7.5 GatePending, no override).
@@ -56,6 +58,12 @@ pub const KEYFILE_READY: &str =
     "먼저 서버의 새 열쇠 파일을 받으세요. 그래도 바꾸면 두 열쇠 파일이 갈라집니다.";
 /// [받기…] with nothing on the server to take.
 pub const NO_CANDIDATE: &str = "서버에 받을 열쇠 파일이 없습니다.";
+/// S-SUPERSEDE-HEAD (spec §9.3; S6-1 #2): a vault copy on the server that
+/// is not under the candidate's own state halts sync; the head override
+/// lifts it first.
+pub const SUPERSEDE_HEAD: &str = "서버의 최신 금고 사본(수정 {epoch}, 열쇠 {key})이 다시 올리려는 열쇠 파일과 맞지 않아 아무것도 하지 않았습니다. 그 사본을 쓴 PC를 더 쓸 수 없는 것이 확실할 때만 먼저 '서버 사본을 이 PC 상태로 덮어쓰기…'를 하고 다시 하세요.";
+/// The server's file is no longer a change the supersede serves.
+pub const NOT_SUPERSEDABLE: &str = "서버의 열쇠 파일은 이제 이 PC 상태로 다시 올려 대신할 수 있는 변경이 아닙니다. '열쇠 관리'를 다시 확인하세요.";
 /// A server file that this flow cannot take (a fork, a refused file).
 pub const NOT_A_SUCCESSOR: &str = "서버의 열쇠 파일은 이 PC가 받거나 합칠 수 있는 파일이 아닙니다. 다른 PC에서 바꾼 것이 맞다면 그 PC의 열쇠 파일을 USB로 가져와 '새 열쇠 파일 받기'로 받으세요.";
 
@@ -159,6 +167,8 @@ pub struct KeySyncView {
     /// The epoch of a pending gate whose candidate is not the server's top
     /// (no longer served): [받지 않기…] still ends it (§7.15a).
     pub stale_gate: Option<u64>,
+    /// The rollout reminder is on: [모든 PC 확인 완료] (§7.18).
+    pub rollout: bool,
 }
 
 /// The key side of a sync link (spec §7.10-§7.12): what this session last
@@ -281,6 +291,8 @@ impl Session {
             Change::Remove { loss, .. } => loss.is_some(),
             Change::KeySyncOff => true,
             Change::KeysOff => self.ks01(),
+            // What ends the gate it would meet (spec §7.15a).
+            Change::Supersede { .. } => true,
             _ => false,
         }
     }
@@ -399,7 +411,7 @@ impl Session {
                 };
                 let (state, class) = match KeyFile::from_bytes(path, record.payload.to_vec()) {
                     Ok(file) => match file.header() {
-                        Some(h) => (h.state(), self.classify(&file, line)),
+                        Some(h) => (h.state(), self.classify_unopened(&file, line)),
                         None => (none, KeyClass::Bad),
                     },
                     Err(_) => (none, KeyClass::Bad),
@@ -411,6 +423,21 @@ impl Session {
                     class,
                 }
             }
+        }
+    }
+    /// §7.14 with the app's record of merges whose other file did not open
+    /// (spec §5.8, S6-2 #5): such a file, while it stays the incoming, is
+    /// Refused{"위조된 연결"} instead of a KeyFork.
+    fn classify_unopened(&self, other: &KeyFile, line: Option<&VaultLine>) -> KeyClass {
+        match self.classify(other, line) {
+            KeyClass::KeyFork
+                if other
+                    .header()
+                    .is_some_and(|t| super::serverkey::merge_unopened(&self.id, t.state())) =>
+            {
+                KeyClass::Refused(FORGED_LINK)
+            }
+            class => class,
         }
     }
     /// §7.14: how the server's key file `other` stands against this PC's
@@ -507,7 +534,7 @@ impl Session {
         KeyClass::Successor { carry, gate }
     }
     /// The anchor's `gated` epoch that a silent jump counts from.
-    fn gated_epoch(&self) -> Option<u64> {
+    pub(super) fn gated_epoch(&self) -> Option<u64> {
         match self.anchor.lines.vault.as_ref() {
             Some(l) if l.state.flags.t || !l.state.hardware() => Some(l.state.gated),
             _ => None,
@@ -933,7 +960,14 @@ impl Session {
                 Top::Key {
                     class: KeyClass::KeyFork,
                     ..
-                } => return Some(SyncNotice::KeyFork),
+                } => {
+                    return Some(match self.removal_merge_in(link) {
+                        Some(m) => SyncNotice::KeyForkMerge {
+                            auto: m == super::serverkey::RemovalMerge::Auto,
+                        },
+                        None => SyncNotice::KeyFork,
+                    });
+                }
                 _ => {}
             }
         }
@@ -986,6 +1020,7 @@ impl Session {
         let mut v = KeySyncView {
             on: self.ks01(),
             synced: self.format == super::Format::V2,
+            rollout: self.rollout().is_some(),
             ..KeySyncView::default()
         };
         let Some(link) = self.sync.as_ref() else {
@@ -1030,7 +1065,10 @@ impl Session {
     /// of the top key record of `kview` exactly as judged, with its record
     /// number. None when the top is no key record.
     pub fn server_key_file(&self) -> Option<(KeyFile, u64)> {
-        let link = self.sync.as_ref()?;
+        self.server_key_file_in(self.sync.as_ref()?)
+    }
+    /// The same from `link` (a poll holds the link outside the session).
+    pub(super) fn server_key_file_in(&self, link: &SyncLink) -> Option<(KeyFile, u64)> {
         let v = link.keys.view.as_ref()?;
         let record = v.top(&self.id).filter(|r| r.kind == RecordKind::Key)?;
         let file = KeyFile::from_bytes(&link.dir.join(KEY_VIEW), record.payload.to_vec()).ok()?;
@@ -1266,7 +1304,7 @@ impl Session {
         // change is written at S4: a consented "on" at `on.c` over a cut or
         // nothing is not KeySyncGone (row 8), whatever the confirmed line
         // still says until S5.
-        let gate = self.pending_gate().is_some() && !p.clears.g;
+        let gate = self.pending_gate().is_some() && !(p.clears.g || p.clears.s);
         let held = self.key_hold_with(&link, p.state.ks, gate);
         if link.keys.held && !held {
             link.in_stamp = None;
@@ -1294,12 +1332,183 @@ impl Session {
                 .header()
                 .is_some_and(|h| matches!(h.kind as u8, 4 | 9))
     }
-    /// The supersede of a gated candidate whose PC is gone (spec §7.15a):
-    /// not offered in this build step (see the spec's stage-6
-    /// implementation table).
+    /// [다른 PC가 없어 이 PC 상태로 올리기…] is offered (spec §7.15a, §9.1).
     pub(super) fn supersede_offered(&self) -> bool {
-        false
+        self.supersede_candidate().is_some()
     }
+    /// The candidate the supersede would answer (spec §7.15a): the server's
+    /// top key record when it is a G1-gated successor (its gate pending, or
+    /// dropped) or a KeyFork whose option 2 needs G1; that removes none of
+    /// this PC's keys (R = ∅), carries no removal of a key this PC never
+    /// knew (T_new = ∅) and is no silent jump; on a GOYOKH01 session only a
+    /// GOYOKS01 successor, with §7.9's conditions that magic needs (every
+    /// slot a PIN slot in PIN mode, vault sync, a capable helper on a line
+    /// that serves key ops, no pending off). Public bytes only: the
+    /// candidate is never opened.
+    pub(super) fn supersede_candidate(&self) -> Option<(KeyState, KeyFile)> {
+        if self.unconfirmed()
+            || self.local_rollback
+            || self.restored
+            || self.restore_held
+            || self.gate_login.is_some()
+        {
+            return None;
+        }
+        let own = self.key_file.header().filter(|h| !h.slots.is_empty())?;
+        let link = self.sync.as_ref()?;
+        let Top::Key { state, class, .. } = link.keys.top else {
+            return None;
+        };
+        let (file, _) = self.server_key_file()?;
+        let t = file.header().filter(|t| t.state() == state)?;
+        let named = self
+            .anchor
+            .lines
+            .gate
+            .as_ref()
+            .filter(|g| (g.epoch, g.tag) == (state.epoch, state.tag))
+            .map(|g| g.state);
+        let fork = match class {
+            KeyClass::Successor {
+                gate: Some(GateKind::G1),
+                ..
+            } => false,
+            KeyClass::Refused(USER_DROPPED) if named == Some(GateState::Dropped) => false,
+            KeyClass::KeyFork => true,
+            _ => return None,
+        };
+        let chained = file.chain_ok(self.keys.current());
+        if !fork && !chained {
+            return None;
+        }
+        let line = self.anchor.lines.vault.as_ref();
+        let checked = gate::public_checks(
+            &self.key_file,
+            line,
+            &file,
+            fork,
+            chained,
+            self.gated_epoch(),
+        )
+        .ok()?;
+        let g = &checked.gates;
+        if checked.removed_authorizer.is_some()
+            || !g.removed.is_empty()
+            || !g.unknown.is_empty()
+            || g.jump
+            || (g.added.is_empty() && !g.policy && !g.slot)
+        {
+            return None;
+        }
+        if own.magic != Magic::Ks01 {
+            let ready = !fork
+                && t.magic == Magic::Ks01
+                && own.pin()
+                && own.slots.iter().all(|s| s.pin())
+                && self.format == super::Format::V2
+                && helper_fresh(link)
+                && link.keys.line0().is_some()
+                && !self.off_pending();
+            if !ready {
+                return None;
+            }
+        }
+        Some((state, file))
+    }
+    /// R0 of the supersede (spec §5.5, §7.15a): the candidate is still the
+    /// one the flow named and is still offered; the vault channel is halted
+    /// by nothing but a head under the candidate's own state (a header key
+    /// ID in its list and not in this PC's bundle, at its epoch), else
+    /// S-SUPERSEDE-HEAD. Ok: the candidate's tombstones and the `sup`
+    /// entries of the key IDs of its list that this PC's bundle lacks.
+    pub(super) fn supersede_check(
+        &self,
+        named: KeyState,
+    ) -> Result<(Vec<super::keyfile::Tombstone>, Vec<anchor::Sup>)> {
+        let (state, file) = self
+            .supersede_candidate()
+            .filter(|(s, _)| *s == named)
+            .ok_or(NOT_SUPERSEDABLE)?;
+        let t = file.header().ok_or(NOT_SUPERSEDABLE)?;
+        let ours: Vec<[u8; 16]> = self
+            .keys
+            .keys()
+            .iter()
+            .map(|k| super::keyfile::key_id(&self.id, k))
+            .collect();
+        let theirs: Vec<[u8; 16]> = t
+            .key_ids
+            .iter()
+            .filter(|i| !ours.contains(i))
+            .copied()
+            .collect();
+        if let Some(head) = self.halted_head()
+            && !(theirs.contains(&head.key_id) && head.epoch == state.epoch)
+        {
+            return Err(super::refuse(
+                SUPERSEDE_HEAD,
+                vec![head.epoch.to_string(), head.key_prefix()],
+            ));
+        }
+        let sup = theirs
+            .into_iter()
+            .map(|keyid| anchor::Sup {
+                keyid,
+                epoch: state.epoch,
+                tag: state.tag,
+            })
+            .collect();
+        Ok((t.tombstones.clone(), sup))
+    }
+    /// The rollout reminder (spec §7.18): this PC changed this GOYOKS01 key
+    /// file (the anchor's `p` on the confirmed state the session holds),
+    /// and the user has not yet said every PC took it. None otherwise, and
+    /// never before the key file is confirmed.
+    pub fn rollout(&self) -> Option<Rollout> {
+        let line = self.anchor.lines.vault.as_ref()?;
+        if !line.state.flags.p
+            || line.state.key_state() != self.key_state
+            || !self.ks01()
+            || self.unconfirmed()
+            || self.restored
+        {
+            return None;
+        }
+        let h = self.key_file.header()?;
+        Some(match h.kind {
+            Kind::Remove => Rollout::Remove(self.key_code()?),
+            Kind::Password | Kind::Pair => Rollout::Plain,
+            Kind::SyncOn => Rollout::Maybe(self.key_code()?),
+            _ => Rollout::Code(self.key_code()?),
+        })
+    }
+    /// [모든 PC 확인 완료] (`KEY_ROLLOUT_DONE`, spec §7.18): the anchor's
+    /// `p` cleared on the confirmed state this session holds; the change
+    /// now counts as complete on this PC.
+    pub fn rollout_done(&mut self) -> Result<()> {
+        let state = self.key_state;
+        self.anchor_strict(&mut |lines| match lines.vault.as_mut() {
+            Some(l) if l.state.flags.p && l.state.key_state() == state => {
+                l.state.flags.p = false;
+                true
+            }
+            _ => false,
+        })
+    }
+}
+/// What S-ROLLOUT says (spec §7.18), by the gate the change this PC made
+/// needs on the other PCs, with this PC's key code where one may be typed:
+/// a removal (the removed keys picked, or the code on a PC that never knew
+/// one of them), an addition or a re-seed (the code), key-file sync on, a
+/// re-upload or a supersede (kind 6: the code only on a PC that still keeps
+/// its key file to itself, none on one already on), or a password change
+/// or a pairing (no gate).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Rollout {
+    Remove(String),
+    Code(String),
+    Maybe(String),
+    Plain,
 }
 /// A helper with `features=keys` wrote its status within 10 minutes.
 fn helper_fresh(link: &SyncLink) -> bool {

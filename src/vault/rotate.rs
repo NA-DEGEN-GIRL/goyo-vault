@@ -133,6 +133,14 @@ pub struct Reauth {
     /// what its pair records reach.
     #[cfg(feature = "security-key")]
     keys: Option<hw::Authorizer>,
+    /// `password` is the one that opens this session's key file. Not on the
+    /// second entry point of spec §5.2, whose password opened only the
+    /// server's key file: that Reauth serves only the accept of that file,
+    /// whose E5 then holds trivially (spec §7.15 step 4).
+    own_password: bool,
+    /// The transport of that entry's touch, which has no Authorizer.
+    #[cfg(feature = "security-key")]
+    bare_transport: Option<u32>,
     _lock: FileLock,
 }
 impl Reauth {
@@ -145,6 +153,14 @@ impl Reauth {
     fn age(&self) -> Duration {
         Duration::from_millis(crate::crypto::now_ms().saturating_sub(self.created))
     }
+}
+/// The OTP step of a Reauth: a code typed at a time, the step the login
+/// verified and saved (`reauth_from_unlock`), or none (the OTP backup).
+enum Otp<'a> {
+    Typed(&'a str, u64),
+    #[cfg(feature = "security-key")]
+    Proven(Option<u64>),
+    None,
 }
 /// What a key change does (spec §5.5).
 pub enum Change {
@@ -192,6 +208,12 @@ pub enum Change {
     /// sequence of spec §7.16.
     #[cfg(feature = "security-key")]
     KeySyncOff,
+    /// The supersede of a G1-gated change whose PC is gone (spec §7.15a):
+    /// this PC's key file written again above the candidate `(epoch, tag)`
+    /// (kind 6, the data key kept, own ∪ the candidate's tombstones), which
+    /// is never opened. On a GOYOKH01 session it turns key-file sync on.
+    #[cfg(feature = "security-key")]
+    Supersede { epoch: u64, tag: [u8; 16] },
 }
 /// The keys the user agreed to suspend (S-SUSPEND; security-key build).
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -362,9 +384,55 @@ impl Session {
         otp: Option<(&str, u64)>,
         touch: Option<&Touch>,
     ) -> Result<Reauth> {
-        if password.len() > 1024
-            || (self.uses_otp() && otp.is_some_and(|(code, _)| !otp_format(code)))
-        {
+        if self.uses_otp() && otp.is_some_and(|(code, _)| !otp_format(code)) {
+            return Err(AUTH_ERROR);
+        }
+        self.reauth_with(
+            password,
+            otp.map_or(Otp::None, |(c, t)| Otp::Typed(c, t)),
+            touch,
+        )
+    }
+    /// The login's own Reauth (spec §5.3): the key file opened again with
+    /// the unlock's password and touch, the OTP step the unlock verified
+    /// and saved taken as it is, so an OTP vault asks no second code. Only
+    /// for the session the proof came from.
+    #[cfg(feature = "security-key")]
+    pub fn reauth_from_unlock(
+        &mut self,
+        proof: super::serverkey::UnlockProof,
+        touch: &Touch,
+    ) -> Result<Reauth> {
+        if proof.session != self.serial {
+            return Err(REAUTH_STALE);
+        }
+        self.reauth_with(&proof.password, Otp::Proven(proof.otp_step), Some(touch))
+    }
+    /// The Reauth of the second entry point (spec §5.2, §7.15 step 4): this
+    /// session was built from the server's key file `password` opened, so
+    /// this key file is not opened again; the lock and the key file on disk
+    /// are checked as for any Reauth. It serves only that file's accept.
+    #[cfg(feature = "security-key")]
+    pub(super) fn reauth_server(&mut self, password: &str, touch: &Touch) -> Result<Reauth> {
+        self.retry_key_temp();
+        let lock = FileLock::acquire(&self.key_path)?;
+        if !self.key_on_disk()? {
+            return Err(KEY_CHANGED);
+        }
+        Ok(Reauth {
+            session: self.serial,
+            app_serial: 0,
+            created: crate::crypto::now_ms(),
+            password: Zeroizing::new(password.to_owned()),
+            otp_step: self.uses_otp().then_some(self.last),
+            keys: None,
+            own_password: false,
+            bare_transport: touch.transport,
+            _lock: lock,
+        })
+    }
+    fn reauth_with(&mut self, password: &str, otp: Otp, touch: Option<&Touch>) -> Result<Reauth> {
+        if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
         // A rename a key change left to finish goes first.
@@ -382,7 +450,9 @@ impl Session {
         let keys = self.authorizer(&opened, touch)?;
         drop(opened);
         let otp_step = match (self.keys.otp(), otp) {
-            (Some(secret), Some((code, typed))) => {
+            #[cfg(feature = "security-key")]
+            (Some(_), Otp::Proven(step)) => step,
+            (Some(secret), Otp::Typed(code, typed)) => {
                 let now = otp::now()?;
                 if now.saturating_sub(typed) > OTP_TYPED_MAX || typed > now.saturating_add(5) {
                     return Err(AUTH_ERROR);
@@ -408,6 +478,9 @@ impl Session {
             otp_step,
             #[cfg(feature = "security-key")]
             keys,
+            own_password: true,
+            #[cfg(feature = "security-key")]
+            bare_transport: None,
             _lock: lock,
         })
     }
@@ -490,6 +563,13 @@ impl Session {
         if !self.local_rollback && matches!(change, Change::Remove { loss: Some(_), .. }) {
             return None;
         }
+        // The supersede ends the halt and the gate it would meet: none of
+        // the rotation gates (spec §7.15a, round 2 finding 32); R0 refuses
+        // any other halt (S-SUPERSEDE-HEAD).
+        #[cfg(feature = "security-key")]
+        if !self.local_rollback && matches!(change, Change::Supersede { .. }) {
+            return None;
+        }
         let _ = change;
         #[cfg(feature = "security-key")]
         let (key_halt, ready, unverified) = (
@@ -533,10 +613,11 @@ impl Session {
         consent: Consent,
         override_gate: bool,
     ) -> Result<Rekeyed> {
-        // R0.
+        // R0. The Reauth of the second entry point serves only its accept.
         if r.session != self.serial
             || r.age() > REAUTH_MAX
             || (self.uses_otp() && r.otp_step.is_none())
+            || !r.own_password
         {
             return Err(REAUTH_STALE);
         }

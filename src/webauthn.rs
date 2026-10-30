@@ -918,7 +918,9 @@ unsafe fn take_assertion(p: *mut Assertion, free: impl FnOnce(*mut Assertion)) -
 /// The error a failed call stands for (spec §8.7), from its HRESULT and
 /// from the W3C DOM error Windows maps it to; Windows' own name and text
 /// for it are never shown. A code it does not know is shown as a number.
-/// `make`: a MakeCredential, and whether it required credProtect.
+/// `make`: a MakeCredential, and whether it required credProtect. The
+/// HRESULT's own meaning comes first: NTE_INVALID_PARAMETER is a request
+/// Windows refused, whatever DOM error it maps to.
 fn error_of(hr: Hresult, dom: Hresult, make: Option<bool>) -> FidoError {
     match FidoError::from_hresult(hr) {
         FidoError::Other(_) => {}
@@ -940,6 +942,16 @@ fn error_of(hr: Hresult, dom: Hresult, make: Option<bool>) -> FidoError {
         _ if is(fido::E_CANCELLED) => FidoError::Cancelled,
         _ => FidoError::Other(hr),
     }
+}
+
+/// Windows' dialogs belong to the app's top-level window. With none (hWnd
+/// 0) Windows fails at once with NTE_INVALID_PARAMETER (a real YubiKey,
+/// spec §2.28), so no such call is made.
+fn owner_set(owner: Hwnd) -> Result<(), FidoError> {
+    if owner == 0 {
+        return Err(FidoError::Rejected);
+    }
+    Ok(())
 }
 
 type FnVersion = unsafe extern "system" fn() -> u32;
@@ -1069,6 +1081,7 @@ impl Authenticator for WebAuthn {
         c: &CancelToken,
     ) -> Result<RawCredential, FidoError> {
         let o = build_make_options(r, self.version, &Guid::of(&c.id));
+        owner_set(o.owner)?;
         // A cancel that came before the call: no Windows dialog opens
         // (spec §8.5), since Windows forgets a cancel with nothing running.
         c.check()?;
@@ -1093,6 +1106,7 @@ impl Authenticator for WebAuthn {
     }
     fn get_assertion(&self, r: &AssertRequest, c: &CancelToken) -> Result<RawAssertion, FidoError> {
         let o = build_assert_options(r, self.version, &Guid::of(&c.id));
+        owner_set(o.owner)?;
         c.check()?;
         let mut out = null_mut();
         let hr =
@@ -1689,6 +1703,91 @@ mod tests {
         auth.cancel(&token);
     }
 
+    /// No call goes to Windows without the app's window as its owner: hWnd
+    /// 0 fails at once, as Windows fails it (spec §2.28).
+    #[test]
+    fn no_call_is_made_without_an_owner_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Windows' exports, standing in: each call is counted and fails.
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "system" fn version() -> u32 {
+            9
+        }
+        unsafe extern "system" fn make(
+            _: Hwnd,
+            _: *const RpEntity,
+            _: *const UserEntity,
+            _: *const CoseParams,
+            _: *const ClientData,
+            _: *const MakeCredOptions,
+            _: *mut *mut CredentialAttestation,
+        ) -> Hresult {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            fido::E_CANCELLED
+        }
+        unsafe extern "system" fn get(
+            _: Hwnd,
+            _: Pcwstr,
+            _: *const ClientData,
+            _: *const GetAssertionOptions,
+            _: *mut *mut Assertion,
+        ) -> Hresult {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            fido::E_CANCELLED
+        }
+        unsafe extern "system" fn free_attestation(_: *mut CredentialAttestation) {}
+        unsafe extern "system" fn free_assertion(_: *mut Assertion) {}
+        unsafe extern "system" fn cancel_id(_: *mut Guid) -> Hresult {
+            0
+        }
+        unsafe extern "system" fn cancel(_: *const Guid) -> Hresult {
+            0
+        }
+        unsafe extern "system" fn error_name(_: Hresult) -> Pcwstr {
+            null()
+        }
+        unsafe extern "system" fn dom_error(hr: Hresult) -> Hresult {
+            hr
+        }
+        static API: Api = Api {
+            version,
+            make,
+            get,
+            free_attestation,
+            free_assertion,
+            cancel_id,
+            cancel,
+            error_name,
+            dom_error,
+        };
+        assert_eq!(owner_set(0), Err(FidoError::Rejected));
+        assert_eq!(owner_set(0x1234), Ok(()));
+        let auth = WebAuthn {
+            api: &API,
+            version: 9,
+        };
+        let token = CancelToken::new([1; 16]);
+        for owner in [0, 0x1234] {
+            let made = if owner == 0 {
+                Some(FidoError::Rejected)
+            } else {
+                Some(FidoError::Cancelled)
+            };
+            let request = goyo_vault::fido::AssertRequest::new(
+                owner,
+                vec![(vec![1; 16], [2; 32], None)],
+                true,
+            )
+            .unwrap();
+            assert_eq!(auth.get_assertion(&request, &token).err(), made);
+            let (_, make) =
+                goyo_vault::fido::Registration::new(&[1; 16], 1, 0, vec![], owner).unwrap();
+            assert_eq!(auth.make_credential(&make, &token).err(), made);
+        }
+        // Only the two calls with a window reached Windows.
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+    }
+
     /// Windows' codes become the app's errors (spec §8.7); its own text is
     /// never asked for.
     #[test]
@@ -1707,6 +1806,16 @@ mod tests {
             error_of(fido::STORE_FULL, 0, Some(false)),
             FidoError::StoreFull
         );
+        // hWnd 0's code is a refused request, never a full store or a
+        // missing extension, whatever DOM error Windows maps it to.
+        for make in [None, Some(false), Some(true)] {
+            for dom in [0, NTE_NOT_SUPPORTED, fido::E_CANCELLED] {
+                assert_eq!(
+                    error_of(fido::NTE_INVALID_PARAMETER, dom, make),
+                    FidoError::Rejected
+                );
+            }
+        }
         assert_eq!(
             error_of(NTE_NOT_SUPPORTED, 0, Some(true)),
             FidoError::NoCredProtect

@@ -354,6 +354,16 @@ struct Flow {
     #[cfg(feature = "security-key")]
     touch: Option<Touch>,
 }
+/// What a login with security keys hands back to its flow (spec §5.2,
+/// §5.3): the unlock's touch, and either the session's `UnlockProof` (the
+/// server's key file taken at login) or the failed-unlock entry.
+#[cfg(feature = "security-key")]
+#[derive(Default)]
+struct LoginOut {
+    touch: Option<Touch>,
+    proof: Option<vault::UnlockProof>,
+    entry: Option<Box<vault::ServerEntry>>,
+}
 impl Flow {
     /// The older-key vault file a login must ask about first (S-OLDER).
     fn older(&self) -> Option<[u8; 32]> {
@@ -531,6 +541,19 @@ const ADOPT_RESULT: &str = "받은 뒤의 열쇠 파일: 수정 {epoch}";
 /// S-ADOPT-CODE: a successor's code in the preview, every result's after
 /// the write.
 const ADOPT_CODE: &str = "받은 뒤의 열쇠 확인 코드: {code}";
+/// The unlock's usual line, when nothing else is said.
+const UNLOCKED: &str =
+    "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다.";
+const UNLOCKED_NO_AUTO_LOCK: &str =
+    "잠금 해제됨 · 자동 잠금이 꺼져 있습니다. 자리를 비울 때는 잠금 버튼이나 Win+L을 누르세요.";
+/// Whether a status line is the unlock's usual line (a later status may
+/// drop it to make room).
+#[cfg(feature = "security-key")]
+fn usual_unlock_line(line: &str) -> bool {
+    [UNLOCKED, UNLOCKED_NO_AUTO_LOCK]
+        .iter()
+        .any(|t| line == *t || line == tr(t))
+}
 const ADOPT_PASS_OWN: &str = "앞으로도 이 PC의 비밀번호로 엽니다.";
 const ADOPT_PASS_OTHER: &str = "앞으로는 가져온 열쇠 파일의 비밀번호로 엽니다.";
 const OWN_PASS_LABEL: &str = "이 PC의 비밀번호 쓰기";
@@ -875,6 +898,11 @@ impl App {
         } else {
             &self.vault_path
         };
+        // The server's key file in the backup's key view (spec §7.17).
+        #[cfg(feature = "security-key")]
+        if self.screen == Screen::Restore && vault::is_fetched_key(vault, &self.key_path) {
+            return vault::fetched_key_info(vault);
+        }
         let key = key_candidate(vault, &self.key_path).unwrap_or_else(|| self.key_path.clone());
         key_info(&key)
     }
@@ -1447,7 +1475,7 @@ impl App {
             // PWONLY) and the per-vault forget after an anchor refusal take
             // this note's place (spec §9.1).
             #[cfg(feature = "security-key")]
-            let keyed = !restore && self.build_login_extra(y + 62);
+            let keyed = self.build_login_extra(y + 62);
             #[cfg(not(feature = "security-key"))]
             let keyed = false;
             if !keyed {
@@ -2363,6 +2391,18 @@ impl App {
     /// again. Then the library call, and the screen for its result. True
     /// when a key change wrote a new key file, whose backup is offered next.
     fn finish(&mut self, flow: Flow) -> crypto::Result<bool> {
+        #[cfg(feature = "security-key")]
+        return self.finish_out(flow, &mut LoginOut::default());
+        #[cfg(not(feature = "security-key"))]
+        self.finish_out(flow)
+    }
+    /// The same, handing a login's touch, proof or failed-unlock entry back
+    /// to its flow (security-key build).
+    fn finish_out(
+        &mut self,
+        flow: Flow,
+        #[cfg(feature = "security-key")] out: &mut LoginOut,
+    ) -> crypto::Result<bool> {
         if !self.still(flow.screen, flow.serial, flow.session)? {
             return Ok(false);
         }
@@ -2382,7 +2422,18 @@ impl App {
             #[cfg(feature = "security-key")]
             if let Some(touch) = touch {
                 let result =
-                    Session::login_with(prepared, &pass, &otp, otp_time, confirmed_older, &touch);
+                    Session::login_proved(prepared, &pass, &otp, otp_time, confirmed_older, &touch);
+                out.touch = Some(touch);
+                let result = match result {
+                    Ok((s, proof)) => {
+                        out.proof = Some(proof);
+                        Ok(s)
+                    }
+                    Err(failed) => {
+                        out.entry = failed.entry;
+                        Err(failed.error)
+                    }
+                };
                 return self
                     .opened(Screen::Login, result, auth_failure)
                     .map(|_| false);
@@ -2587,7 +2638,15 @@ impl App {
                 self.new_key_path = PathBuf::new();
                 self.backup_path = PathBuf::new();
                 self.dest_path = PathBuf::new();
-                save_paths(&s.path, &self.key_path);
+                // A key file from the server's key view is remembered only
+                // once it is saved on this PC (spec §7.17).
+                #[cfg(feature = "security-key")]
+                let remember = !s.fetched_unsaved();
+                #[cfg(not(feature = "security-key"))]
+                let remember = true;
+                if remember {
+                    save_paths(&s.path, &self.key_path);
+                }
                 let warning = placement_warning(&s.path, &s.key_path);
                 let uses_otp = s.uses_otp();
                 // Only opening a vault looks at its sync folder.
@@ -2614,12 +2673,8 @@ impl App {
                     (true, false) => {
                         "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요."
                     }
-                    _ if AUTO_LOCKS[self.auto_lock].1.is_none() => {
-                        "잠금 해제됨 · 자동 잠금이 꺼져 있습니다. 자리를 비울 때는 잠금 버튼이나 Win+L을 누르세요."
-                    }
-                    _ => {
-                        "잠금 해제됨 · 저장하면 즉시 암호화됩니다. 화면 캡처는 막지만 악성코드까지 막지는 못합니다."
-                    }
+                    _ if AUTO_LOCKS[self.auto_lock].1.is_none() => UNLOCKED_NO_AUTO_LOCK,
+                    _ => UNLOCKED,
                 };
                 // What the unlock took back from temp files, what it did with
                 // the vault file's key and what it found in the sync folder
@@ -4055,11 +4110,26 @@ fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         }
         None => None,
     };
+    // Windows' cancel of the unlock's ceremony may mean a key that only the
+    // server's waiting key file lists (S-TRY-OTHERKEY, spec §5.2).
     #[cfg(feature = "security-key")]
     if let Some(request) = flow.prepared.as_ref().and_then(|p| p.unlock_request(h)) {
-        match touch_step(h, flow.screen, flow.serial, request, keys_ui::TOUCH) {
-            Some(touch) => flow.touch = Some(touch),
-            None => return Ok(()),
+        match touch_step_or(h, flow.screen, flow.serial, request, keys_ui::TOUCH) {
+            Ok(touch) => flow.touch = Some(touch),
+            Err(Some(FidoError::Cancelled))
+                if flow.screen == Screen::Login
+                    && login_gate.is_none()
+                    && flow.prepared.as_ref().is_some_and(|p| p.offers_other_key()) =>
+            {
+                let entry = flow.prepared.take().and_then(|p| {
+                    p.other_key_entry(&flow.pass, &flow.otp, flow.otp_time, flow.confirmed_older)
+                });
+                if let Some(entry) = entry {
+                    keys_ui::try_other_key(h, flow.screen, flow.serial, entry);
+                }
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
         }
     }
     // What a key change does, then its gate (spec §7.5): asked with no
@@ -4092,11 +4162,33 @@ fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     unsafe {
         UpdateWindow(h);
     }
+    #[cfg(feature = "security-key")]
+    let mut out = LoginOut::default();
+    let (screen, serial) = (flow.screen, flow.serial);
     let result = APP.with(|cell| -> crypto::Result<bool> {
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
-        b.as_mut().ok_or("화면이 닫혔습니다.")?.finish(flow)
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        #[cfg(feature = "security-key")]
+        return a.finish_out(flow, &mut out);
+        #[cfg(not(feature = "security-key"))]
+        a.finish(flow)
     });
     drain_pending(h);
+    // AUTH with a server key file that could explain it: S-TRY-SERVER-KEY,
+    // with the same touch (spec §5.2 second entry point).
+    #[cfg(feature = "security-key")]
+    if let (Err(e), Some(entry), Some(touch)) = (&result, out.entry.take(), out.touch.as_ref())
+        && *e == crypto::AUTH_ERROR
+    {
+        if let Err(e) = keys_ui::try_server_key(h, screen, serial, *entry, touch) {
+            report(h, e);
+        }
+        if opened_session() {
+            keys_ui::review_after(h);
+        }
+        return Ok(());
+    }
+    let _ = (screen, serial);
     match result {
         Ok(true) => backup_after(h, BACKUP_QUESTION),
         Err(e) if e == vault::KEY_DAMAGED => save_damaged_key(h),
@@ -4110,6 +4202,15 @@ fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         Some((answer, epoch)) if opened_session() => keys_ui::judge_login_gate(h, answer, epoch),
         None if opened_session() => keys_ui::later(),
         _ => {}
+    }
+    // The server's waiting key file, taken now with the unlock's touch and
+    // the login's own Reauth (spec §5.2 step 9(b), §7.15 at login).
+    #[cfg(feature = "security-key")]
+    if let (Some(proof), Some(touch)) = (out.proof.take(), out.touch.take())
+        && opened_session()
+        && let Err(e) = keys_ui::accept_at_login(h, proof, touch)
+    {
+        report(h, e);
     }
     // S-REVIEW at every unlock while a review is due (spec §9.2 unlock
     // step 7, §5.13).
@@ -4906,6 +5007,21 @@ fn touch_step(
     request: AssertRequest,
     status: &str,
 ) -> Option<Touch> {
+    touch_step_or(h, screen, serial, request, status).ok()
+}
+/// The same, with why it ended: Err(Some(e)) when the ceremony or its
+/// answer failed while the flow still stands (its text is on the status
+/// line), Err(None) when the flow is void or the 150-second cap ended it.
+/// So Err(Some(Cancelled)) is Windows' cancel: the app's own cancel voids
+/// the flow or is the cap's.
+#[cfg(feature = "security-key")]
+fn touch_step_or(
+    h: Hwnd,
+    screen: Screen,
+    serial: u64,
+    request: AssertRequest,
+    status: &str,
+) -> Result<Touch, Option<FidoError>> {
     // A lock, close or quit since the flow's last step voids it before any
     // Windows call (spec §8.3, §8.5; S45-1 #12): no dialog opens over a
     // locked app, and the lock's line stays.
@@ -4918,7 +5034,7 @@ fn touch_step(
         a.status(status);
         Some(())
     });
-    standing?;
+    standing.ok_or(None)?;
     let auth = authenticator();
     unsafe {
         UpdateWindow(h);
@@ -4934,19 +5050,20 @@ fn touch_step(
     let capped = crypto::now_ms().saturating_sub(start) > CEREMONY_CAP;
     drain_pending(h);
     APP.with(|cell| {
-        let mut b = cell.try_borrow_mut().ok()?;
-        let a = b.as_mut()?;
+        let mut b = cell.try_borrow_mut().map_err(|_| None)?;
+        let a = b.as_mut().ok_or(None)?;
         if a.closing || a.serial != serial || a.screen != screen {
-            return None;
+            return Err(None);
         }
         match result {
-            Ok(touch) => Some(touch),
+            Ok(touch) => Ok(touch),
             Err(e) => {
                 if e.delays() {
                     a.failed_attempt();
                 }
                 a.error(&keys_ui::failure(e, !request.allow.is_empty(), capped));
-                None
+                // The cap's cancel is the app's own.
+                Err((!capped).then_some(e))
             }
         }
     })
@@ -6225,11 +6342,11 @@ mod tests {
     /// that switch it, or that check text translated while they run, hold
     /// this for their whole run, so they take turns. It puts the interface
     /// back in Korean when the test ends, even by a failed assertion.
-    struct KoreanAfter {
+    pub(crate) struct KoreanAfter {
         _turn: std::sync::MutexGuard<'static, ()>,
     }
     impl KoreanAfter {
-        fn hold() -> Self {
+        pub(crate) fn hold() -> Self {
             static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let turn = LANGUAGE.lock();
             Self {
@@ -6855,24 +6972,26 @@ mod tests {
     /// The security-key build's own source files with Korean literals: their
     /// English is in EN_SK, which only that build compiles, so only that
     /// build checks it; every build checks that each is listed (spec §9.3).
-    const SCANNED_SK: [&str; 7] = [
+    const SCANNED_SK: [&str; 8] = [
         "fido.rs",
         "keys_ui.rs",
         "vault/gate.rs",
         "vault/keyfile/inbox.rs",
         "vault/keysync.rs",
         "vault/rotate/hw.rs",
+        "vault/serverkey.rs",
         // goyo-sync's window draws with this app's i18n.rs.
         "bin/goyo-sync/keys_gui.rs",
     ];
     #[cfg(feature = "security-key")]
-    const SOURCES_SK: [&str; 7] = [
+    const SOURCES_SK: [&str; 8] = [
         include_str!("fido.rs"),
         include_str!("keys_ui.rs"),
         include_str!("vault/gate.rs"),
         include_str!("vault/keyfile/inbox.rs"),
         include_str!("vault/keysync.rs"),
         include_str!("vault/rotate/hw.rs"),
+        include_str!("vault/serverkey.rs"),
         include_str!("bin/goyo-sync/keys_gui.rs"),
     ];
     /// The texts english_is_complete checks with their English: EN, and in
@@ -7373,6 +7492,10 @@ mod tests {
                 seq: (1 << 48) - 1,
                 admin: true,
             },
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyForkMerge { auto: true },
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyForkMerge { auto: false },
         ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
@@ -9371,9 +9494,9 @@ mod tests {
             use keys_ui::*;
             match screen {
                 Screen::Create => vec![SK_TOGGLE],
+                Screen::Restore => vec![FETCHED_KEY],
                 Screen::Keys => vec![
                     KEY_ON,
-                    KEY_PIN,
                     KEY_ADD,
                     KEY_OFF,
                     KEY_RESEED,
@@ -9392,6 +9515,8 @@ mod tests {
                     KEYSYNC_OFF,
                     KEY_REUPLOAD,
                     GATE_DROP,
+                    GATE_SUPERSEDE,
+                    KEY_ROLLOUT_DONE,
                 ],
                 _ => Vec::new(),
             }
@@ -9462,14 +9587,16 @@ mod tests {
             app.screen = screen;
             assert!((0..=400).all(|id| !app.allows(id)), "no vault open");
         }
-        // Create's PIN toggle only while its key toggle is on.
+        // Create has no PIN toggle: the keys' PIN is always used (spec
+        // §2.28), whatever the key toggle says.
         #[cfg(feature = "security-key")]
         {
             app.screen = Screen::Create;
-            app.toggles.create = true;
-            assert!(app.allows(keys_ui::SK_PIN));
-            app.toggles.create = false;
-            assert!(!app.allows(keys_ui::SK_PIN));
+            for on in [true, false] {
+                app.toggles.create = on;
+                assert!(app.allows(keys_ui::SK_TOGGLE));
+                assert!(!app.allows(158) && !app.allows(152));
+            }
         }
         app.session = Some(synthetic_session(&dir, "synthetic allows password"));
         let auto_lock: Vec<i32> = (AUTO_LOCK..=AUTO_LOCK_LAST).collect();
@@ -11004,9 +11131,56 @@ mod tests {
             fn PostThreadMessageW(thread: u32, m: u32, w: usize, l: isize) -> i32;
         }
 
+        /// `auth` as Windows takes a request (spec §2.28): one whose owner
+        /// is not the app's top-level window fails at once, as hWnd 0 fails
+        /// with a real key, and is counted, so that every test through
+        /// `window` checks that each ceremony names the main window.
+        struct Owned {
+            auth: Arc<dyn Authenticator>,
+            window: Hwnd,
+        }
+        /// Requests that named another owner, over every test.
+        static WRONG_OWNER: AtomicUsize = AtomicUsize::new(0);
+        impl Owned {
+            fn check(&self, owner: Hwnd) -> Result<(), FidoError> {
+                if owner == self.window && owner != 0 {
+                    return Ok(());
+                }
+                WRONG_OWNER.fetch_add(1, Ordering::SeqCst);
+                Err(FidoError::from_hresult(fido::NTE_INVALID_PARAMETER))
+            }
+        }
+        impl Authenticator for Owned {
+            fn api_version(&self) -> u32 {
+                self.auth.api_version()
+            }
+            fn new_cancel(&self) -> Result<CancelToken, FidoError> {
+                self.auth.new_cancel()
+            }
+            fn make_credential(
+                &self,
+                r: &MakeRequest,
+                c: &CancelToken,
+            ) -> Result<RawCredential, FidoError> {
+                self.check(r.owner)?;
+                self.auth.make_credential(r, c)
+            }
+            fn get_assertion(
+                &self,
+                r: &AssertRequest,
+                c: &CancelToken,
+            ) -> Result<RawAssertion, FidoError> {
+                self.check(r.owner)?;
+                self.auth.get_assertion(r, c)
+            }
+            fn cancel(&self, c: &CancelToken) {
+                self.auth.cancel(c)
+            }
+        }
+
         /// The app's window with the app behind it, on the Login screen of
         /// `vault`, a test clock on this thread and `auth` in place of
-        /// Windows' WebAuthn.
+        /// Windows' WebAuthn, taking only requests the window owns.
         fn window(
             class: &str,
             vault: &Path,
@@ -11015,7 +11189,6 @@ mod tests {
             clock: &Arc<AtomicU64>,
         ) -> Hwnd {
             crypto::set_test_clock(Some(clock.clone()));
-            AUTHENTICATOR.with(|a| *a.borrow_mut() = Some(auth));
             unsafe {
                 let name = wide(class);
                 let instance = GetModuleHandleW(null());
@@ -11047,6 +11220,7 @@ mod tests {
                     null_mut(),
                 );
                 assert_ne!(h, 0);
+                AUTHENTICATOR.with(|a| *a.borrow_mut() = Some(Arc::new(Owned { auth, window: h })));
                 assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
                 WINDOW_GONE.with(|p| p.set(false));
                 PENDING_EVENTS.with(|p| p.set(0));
@@ -11084,6 +11258,14 @@ mod tests {
             AUTHENTICATOR.with(|a| a.borrow_mut().take());
             QUIT_SEEN.with(|q| q.set(false));
             crypto::set_test_clock(None);
+            // No ceremony of any test named another window than the app's.
+            if !std::thread::panicking() {
+                assert_eq!(
+                    WRONG_OWNER.load(Ordering::SeqCst),
+                    0,
+                    "a request without the app's window"
+                );
+            }
         }
         /// A fake key with a credential of vault `id`, and the unlock's
         /// request for it, owned by `owner`.
@@ -11895,7 +12077,7 @@ mod tests {
                 });
                 press(h, keys_ui::SK_TOGGLE);
                 with_app(|a| {
-                    assert!(a.toggles.create && a.toggles.create_pin);
+                    assert!(a.toggles.create);
                     assert_eq!(*a.status, keys_ui::CREATE_NOTE);
                 });
                 set(h, PASS, pass);
@@ -12908,7 +13090,7 @@ mod tests {
                     _: &MakeRequest,
                     _: &CancelToken,
                 ) -> Result<RawCredential, FidoError> {
-                    Err(FidoError::Other(0x8009_0027_u32 as i32))
+                    Err(FidoError::Other(0x8000_4005_u32 as i32))
                 }
                 fn get_assertion(
                     &self,
@@ -12950,7 +13132,6 @@ mod tests {
                     a.build();
                 });
                 press(h, keys_ui::SK_TOGGLE);
-                press(h, keys_ui::SK_PIN);
                 set(h, PASS, pass);
                 set(h, CONFIRM, pass);
                 (vault, key)
@@ -12961,7 +13142,7 @@ mod tests {
             assert!(!vault.exists() && !key.exists());
             let expected = format!(
                 "{}\r\n{}",
-                fill(fido::OTHER, &[&"80090027"]),
+                fill(fido::OTHER, &[&"80004005"]),
                 fido::KEYSTORE_FULL
             );
             assert_eq!(status(), expected);
@@ -12970,7 +13151,11 @@ mod tests {
             // MakeCredential runs: nothing is written and nothing more is
             // asked (a No to every question would otherwise write key 1).
             let auth = Scripted::new(fake.clone());
-            AUTHENTICATOR.with(|a| *a.borrow_mut() = Some(auth.clone()));
+            let owned = Owned {
+                auth: auth.clone(),
+                window: h,
+            };
+            AUTHENTICATOR.with(|a| *a.borrow_mut() = Some(Arc::new(owned)));
             let (vault, key) = create("quit");
             auth.plan(&[Some(k1); 3]);
             let ui = unsafe { GetCurrentThreadId() };
@@ -13780,7 +13965,6 @@ mod tests {
                 a.build();
                 a.command(CHANGE, 0).unwrap();
                 a.toggles.keyon_pw = false;
-                a.toggles.keyon_pin = false;
             });
             set(h, CURRENT_PASS, pass);
             set(h, OTP, &code(now / 30));
@@ -14306,6 +14490,557 @@ mod tests {
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// `vault`'s key view as goyo-sync's KG writes it (spec §7.10):
+        /// line 0 and the server's top record `seq`, a key record of
+        /// `key` (none when empty).
+        fn key_view(vault: &Path, seq: u64, key: &[u8]) {
+            let dir = syncfile::sync_dir(vault).unwrap();
+            let mut view = syncfile::KeyView {
+                seq,
+                ..Default::default()
+            };
+            if !key.is_empty() {
+                let h = vault::keyfile::parse(key).unwrap();
+                view.record =
+                    syncfile::render_record_header(syncfile::RecordKind::Key, false, 0, h.epoch)
+                        .to_vec();
+                view.record.extend_from_slice(key);
+            }
+            syncfile::replace_file(
+                &dir.join(syncfile::KEY_VIEW),
+                &syncfile::render_key_view(&view),
+            )
+            .unwrap();
+        }
+        /// A password change of A's session `s`, touched with `device`.
+        fn change_password(fake: &Fake, device: usize, s: &mut Session, old: &str, new: &str) {
+            let t = touched(fake, device, s, 1);
+            let r = s.reauth(old, None, Some(&t)).unwrap();
+            let change = vault::Change::Password(Zeroizing::new(new.to_owned()));
+            assert_eq!(
+                s.rekey(r, Vec::new(), change, vault::Consent::default(), true),
+                Ok(vault::Rekeyed::Done)
+            );
+        }
+
+        /// The server's key file at login (spec §5.2 step 9(b) and its
+        /// second entry point, §7.15 at login; §14.10 walkthrough 2): A and
+        /// B use key-file sync. A changes the password; B's login with the
+        /// old one takes A's file in the same flow (S-NEWPASS-OTHER, the
+        /// preview, S-BACKUP) with the unlock's one touch. A changes it
+        /// again; B's login with the newest password fails on B's own key
+        /// file, S-TRY-SERVER-KEY's yes takes A's file with the same touch,
+        /// and the session opens.
+        #[test]
+        fn the_server_key_file_is_taken_at_login() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b) = (test_dir("login-take-a"), test_dir("login-take-b"));
+            let (pass, newer, newest) = (
+                "synthetic login take password",
+                "synthetic login take newer",
+                "synthetic login take newest",
+            );
+            let clock = Arc::new(AtomicU64::new(1_000_000));
+            let fake = Arc::new(Fake::new(Some(clock.clone())));
+            let devices: Vec<usize> = (0..2).map(|_| fake.plug(Device::with_pin())).collect();
+            let provision = Provision::new().unwrap();
+            let id = provision.vault_id();
+            let keys: Vec<_> = devices
+                .iter()
+                .zip(1u8..)
+                .map(|(d, n)| {
+                    fake.touch(Some(*d));
+                    register(&*fake, &id, n, 0, true, Vec::new()).unwrap()
+                })
+                .collect();
+            let (anchor_a, anchor_b) = (dir_a.join("anchor"), dir_b.join("anchor"));
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
+            let mut a = provision
+                .finish_with_keys(&va, &ka, pass, None, true, keys)
+                .unwrap();
+            let server = Server::default();
+            server.helper(&va);
+            a.enable_sync().unwrap();
+            key_view(&va, 0, &[]);
+            a.poll_sync();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::KeySyncOn,
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            let code = a.key_code().unwrap();
+            // PC B: A's files, its own helper's view of A's "on".
+            let (vb, kb) = (dir_b.join("vault.goyo"), dir_b.join("vault.goyokey"));
+            std::fs::copy(&va, &vb).unwrap();
+            std::fs::copy(&ka, &kb).unwrap();
+            server.helper(&vb);
+            key_view(&vb, 1, &std::fs::read(&ka).unwrap());
+            let auth = Scripted::new(fake.clone());
+            let h = window("GoyoCeremonyLoginTake", &vb, &kb, auth.clone(), &clock);
+            let guard = Window(h);
+            let login = |device: usize, password: &str| {
+                vault::set_anchor_dir(Some(anchor_b.clone()));
+                with_app(|a| {
+                    if a.screen != Screen::Login {
+                        a.show(Screen::Login);
+                    }
+                    a.build();
+                });
+                auth.plan(&[Some(device)]);
+                set(h, PASS, password);
+                press(h, SUBMIT);
+            };
+            login(devices[1], pass);
+            set(h, keys_ui::GATE_CODE, &code);
+            press(h, keys_ui::TOFU_OK);
+            with_app(|a| {
+                assert_eq!(*a.status, keys_ui::TOFU_PASSED);
+                a.lock("synthetic lock", true);
+            });
+
+            // A's password change reaches B's view; B logs in with the old
+            // password and takes it in the same flow.
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            change_password(&fake, devices[0], &mut a, pass, newer);
+            key_view(&vb, 2, &std::fs::read(&ka).unwrap());
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |_| false);
+            let shown = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = shown.clone();
+            let typed = newer.to_owned();
+            every_input(move |n, text, kind| {
+                record.borrow_mut().push(text.to_owned());
+                match (n, kind) {
+                    (0, InputKind::Password) => {
+                        InputAnswer::Password(Zeroizing::new(typed.clone()))
+                    }
+                    (1, InputKind::Preview { .. }) => InputAnswer::Accept { checked: false },
+                    _ => panic!("unexpected input {n}: {text}"),
+                }
+            });
+            let seen = fake.seen().len();
+            login(devices[1], pass);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            assert_eq!(*asked.borrow(), [BACKUP_QUESTION], "{}", status());
+            asked.borrow_mut().clear();
+            assert_eq!(shown.borrow()[0], NEWPASS_OTHER);
+            assert!(
+                status().contains(keys_ui::ACCEPTED_AT_LOGIN.split('{').next().unwrap()),
+                "{}",
+                status()
+            );
+            assert_eq!(std::fs::read(&kb).unwrap(), {
+                let bytes = std::fs::read(&ka).unwrap();
+                // The successor re-seal keeps [0, W): the same state.
+                assert_eq!(
+                    vault::keyfile::parse(&bytes).unwrap().state(),
+                    vault::keyfile::parse(&std::fs::read(&kb).unwrap())
+                        .unwrap()
+                        .state()
+                );
+                std::fs::read(&kb).unwrap()
+            });
+            with_app(|a| a.lock("synthetic lock", true));
+
+            // The newest password at B: S-TRY-SERVER-KEY with the same touch.
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            change_password(&fake, devices[0], &mut a, newer, newest);
+            key_view(&vb, 3, &std::fs::read(&ka).unwrap());
+            every_answer(&asked, |text| text == keys_ui::TRY_SERVER_KEY);
+            let seen = fake.seen().len();
+            login(devices[1], newest);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            assert_eq!(
+                *asked.borrow(),
+                [keys_ui::TRY_SERVER_KEY, BACKUP_QUESTION],
+                "{}",
+                status()
+            );
+            with_app(|a| {
+                let s = a.session.as_ref().expect("opened from the server's file");
+                assert_eq!(
+                    s.key_state(),
+                    vault::keyfile::parse(&std::fs::read(&ka).unwrap())
+                        .unwrap()
+                        .state()
+                );
+                assert!(a.screen == Screen::Vault && a.failed == 0);
+                assert!(
+                    a.status
+                        .contains(keys_ui::ACCEPTED_AT_LOGIN.split('{').next().unwrap()),
+                    "{}",
+                    *a.status
+                );
+            });
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// A and B on key-file sync, A's vault made with `n` keys and its
+        /// "on" landed; B confirmed A's file in the TOFU banner of the window
+        /// `h` and locked. Returns what the tests below drive.
+        #[allow(clippy::type_complexity)]
+        fn two_on_window(
+            name: &str,
+            n: u8,
+            keysync: bool,
+        ) -> (
+            PathBuf,
+            PathBuf,
+            Arc<Fake>,
+            Vec<usize>,
+            Session,
+            (PathBuf, PathBuf),
+            (PathBuf, PathBuf),
+            Arc<Scripted>,
+            Window,
+            Arc<AtomicU64>,
+        ) {
+            let (dir_a, dir_b) = (
+                test_dir(&format!("{name}-a")),
+                test_dir(&format!("{name}-b")),
+            );
+            let clock = Arc::new(AtomicU64::new(1_000_000));
+            let fake = Arc::new(Fake::new(Some(clock.clone())));
+            let devices: Vec<usize> = (0..n).map(|_| fake.plug(Device::with_pin())).collect();
+            let provision = Provision::new().unwrap();
+            let id = provision.vault_id();
+            let keys: Vec<_> = devices
+                .iter()
+                .zip(1u8..)
+                .map(|(d, n)| {
+                    fake.touch(Some(*d));
+                    register(&*fake, &id, n, 0, true, Vec::new()).unwrap()
+                })
+                .collect();
+            let anchor_a = dir_a.join("anchor");
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
+            let mut a = provision
+                .finish_with_keys(&va, &ka, PASS2, None, true, keys)
+                .unwrap();
+            let server = Server::default();
+            server.helper(&va);
+            a.enable_sync().unwrap();
+            key_view(&va, 0, &[]);
+            a.poll_sync();
+            if keysync {
+                let t = touched(&fake, devices[0], &a, 1);
+                let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+                assert_eq!(
+                    a.rekey(
+                        r,
+                        Vec::new(),
+                        vault::Change::KeySyncOn,
+                        vault::Consent::default(),
+                        true
+                    ),
+                    Ok(vault::Rekeyed::Done)
+                );
+            }
+            let code = a.key_code().unwrap();
+            let (vb, kb) = (dir_b.join("vault.goyo"), dir_b.join("vault.goyokey"));
+            std::fs::copy(&va, &vb).unwrap();
+            std::fs::copy(&ka, &kb).unwrap();
+            server.helper(&vb);
+            let top = if keysync {
+                std::fs::read(&ka).unwrap()
+            } else {
+                Vec::new()
+            };
+            key_view(&vb, u64::from(keysync), &top);
+            let auth = Scripted::new(fake.clone());
+            let h = window(
+                &format!("GoyoCeremony-{name}"),
+                &vb,
+                &kb,
+                auth.clone(),
+                &clock,
+            );
+            let guard = Window(h);
+            vault::set_anchor_dir(Some(dir_b.join("anchor")));
+            auth.plan(&[Some(devices[1])]);
+            set(h, PASS, PASS2);
+            press(h, SUBMIT);
+            set(h, keys_ui::GATE_CODE, &code);
+            press(h, keys_ui::TOFU_OK);
+            with_app(|a| {
+                assert_eq!(*a.status, keys_ui::TOFU_PASSED);
+                a.lock("synthetic lock", true);
+            });
+            (
+                dir_a,
+                dir_b,
+                fake,
+                devices,
+                a,
+                (va, ka),
+                (vb, kb),
+                auth,
+                guard,
+                clock,
+            )
+        }
+        const PASS2: &str = "synthetic part two password";
+        /// A login of the window `h` on B's files with `device`.
+        fn login_b(h: Hwnd, dir_b: &Path, auth: &Scripted, device: usize) {
+            vault::set_anchor_dir(Some(dir_b.join("anchor")));
+            with_app(|a| {
+                if a.screen != Screen::Login {
+                    a.show(Screen::Login);
+                }
+                a.build();
+            });
+            auth.plan(&[Some(device)]);
+            set(h, PASS, PASS2);
+            press(h, SUBMIT);
+        }
+        /// The kind-9 merge at login (spec §5.8, §14.10 walkthrough 18): A
+        /// and B remove the same lost key apart, A's lands first; B's next
+        /// login merges with the unlock's one touch and password, asking
+        /// nothing before the open and showing no preview; the status is
+        /// S-MERGED with the new code.
+        #[test]
+        fn two_removals_merge_at_the_next_login() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b, fake, devices, mut a, (_va, ka), (vb, kb), auth, guard, _clock) =
+                two_on_window("merge-login", 3, true);
+            let h = guard.0;
+            let lost = || vault::Change::Remove {
+                remove: vec![3],
+                new_password: None,
+                loss: Some(vault::LossReport {
+                    date: None,
+                    exposure: vault::Exposure::No,
+                    shared_pin: Vec::new(),
+                }),
+                over: None,
+            };
+            // A removes key 3 and lands first.
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(r, Vec::new(), lost(), vault::Consent::default(), false),
+                Ok(vault::Rekeyed::Done)
+            );
+            // B removes it too, from the same state (its own unlock).
+            vault::set_anchor_dir(Some(dir_b.join("anchor")));
+            let prepared = vault::prepare(&vb, &kb).unwrap();
+            let req = prepared.unlock_request(0).unwrap();
+            fake.touch(Some(devices[1]));
+            let raw = fake
+                .get_assertion(&req, &fake.new_cancel().unwrap())
+                .unwrap();
+            let t = check_assertion(raw, &req, false).unwrap();
+            let (mut b, _) = Session::login_proved(prepared, PASS2, "", 0, None, &t)
+                .ok()
+                .unwrap();
+            let t = touched(&fake, devices[1], &b, 2);
+            let r = b.reauth(PASS2, None, Some(&t)).unwrap();
+            assert_eq!(
+                b.rekey(r, Vec::new(), lost(), vault::Consent::default(), false),
+                Ok(vault::Rekeyed::Done)
+            );
+            drop(b);
+            // B's helper: its PUT met A's record.
+            key_view(&vb, 2, &std::fs::read(&ka).unwrap());
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |_| false);
+            every_input(|n, text, _| panic!("asked {n}: {text}"));
+            let seen = fake.seen().len();
+            login_b(h, &dir_b, &auth, devices[1]);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            assert_eq!(*asked.borrow(), [BACKUP_QUESTION], "{}", status());
+            let merged = vault::keyfile::parse(&std::fs::read(&kb).unwrap()).unwrap();
+            assert_eq!(merged.kind, vault::keyfile::Kind::Union);
+            let code = fill(keys_ui::MERGED, &[&""]);
+            assert!(status().starts_with(code.trim_end()), "{}", status());
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// The supersede on the Keys screen (spec §7.15a, §9.2; §14.10
+        /// walkthrough 1, "PC gone"): A turns key-file sync on and is gone
+        /// before B typed its code. At B's login the gate is put off; on
+        /// the Keys screen [다른 PC가 없어 이 PC 상태로 올리기…] asks
+        /// S-KEYSYNC-ON, then S-GATE-SUPERSEDE with S-GATE-SUPERSEDE-ON,
+        /// takes one touch and writes B's own key file again, GOYOKS01,
+        /// above A's.
+        #[test]
+        fn a_gated_change_whose_pc_is_gone_is_superseded_from_the_keys_screen() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b, fake, devices, mut a, (va, ka), (vb, kb), auth, guard, _clock) =
+                two_on_window("supersede", 2, false);
+            let h = guard.0;
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            key_view(&va, 0, &[]);
+            a.poll_sync();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::KeySyncOn,
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            let on = vault::keyfile::parse(&std::fs::read(&ka).unwrap()).unwrap();
+            drop(a);
+            key_view(&vb, 1, &std::fs::read(&ka).unwrap());
+            // The login's gate is put off.
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |text| text != BACKUP_QUESTION);
+            every_input(|_, _, _| InputAnswer::Cancel(0));
+            login_b(h, &dir_b, &auth, devices[1]);
+            with_app(|a| {
+                a.show(Screen::Keys);
+                a.build();
+                assert_ne!(a.handle(keys_ui::GATE_SUPERSEDE), 0, "offered");
+            });
+            set(h, CURRENT_PASS, PASS2);
+            auth.plan(&[Some(devices[1])]);
+            let seen = fake.seen().len();
+            press(h, keys_ui::GATE_SUPERSEDE);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            let shown = asked.borrow().clone();
+            assert_eq!(shown.len(), 3, "{shown:?}");
+            assert_eq!(shown[0], keys_ui::KEYSYNC_ON_TEXT);
+            assert!(
+                shown[1].starts_with(keys_ui::SUPERSEDE_ASK)
+                    && shown[1].ends_with(keys_ui::SUPERSEDE_ON)
+            );
+            assert_eq!(shown[2], BACKUP_QUESTION);
+            assert!(status().starts_with(keys_ui::SUPERSEDED), "{}", status());
+            let up = vault::keyfile::parse(&std::fs::read(&kb).unwrap()).unwrap();
+            assert_eq!(up.magic, vault::keyfile::Magic::Ks01);
+            assert_eq!(up.epoch, on.epoch + 1);
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// A new PC from the server (spec §7.17, §9.1; §14.10 walkthrough
+        /// 4): the vault file fetched with "열쇠 파일도 받기" offers the
+        /// key source "서버에서 받은 열쇠 파일 (확인 전)" on Restore; the
+        /// restore writes nothing outside the sync folder and shows the
+        /// TOFU banner with S-TOFU-FETCHED; A's code, then the save dialog,
+        /// writes the key file and the restored vault file.
+        #[test]
+        fn a_new_pc_restores_from_the_server_key_file() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_c) = (test_dir("fetched-a"), test_dir("fetched-c"));
+            let pass = "synthetic fetched key password";
+            let clock = Arc::new(AtomicU64::new(1_000_000));
+            let fake = Arc::new(Fake::new(Some(clock.clone())));
+            let devices: Vec<usize> = (0..2).map(|_| fake.plug(Device::with_pin())).collect();
+            let provision = Provision::new().unwrap();
+            let id = provision.vault_id();
+            let keys: Vec<_> = devices
+                .iter()
+                .zip(1u8..)
+                .map(|(d, n)| {
+                    fake.touch(Some(*d));
+                    register(&*fake, &id, n, 0, true, Vec::new()).unwrap()
+                })
+                .collect();
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
+            let mut a = provision
+                .finish_with_keys(&va, &ka, pass, None, true, keys)
+                .unwrap();
+            let server = Server::default();
+            server.helper(&va);
+            a.enable_sync().unwrap();
+            key_view(&va, 0, &[]);
+            a.poll_sync();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::KeySyncOn,
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            let code = a.key_code().unwrap();
+            drop(a);
+            // PC C: the fetched vault file and the server's key file in its
+            // view; its own anchor, empty.
+            let anchor_c = dir_c.join("anchor");
+            vault::set_anchor_dir(Some(anchor_c.clone()));
+            let fetched = dir_c.join("from-server.goyo");
+            std::fs::copy(&va, &fetched).unwrap();
+            server.helper(&fetched);
+            key_view(&fetched, 1, &std::fs::read(&ka).unwrap());
+            let (dest, key) = (dir_c.join("vault.goyo"), dir_c.join("vault.goyokey"));
+            let auth = Scripted::new(fake.clone());
+            let h = window("GoyoCeremonyFetched", &fetched, &key, auth.clone(), &clock);
+            let guard = Window(h);
+            with_app(|a| {
+                a.backup_path = fetched.clone();
+                a.dest_path = dest.clone();
+                a.show(Screen::Restore);
+                a.build();
+                assert!(a.handle(keys_ui::FETCHED_KEY) != 0);
+            });
+            press(h, keys_ui::FETCHED_KEY);
+            with_app(|a| {
+                assert_eq!(
+                    a.key_path,
+                    syncfile::sync_dir(&fetched)
+                        .unwrap()
+                        .join(syncfile::KEY_VIEW)
+                );
+                assert_eq!(*a.status, keys_ui::FETCHED_KEY_SET);
+            });
+            auth.plan(&[Some(devices[1])]);
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            with_app(|a| {
+                let s = a.session.as_ref().expect("restored");
+                assert!(s.tofu() && s.fetched_unsaved(), "{}", *a.status);
+                assert!(a.screen == Screen::Vault && a.tofu_banner());
+            });
+            assert!(!dest.exists() && !key.exists() && !anchor_c.join("goyo-vault.keys").exists());
+            // The code, then the save dialog.
+            set(h, keys_ui::GATE_CODE, &code);
+            keys_ui::SAVE_KEY.with(|p| *p.borrow_mut() = Some(key.clone()));
+            press(h, keys_ui::TOFU_OK);
+            with_app(|a| {
+                let s = a.session.as_ref().unwrap();
+                assert!(!s.tofu() && !s.fetched_unsaved(), "{}", *a.status);
+                assert_eq!(*a.status, keys_ui::FETCHED_SAVED);
+                assert!(!a.tofu_banner());
+                assert_eq!(a.key_path, key);
+            });
+            assert_eq!(std::fs::read(&key).unwrap(), std::fs::read(&ka).unwrap());
+            assert!(dest.exists());
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_c);
         }
     }
 }

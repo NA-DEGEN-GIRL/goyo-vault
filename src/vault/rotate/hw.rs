@@ -33,6 +33,8 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
+/// The anchor keeps the last this many `sup` entries (spec §5.10).
+const SUP_MAX: usize = 16;
 /// S-UNREACHABLE, filled with the keys no touched key reaches.
 pub const UNREACHABLE: &str = "보안 키 {list}은(는) 지금 터치한 키와 짝을 맺지 않아 새 열쇠 파일을 받을 수 없습니다. 그 키도 연결해 함께 터치하거나, 모든 키와 짝을 맺은 키로 하세요.";
 /// S-OLDSLOT: a pairing or re-seed touch that does not prove its key.
@@ -70,7 +72,9 @@ pub(super) struct Authorizer {
 impl Reauth {
     /// The transport the Reauth's touch stated (USB or NFC), or None.
     pub fn transport(&self) -> Option<u32> {
-        self.keys.as_ref().and_then(|k| k.transport)
+        self.keys
+            .as_ref()
+            .map_or(self.bare_transport, |k| k.transport)
     }
     /// The keys a write authorized by this Reauth's key reaches through
     /// its own pair records, itself included, as numbers (spec §5.3,
@@ -354,6 +358,13 @@ pub(in crate::vault) struct Landing {
     /// The server file this write merges in, takes or clears the gate of
     /// (`merged`, spec §5.5 S0).
     pub(super) merged: Option<(u64, [u8; 16])>,
+    /// `clears=s`: a supersede marks its candidate's gate line superseded
+    /// (spec §7.15a).
+    pub(super) supersede: bool,
+    /// `sup`: the candidate's data-key IDs this PC lacks, each with the
+    /// candidate's state, so a vault head under that state is pushed over
+    /// at every unlock (spec §5.10, §7.1).
+    pub(super) sup: Vec<anchor::Sup>,
 }
 impl Landing {
     /// The entry `p` of the state `kh` written over this PC's key file
@@ -370,15 +381,26 @@ impl Landing {
     ) {
         p.state.flags.t = true;
         p.opt = self.opt;
-        p.state.flags.p =
-            p.state.magic == *Magic::Ks01.bytes() && matches!(p.kind, 2 | 3 | 4 | 5 | 6 | 8);
+        // The rollout reminder is for a change this PC made, not for one it
+        // took or merged (spec §7.18).
+        p.state.flags.p = p.state.magic == *Magic::Ks01.bytes()
+            && matches!(p.kind, 2 | 3 | 4 | 5 | 6 | 8)
+            && p.src != anchor::Src::Adopt;
         if let Some(ks) = self.ks {
             p.state.ks = ks;
         }
         p.clears.g |= self.clear_gate;
+        p.clears.s |= self.supersede;
         if self.merged.is_some() {
             p.merged = self.merged;
         }
+        // The last 16 `sup` entries, the newest last, one per key ID.
+        for e in &self.sup {
+            p.state.sup.retain(|x| x.keyid != e.keyid);
+            p.state.sup.push(*e);
+        }
+        let extra = p.state.sup.len().saturating_sub(SUP_MAX);
+        p.state.sup.drain(..extra);
         for t in &mut p.state.tombs {
             if self.removed.iter().any(|(_, c)| *c == t.credhash) {
                 t.origin = anchor::Origin::Own;
@@ -1226,14 +1248,20 @@ impl Session {
         // W2: for a GOYOKS01 result also above the server's file this PC
         // holds or the cut's floor, each within its bound (spec §5.5).
         let ks01 = match &change {
-            Change::KeySyncOn => true,
+            Change::KeySyncOn | Change::Supersede { .. } => true,
             Change::KeySyncOff | Change::KeysOff | Change::KeysOn { .. } => false,
             _ => own.as_ref().is_some_and(|h| h.magic == Magic::Ks01),
         };
         let server = if ks01 { self.server_epoch() } else { 0 };
+        // A supersede lands above its candidate (it passed rule A).
+        let above = match &change {
+            Change::Supersede { epoch, .. } => *epoch,
+            _ => 0,
+        };
         let epoch = self
             .max_epoch
             .max(server)
+            .max(above)
             .checked_add(1)
             .filter(|e| *e <= EPOCH_MAX)
             .ok_or(EPOCH_LIMIT)?;
@@ -1450,6 +1478,31 @@ impl Session {
                         }
                         t.landing.ks = Some(self.on_ks()?);
                         (t.kind, t.sync, t.pin) = (Kind::SyncOn, true, true);
+                    }
+                    // The supersede (spec §7.15a): this PC's keyset and data
+                    // key again above the candidate, with its tombstones
+                    // too; on a GOYOKH01 session key-file sync turns on
+                    // here, under the transport precondition.
+                    Change::Supersede { epoch: e, tag } => {
+                        if !extra.is_empty() {
+                            return Err(NOT_PLANNED);
+                        }
+                        let named = keyfile::KeyState { epoch: e, tag };
+                        let (theirs, sup) = self.supersede_check(named)?;
+                        if h.magic != Magic::Ks01 {
+                            if a.transport.is_none() {
+                                return Err(super::super::keysync::KEYSYNC_NOTRANSPORT);
+                            }
+                            t.landing.ks = Some(self.on_ks()?);
+                        }
+                        t.tombstones = super::adopt::joined_tombs(&h.tombstones, &theirs);
+                        if t.tombstones.len() > TOMB_MAX {
+                            return Err(TOMBSTONES_FULL);
+                        }
+                        (t.landing.merged, t.landing.supersede) = (Some((e, tag)), true);
+                        t.landing.sup = sup;
+                        (t.kind, t.sync, t.pin) = (Kind::SyncOn, true, true);
+                        t.src = anchor::Src::Supersede;
                     }
                     // Key-file sync off (spec §7.16): GOYOKH01 under a new
                     // data key; `kreq` and `kview` deleted first, the S0
@@ -3393,8 +3446,10 @@ mod tests {
         keys.fake.device(keys.device(2), |d| d.fault = Fault::None);
         let t = keys.touch(2, &plan.request(0).unwrap()).unwrap();
         plan.take(&s, &r, &t).unwrap();
+        // The key got its PIN at registration: every touch verifies it, so
+        // its with-UV output is the one that changes.
         keys.fake.device(keys.device(1), |d| {
-            d.credentials[0].random_nouv[0] ^= 1;
+            d.credentials[0].random_uv[0] ^= 1;
         });
         let t = keys.touch(1, &plan.second_request(1, 0).unwrap()).unwrap();
         assert_eq!(plan.confirm(&t), Err(fido::NONDETERMINISTIC));
@@ -3746,10 +3801,11 @@ mod tests {
             let e = refused(&pc, &mut s, c, &keys, (by, extra), change);
             assert_eq!(e, Some(error), "key {by}, extra {extra:?}");
         }
-        // A key that answers with another output under its credential.
+        // A key that answers with another output under its credential (its
+        // with-UV one: the key got its PIN at registration).
         let start = files(&pc);
         let r = reauth(&mut s, OLD, c, &keys, 1).unwrap();
-        let flip = |d: &mut Device| d.credentials[0].random_nouv[0] ^= 1;
+        let flip = |d: &mut Device| d.credentials[0].random_uv[0] ^= 1;
         keys.fake.device(keys.device(2), flip);
         let t = touches(&s, &keys, &[2]).remove(0);
         assert_eq!(s.check_touch(&r, &t), Err(OLDSLOT));

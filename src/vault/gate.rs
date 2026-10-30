@@ -538,6 +538,9 @@ impl Session {
         if self.gate_login.is_some() {
             return Err(GATE_HELD);
         }
+        if self.fetched && !self.tofu {
+            return Err(super::FETCHED_UNSAVED);
+        }
         if self.unconfirmed() {
             return Err(TOFU_HELD);
         }
@@ -546,7 +549,7 @@ impl Session {
     /// TOFU's refusals apply: a TOFU session, or a held one whose key file
     /// state this PC never confirmed.
     pub(super) fn unconfirmed(&self) -> bool {
-        self.tofu || self.held_unconfirmed
+        self.tofu || self.held_unconfirmed || self.fetched
     }
     /// Passes the gate of a changed key file at login (spec §5.2, S45-1 #5):
     /// the answer is judged against the session's own key file and the
@@ -635,7 +638,8 @@ impl Session {
     /// vault's other lines. A 0.8 key file has no code: only S-TOFU-NOPC
     /// confirms it, as the 0.8 state.
     pub fn tofu_confirm(&mut self, code: Option<&Code>) -> Result<()> {
-        if !self.tofu {
+        // A key file from the server's key view is saved first (tofu_save).
+        if !self.tofu || self.fetched {
             return Err(GATE_NOT_PENDING);
         }
         let h = self.key_file.header().cloned();
@@ -706,7 +710,7 @@ impl Session {
     /// Steps 8 and 9 of the unlock that waited for the gate (spec §5.2):
     /// the vault file saved under the current key when it was due, and the
     /// outgoing copy.
-    fn finish_deferred(&mut self) {
+    pub(super) fn finish_deferred(&mut self) {
         let deferred = std::mem::take(&mut self.deferred);
         if deferred.resave {
             match self.encode() {

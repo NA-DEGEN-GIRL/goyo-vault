@@ -1,6 +1,9 @@
 //! The fake authenticator of the tests (spec v3 §8.9): CTAP 2.1's
 //! hmac-secret and credProtect behind Windows' behaviour as probed (the
-//! raw-salt flag, the allow list, a cancel with nothing pending). Up to 8
+//! raw-salt flag, the allow list, a cancel with nothing pending) and as a
+//! real YubiKey 5C NFC showed it (spec §2.28): a resident registration on a
+//! key without a PIN makes the user set one, and once a key has a PIN
+//! Windows verifies it at every assertion, UV discouraged or not. Up to 8
 //! keys can be plugged in; the test picks which one answers each ceremony.
 //! Builds with debug assertions only, so a release exe never holds it, and
 //! package_release.py refuses its marker. It draws no randomness of the
@@ -72,9 +75,6 @@ pub struct Device {
     pub pin_tries: u8,
     /// alwaysUv: every assertion verifies the user.
     pub always_uv: bool,
-    /// With UV discouraged and a PIN set, Windows asks for the PIN anyway
-    /// (one of the two probed behaviours).
-    pub uv_when_discouraged: bool,
     /// The highest credProtect level it supports; 0: none.
     pub cred_protect: u8,
     pub hmac_secret: bool,
@@ -95,7 +95,6 @@ impl Default for Device {
             pin_right: true,
             pin_tries: PIN_TRIES,
             always_uv: false,
-            uv_when_discouraged: false,
             cred_protect: 3,
             hmac_secret: true,
             transport: USB,
@@ -108,7 +107,8 @@ impl Default for Device {
     }
 }
 impl Device {
-    /// A key with a PIN, as PIN mode needs.
+    /// A key with a PIN already set (a key without one gets it at its
+    /// first registration).
     pub fn with_pin() -> Self {
         Self {
             pin: true,
@@ -210,7 +210,7 @@ impl Fake {
     /// Puts a resident credential with exactly these values on key `i`
     /// (S23-1 #25), so the pinned fixtures open with the outputs their
     /// script derived. `uv_registered`: its slot saw UV, so the key has a
-    /// PIN that Windows asks for even with UV discouraged.
+    /// PIN, which Windows asks for at every assertion.
     pub fn import_credential(
         &self,
         i: usize,
@@ -224,7 +224,6 @@ impl Fake {
         self.device(i, |d| {
             if uv_registered {
                 d.pin = true;
-                d.uv_when_discouraged = true;
             }
             d.credentials.push(Credential {
                 cred_id: cred_id.to_vec(),
@@ -313,11 +312,10 @@ impl Fake {
     }
     /// Whether the user verifies with the PIN in this ceremony; Err when
     /// Windows' PIN dialog ends in a cancel (no PIN, a wrong one, blocked).
+    /// Windows asks for a key's PIN whenever it has one, UV discouraged or
+    /// not (real key, spec §2.28).
     fn verify(d: &mut Device, uv: Uv) -> Result<bool, FidoError> {
-        let asks = match uv {
-            Uv::Required => true,
-            Uv::Discouraged => d.always_uv || (d.pin && d.uv_when_discouraged),
-        };
+        let asks = uv == Uv::Required || d.always_uv || d.pin;
         if !asks {
             return Ok(false);
         }
@@ -347,7 +345,18 @@ impl Fake {
             return Err(FidoError::NoCredProtect);
         }
         let level = level.min(u32::from(d.cred_protect)).max(1) as u8;
-        let uv = Self::verify(&mut s.devices[i], r.uv)?;
+        // Every registration is resident, and Windows makes the user set a
+        // PIN on a key without one first (real key, spec §2.28). That
+        // registration's own flags show UV only when it was required.
+        let uv = if s.devices[i].pin {
+            Self::verify(&mut s.devices[i], r.uv)?
+        } else {
+            let d = &mut s.devices[i];
+            d.pin = true;
+            d.pin_right = true;
+            d.pin_tries = PIN_TRIES;
+            r.uv == Uv::Required
+        };
         let len = s.devices[i].cred_id_len.clamp(16, 1023);
         let mut cred_id = Vec::with_capacity(len);
         while cred_id.len() < len {
@@ -573,9 +582,15 @@ mod tests {
         let id = [7; 16];
         let key = register(&fake, &id, 1, 0, true, vec![]).unwrap();
         let entry = vec![(key.cred_id.clone(), salt(&id, &key.seed), None)];
-        // Level 3 is invisible without UV.
+        // A key with a PIN verifies it even with UV discouraged, as
+        // Windows does with a real key.
         let no_uv = AssertRequest::new(0, entry.clone(), false).unwrap();
+        assert!(touch_with(&fake, &no_uv).unwrap().uv);
+        // Level 3 is invisible without UV (CTAP 2.1), which only a key
+        // with no PIN left gives.
+        fake.device(i, |d| d.pin = false);
         assert_eq!(touch_with(&fake, &no_uv).err(), Some(FidoError::Cancelled));
+        fake.device(i, |d| d.pin = true);
         // Wrong PINs block the key after 8.
         fake.device(i, |d| d.pin_right = false);
         let with_uv = AssertRequest::new(0, entry, true).unwrap();
@@ -649,8 +664,9 @@ mod tests {
         }
         // A plain registration step by step.
         let fake = Fake::new(None);
-        fake.touch(Some(fake.plug(Device::default())));
-        let (mut reg, make) = Registration::new(&id, 1, 0, false, vec![], 9).unwrap();
+        let fresh = fake.plug(Device::default());
+        fake.touch(Some(fresh));
+        let (mut reg, make) = Registration::new(&id, 1, 0, vec![], 9).unwrap();
         let raw = fake
             .make_credential(&make, &fake.new_cancel().unwrap())
             .unwrap();
@@ -665,8 +681,14 @@ mod tests {
             .get_assertion(&check, &fake.new_cancel().unwrap())
             .unwrap();
         let key = reg.checked(raw, &check).unwrap().unwrap();
-        assert!(!key.uv && !key.cp3);
-        assert!(fake.seen().iter().all(|s| s.owner == 9));
+        // The key had no PIN: the registration made the user set one, and
+        // every touch since verified it.
+        assert!(key.uv && key.cp3 && fake.device(fresh, |d| d.pin));
+        assert!(
+            fake.seen()
+                .iter()
+                .all(|s| s.owner == 9 && s.uv == Uv::Required)
+        );
     }
 
     #[test]
@@ -711,6 +733,42 @@ mod tests {
         assert_eq!(touch_with(&fake, &req).err(), Some(FidoError::Cancelled));
         fake.replug(i);
         fake.touch(None);
+        assert_eq!(touch_with(&fake, &req).err(), Some(FidoError::Cancelled));
+    }
+
+    /// As a real YubiKey 5C NFC behind Windows 11 (spec §2.28): a resident
+    /// registration on a key with no PIN sets one, its MakeCredential shows
+    /// UV only when UV was required, and from then on every assertion
+    /// verifies the PIN, UV discouraged or not. A no-PIN registration of a
+    /// pre-release key file therefore records UV after all.
+    #[test]
+    fn a_resident_registration_sets_the_pin_and_every_touch_verifies_it() {
+        let id = [6; 16];
+        for (required, made_uv) in [(true, true), (false, false)] {
+            let fake = Fake::new(None);
+            let i = fake.plug(Device::default());
+            fake.touch(Some(i));
+            let (_, make) = Registration::with_mode(&id, 1, 0, required, vec![], 3).unwrap();
+            let raw = fake
+                .make_credential(&make, &fake.new_cancel().unwrap())
+                .unwrap();
+            assert_eq!(raw.auth_data[32] & UV != 0, made_uv);
+            assert!(fake.device(i, |d| d.pin));
+        }
+        let fake = Fake::new(None);
+        let i = fake.plug(Device::default());
+        fake.touch(Some(i));
+        let key = register(&fake, &id, 1, 0, false, vec![]).unwrap();
+        assert!(key.uv && !key.cp3);
+        let req = AssertRequest::new(
+            3,
+            vec![(key.cred_id.clone(), salt(&id, &key.seed), None)],
+            false,
+        )
+        .unwrap();
+        assert!(touch_with(&fake, &req).unwrap().uv);
+        // A wrong PIN ends a discouraged touch too.
+        fake.device(i, |d| d.pin_right = false);
         assert_eq!(touch_with(&fake, &req).err(), Some(FidoError::Cancelled));
     }
 

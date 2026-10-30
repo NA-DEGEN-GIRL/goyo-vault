@@ -23,6 +23,8 @@ mod recover;
 #[cfg(feature = "security-key")]
 mod review;
 mod rotate;
+#[cfg(feature = "security-key")]
+mod serverkey;
 mod sync;
 #[cfg(debug_assertions)]
 pub use anchor::set_anchor_dir;
@@ -44,8 +46,9 @@ use keyfile::{
 pub use keyfile::{KeyInfo, key_info};
 #[cfg(feature = "security-key")]
 pub use keysync::{
-    Deletion, GATE_PENDING, KEYSYNC_ASKING, KEYSYNC_NOHELPER, KEYSYNC_NOTRANSPORT,
-    KEYSYNC_OFF_PENDING, KeyClass, KeySyncView, NO_CANDIDATE, NOT_A_SUCCESSOR, OffRequest, Waiting,
+    Deletion, FORGED_LINK, GATE_PENDING, KEYSYNC_ASKING, KEYSYNC_NOHELPER, KEYSYNC_NOTRANSPORT,
+    KEYSYNC_OFF_PENDING, KeyClass, KeySyncView, NO_CANDIDATE, NOT_A_SUCCESSOR, NOT_SUPERSEDABLE,
+    OffRequest, Rollout, SUPERSEDE_HEAD, Waiting,
 };
 pub use recover::Recovery;
 #[cfg(feature = "security-key")]
@@ -62,6 +65,13 @@ pub use rotate::{
     ANCHOR_FAILED, Exposure, ForkOption, KeyGates, KeyRow, KeysOverview, LossReport, NOT_PLANNED,
     OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow,
     UNION_FULL, UNREACHABLE,
+};
+#[cfg(feature = "security-key")]
+pub use serverkey::{
+    FETCHED_EXISTS, FETCHED_HELD, FETCHED_IN_SYNC, FETCHED_NONE, FETCHED_OLDER, FETCHED_UNSAVED,
+    Failed, KEYSYNC_CONSENT, OTP_STALE, RemovalMerge, SERVER_KEY_NOT_SUCCESSOR,
+    SERVER_KEY_OLD_KEYS, SERVER_KEY_UNCHAINED, ServerEntry, UnlockProof, fetched_key,
+    fetched_key_info, is_fetched_key, prepare_restore_fetched,
 };
 pub use sync::{HaltedHead, SyncBadge, SyncEvent, SyncNotice};
 
@@ -1012,6 +1022,15 @@ pub struct Prepared {
     key_temp: Option<PathBuf>,
     check: Precheck,
     seen: Seen,
+    /// The server's key file as `kview` showed it at precheck (spec §5.1
+    /// step 10): the snapshot the login classifies and takes, never read
+    /// again for that.
+    #[cfg(feature = "security-key")]
+    server: Option<serverkey::Snapshot>,
+    /// The key file is the server's, from the key view next to the vault
+    /// file (spec §7.17): read-only until G1 and the save step.
+    #[cfg(feature = "security-key")]
+    fetched: bool,
 }
 impl Prepared {
     pub fn check(&self) -> Precheck {
@@ -1025,6 +1044,9 @@ impl Prepared {
     /// The allow list of the unlock's ceremony (spec §5.2 step 4): every
     /// live key of the key file, suspended ones included, each with its
     /// salt. None for a key file without security keys.
+    /// A second salt for a key the server's waiting key file re-seeded, so
+    /// the unlock's one touch opens both (spec §5.1 step 10, §8.3); never a
+    /// key that only that file lists (S6-1 #1).
     #[cfg(feature = "security-key")]
     pub fn unlock_request(&self, owner: isize) -> Option<crate::fido::AssertRequest> {
         let h = self.key.header().filter(|h| !h.slots.is_empty())?;
@@ -1035,7 +1057,8 @@ impl Prepared {
                 (
                     s.cred_id.clone(),
                     crate::fido::salt(&h.vault_id, &s.seed),
-                    None,
+                    self.server_seed(&s.cred_id, &s.seed)
+                        .map(|seed| crate::fido::salt(&h.vault_id, &seed)),
                 )
             })
             .collect();
@@ -1213,6 +1236,11 @@ fn prepared(source: &Path, key_path: &Path, restore: bool, forget: bool) -> Resu
     };
     let key = KeyFile::from_bytes(&key_path, bytes)?;
     let (check, seen) = precheck(&source, &key, restore, forget)?;
+    // Step 10: the server's key file, for a login only (spec §5.1).
+    #[cfg(feature = "security-key")]
+    let server = (!restore)
+        .then(|| serverkey::snapshot(&source, &key, &seen))
+        .flatten();
     Ok(Prepared {
         source,
         key_path,
@@ -1220,7 +1248,27 @@ fn prepared(source: &Path, key_path: &Path, restore: bool, forget: bool) -> Resu
         key_temp,
         check,
         seen,
+        #[cfg(feature = "security-key")]
+        server,
+        #[cfg(feature = "security-key")]
+        fetched: false,
     })
+}
+/// The key file opened for a login or Restore: its keys, its state and the
+/// slot whose key opened it. The second entry point of spec §5.2 builds it
+/// from the server's key file instead (`serverkey`).
+#[cfg_attr(not(feature = "security-key"), allow(dead_code))]
+struct Given {
+    bundle: Box<Bundle>,
+    state: KeyState,
+    slot: Option<u8>,
+    /// The OTP code's time window was checked when the failed-unlock entry
+    /// started (`ServerEntry::start`): its questions do not run it out.
+    otp_in_time: bool,
+    /// The OTP step an earlier call of the same failed-unlock entry
+    /// verified and saved: the same code passes again while it is still
+    /// the last step used, and only for that entry.
+    otp_spent: Option<u64>,
 }
 fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
@@ -1405,6 +1453,11 @@ pub struct Session {
     /// date: the vault outgoing waits until it is done.
     #[cfg(feature = "security-key")]
     review_due: Option<String>,
+    /// A Restore whose key file is the server's from the key view, not yet
+    /// saved on this PC (spec §7.17): nothing is written outside the sync
+    /// folder, no edit, until the save step.
+    #[cfg(feature = "security-key")]
+    fetched: bool,
     /// The last key change of this session added a tombstone (a removal,
     /// or a union that removed a key here): S-PRUNE is asked (spec §7.19).
     #[cfg(feature = "security-key")]
@@ -1499,6 +1552,8 @@ impl Session {
             #[cfg(feature = "security-key")]
             review_due: None,
             #[cfg(feature = "security-key")]
+            fetched: false,
+            #[cfg(feature = "security-key")]
             tombs_added: false,
             #[cfg(feature = "security-key")]
             redo: None,
@@ -1545,7 +1600,7 @@ impl Session {
         confirmed_older: Option<[u8; 32]>,
     ) -> Result<Self> {
         let factors = (password, input, otp_time);
-        Self::load(prepared, factors, None, confirmed_older, None)
+        Self::load(prepared, factors, None, confirmed_older, None, None)
     }
     /// Phase 3 of a Restore into the new file `destination`.
     pub fn restore_from(
@@ -1556,7 +1611,7 @@ impl Session {
         otp_time: u64,
     ) -> Result<Self> {
         let factors = (password, input, otp_time);
-        Self::load(prepared, factors, None, None, Some(destination))
+        Self::load(prepared, factors, None, None, Some(destination), None)
     }
     /// Phase 3 of a login with a key file that needs a security key: the
     /// same with the touch of the unlock's ceremony (spec §5.2 step 3).
@@ -1570,7 +1625,7 @@ impl Session {
         touch: &Touch,
     ) -> Result<Self> {
         let factors = (password, input, otp_time);
-        Self::load(prepared, factors, Some(touch), confirmed_older, None)
+        Self::load(prepared, factors, Some(touch), confirmed_older, None, None)
     }
     /// Phase 3 of a Restore with such a key file.
     #[cfg(feature = "security-key")]
@@ -1583,26 +1638,40 @@ impl Session {
         touch: &Touch,
     ) -> Result<Self> {
         let factors = (password, input, otp_time);
-        Self::load(prepared, factors, Some(touch), None, Some(destination))
+        Self::load(
+            prepared,
+            factors,
+            Some(touch),
+            None,
+            Some(destination),
+            None,
+        )
     }
     /// `factors`: the password, the OTP code as typed and when it was typed.
+    /// `given`: the key file already opened (the login of `serverkey`).
     fn load(
         prepared: Prepared,
         factors: (&str, &str, u64),
         touch: Option<&Touch>,
         confirmed_older: Option<[u8; 32]>,
         destination: Option<&Path>,
+        given: Option<Given>,
     ) -> Result<Self> {
         let (password, input, otp_time) = factors;
         if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
+        let (otp_in_time, otp_spent) = given
+            .as_ref()
+            .map_or((false, None), |g| (g.otp_in_time, g.otp_spent));
         let Prepared {
             source,
             key_path,
             key,
             key_temp,
             seen,
+            #[cfg(feature = "security-key")]
+            fetched,
             ..
         } = prepared;
         let login = destination.is_none();
@@ -1621,7 +1690,19 @@ impl Session {
         if key.uses_otp() && !otp_format(input) {
             return Err(AUTH_ERROR);
         }
-        let opened = key.open(password, touch)?;
+        let opened = match given {
+            Some(given) => given,
+            None => {
+                let o = key.open(password, touch)?;
+                Given {
+                    bundle: o.bundle,
+                    state: o.state,
+                    slot: o.slot,
+                    otp_in_time: false,
+                    otp_spent: None,
+                }
+            }
+        };
         #[cfg(feature = "security-key")]
         let unlocked_with = opened
             .slot
@@ -1743,6 +1824,10 @@ impl Session {
             ids: kf2_ids,
             state: key_state,
             hold: class == AnchorClass::Rollback || gated.is_some(),
+            #[cfg(feature = "security-key")]
+            sup: confirmed
+                .as_ref()
+                .map_or(&[][..], |l| l.state.sup.as_slice()),
         };
         let pending = sync::Pending::find(login, &source, &key_path, format, own, contents.view());
         let Contents {
@@ -1756,12 +1841,25 @@ impl Session {
             // Checked as of when it was typed, at most OTP_TYPED_MAX ago.
             Some(secret) => {
                 let now = otp::now()?;
-                if now.saturating_sub(otp_time) > OTP_TYPED_MAX || otp_time > now.saturating_add(5)
+                if !otp_in_time
+                    && (now.saturating_sub(otp_time) > OTP_TYPED_MAX
+                        || otp_time > now.saturating_add(5))
                 {
                     return Err(AUTH_ERROR);
                 }
-                otp::verify(secret, input, otp_time, Some(pending.last(last)))
-                    .map_err(|_| AUTH_ERROR)?
+                let floor = pending.last(last);
+                match otp::verify(secret, input, otp_time, Some(floor)) {
+                    Ok(step) => step,
+                    // The same failed-unlock entry saved this very step in
+                    // an earlier call (a wrong gate code, S-KEYSYNC-ON).
+                    Err(_) if otp_spent == Some(floor) => {
+                        otp::verify(secret, input, otp_time, None)
+                            .ok()
+                            .filter(|step| *step == floor)
+                            .ok_or(AUTH_ERROR)?
+                    }
+                    Err(_) => return Err(AUTH_ERROR),
+                }
             }
             None => last,
         };
@@ -1802,10 +1900,20 @@ impl Session {
         let would_gate = matches!(class, AnchorClass::Gated(_));
         #[cfg(not(feature = "security-key"))]
         let would_gate = false;
+        // A Restore from the server's key file resumes its own `tofu`
+        // entry's save step with no second code (spec §7.17).
+        #[cfg(feature = "security-key")]
+        let resume =
+            fetched
+                && seen.lines.pending.as_ref().is_some_and(|p| {
+                    p.src == anchor::Src::Tofu && p.state.key_state() == key_state
+                });
+        #[cfg(not(feature = "security-key"))]
+        let resume = false;
         let restore_held = !login
             && (matches!(class, AnchorClass::Fork | AnchorClass::Rollback)
                 || would_gate
-                || seen.lines.pending.is_some());
+                || (seen.lines.pending.is_some() && !resume));
         s.local_rollback = class == AnchorClass::Rollback || restore_held;
         (s.restore_held, s.restored) = (restore_held, !login);
         // Trust on first use (spec §5.2 step 9(a), §7.17), judged by the
@@ -1826,9 +1934,10 @@ impl Session {
             let unconfirmed = (hardware || class == AnchorClass::Bootstrap)
                 && gated.is_none()
                 && confirmed.as_ref().is_none_or(|l| !l.state.flags.t);
-            s.tofu = unconfirmed && !s.local_rollback;
+            s.tofu = unconfirmed && !s.local_rollback && !resume;
             s.held_unconfirmed = unconfirmed && s.local_rollback;
-            !login && unconfirmed && confirmed.is_none()
+            s.fetched = fetched;
+            !login && ((unconfirmed && confirmed.is_none()) || fetched)
         };
         #[cfg(not(feature = "security-key"))]
         let bootstrap_restore = false;

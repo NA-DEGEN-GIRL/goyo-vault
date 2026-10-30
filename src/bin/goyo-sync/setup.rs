@@ -1002,6 +1002,85 @@ pub fn fetch(
         }
     }
 }
+/// What "열쇠 파일도 받기" did once the vault version was saved (spec
+/// §7.12 "Setup and GUI", §7.17; S6-3 #20): the server's key file written
+/// as the key view next to it, or why not. The vault file stays either way.
+#[cfg(feature = "security-key")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyGot {
+    Written,
+    /// BAD_REQUEST: this PC's line has no `--key-sync` for the vault.
+    NoKeys,
+    /// No key record on top (EMPTY, or a cut).
+    Empty,
+    /// An answer that is no key file of this vault.
+    BadAnswer,
+    /// The key view could not be written.
+    WriteFailed,
+    /// The exchange failed: the transport's detail.
+    Failed(String),
+}
+/// GETKEY with nothing held, after the fetch of `vault` (so the key file is
+/// at least as new as the vault file, the floor of spec §7.17). A key
+/// record of this vault, by the syntax gate the helper's KG uses, goes into
+/// `<vault>.sync\incoming.goyokeysync` (`line` 0, nothing answered), the
+/// sync folder made as a plain directory if needed; never a `.goyokey`,
+/// never outside the sync folder.
+#[cfg(feature = "security-key")]
+pub fn fetch_key(
+    runner: &mut dyn Runner,
+    log: &Log,
+    config: &Config,
+    id: [u8; 16],
+    vault: &Path,
+) -> KeyGot {
+    use goyo_vault::{
+        syncfile::{KEY_VIEW, KeyView, RecordKind, parse_record, render_key_view},
+        vault::keyfile::is_sync_key_file,
+    };
+    let mut wire = Wire::new(
+        runner,
+        ssh_options(config),
+        Duration::from_secs(config.timeout),
+    );
+    let reply = match call(&mut wire, &Request::get_key(id, 0, None), "getkey", log) {
+        Ok(reply) => reply,
+        Err(CallError::Cancelled) => return KeyGot::Failed(String::new()),
+        Err(CallError::Failed(_, detail)) => return KeyGot::Failed(detail),
+    };
+    match reply.status {
+        Status::Ok => {}
+        Status::Empty => return KeyGot::Empty,
+        Status::BadRequest => return KeyGot::NoKeys,
+        _ => return KeyGot::BadAnswer,
+    }
+    let blob = reply.blob();
+    let Some(record) = parse_record(blob, reply.version, &id) else {
+        return KeyGot::BadAnswer;
+    };
+    if record.kind != RecordKind::Key || record.damaged {
+        return KeyGot::Empty;
+    }
+    if is_sync_key_file(record.payload, &id).is_none() {
+        return KeyGot::BadAnswer;
+    }
+    let Some(dir) = syncfile::sync_dir(vault) else {
+        return KeyGot::WriteFailed;
+    };
+    if (!present(&dir) && fs::create_dir(&dir).is_err()) || !syncfile::usable_dir(&dir) {
+        return KeyGot::WriteFailed;
+    }
+    let view = KeyView {
+        line: 0,
+        seq: reply.version,
+        record: blob.to_vec(),
+        ..KeyView::default()
+    };
+    if syncfile::replace_file(&dir.join(KEY_VIEW), &render_key_view(&view)).is_err() {
+        return KeyGot::WriteFailed;
+    }
+    KeyGot::Written
+}
 /// Whether the folder of `path` lists something by its name (file, folder
 /// or link); read from the listing alone, like [`engine::listed`].
 pub fn present(path: &Path) -> bool {
@@ -2147,6 +2226,55 @@ pub(crate) mod tests {
         assert!(log_tail(&t.0.join("none"), 5).is_empty());
     }
 
+    /// "열쇠 파일도 받기" (spec §7.12, §7.17; S6-3 #20): a key record of
+    /// the vault becomes the key view in a sync folder made for it (`line`
+    /// 0, nothing answered), never a `.goyokey`; BAD_REQUEST is NoKeys,
+    /// EMPTY or a cut is Empty, another vault's or a broken file and a
+    /// failed exchange are Failed, and none of them leaves a view.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn the_key_file_is_fetched_into_the_key_view() {
+        use goyo_vault::syncfile::{KEY_VIEW, RecordKind, parse_key_view, render_record_header};
+        const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+        let id: [u8; 16] = KS[8..24].try_into().unwrap();
+        let epoch = u64::from_le_bytes(KS[24..32].try_into().unwrap());
+        let t = Temp::new("fetchkey");
+        let log = log(&t);
+        let c = config();
+        let vault = t.0.join("from-server.goyo");
+        let view = t.0.join("from-server.goyo.sync").join(KEY_VIEW);
+        let record = |kind, file: &[u8]| {
+            // A cut's generation is its own number (3 here).
+            let generation = if kind == RecordKind::Cut { 3 } else { 0 };
+            let mut r = render_record_header(kind, false, generation, epoch).to_vec();
+            r.extend_from_slice(file);
+            r
+        };
+        let run = |reply| fetch_key(&mut Script::with([reply]), &log, &c, id, &vault);
+        assert_eq!(run(reply(Status::BadRequest, 0, b"")), KeyGot::NoKeys);
+        assert_eq!(run(reply(Status::Empty, 0, b"")), KeyGot::Empty);
+        assert_eq!(
+            run(reply(Status::Ok, 3, &record(RecordKind::Cut, &[]))),
+            KeyGot::Empty
+        );
+        let mut broken = KS.to_vec();
+        broken[0] ^= 1;
+        assert!(matches!(
+            run(reply(Status::Ok, 3, &record(RecordKind::Key, &broken))),
+            KeyGot::Failed(_)
+        ));
+        assert!(matches!(
+            run(ssh_said("Connection refused")),
+            KeyGot::Failed(_)
+        ));
+        assert!(!view.exists());
+        let served = record(RecordKind::Key, KS);
+        assert_eq!(run(reply(Status::Ok, 3, &served)), KeyGot::Written);
+        let v = parse_key_view(&fs::read(&view).unwrap(), &id).unwrap();
+        assert_eq!((v.line, v.seq, v.answered), (0, 3, None));
+        assert_eq!(v.record, served);
+        assert!(!t.0.join("from-server.goyokey").exists());
+    }
     /// The server list and a fetch through the window's jobs; a target that
     /// exists is never written, before any network call.
     #[test]

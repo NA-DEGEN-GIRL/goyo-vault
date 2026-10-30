@@ -94,6 +94,15 @@ const LOG: i32 = 112;
 const CLOSE: i32 = 113;
 const REFRESH: i32 = 114;
 const TAKE: i32 = 115;
+/// "열쇠 파일도 받기" on the server list (security-key build).
+#[cfg(feature = "security-key")]
+const FETCH_KEY: i32 = 116;
+/// "열쇠 파일 동기화 허용 (실험)" and [강제 명령 줄…] under the vault list
+/// (security-key build, spec v3 §7.12).
+#[cfg(feature = "security-key")]
+const KEY_SYNC_ALLOW: i32 = 117;
+#[cfg(feature = "security-key")]
+const KEY_LINE: i32 = 118;
 /// IDCANCEL: Esc in the log and server-list views.
 const ESCAPE: i32 = 2;
 /// A worker finished; the result waits in [`DONE`].
@@ -209,6 +218,9 @@ enum Job {
     Install(Config),
     List(Config),
     Fetch(Config, [u8; 16], PathBuf),
+    /// The same, then the server's key file (spec §7.17).
+    #[cfg(feature = "security-key")]
+    FetchKey(Config, [u8; 16], PathBuf),
     Sync(Config),
     Restart,
 }
@@ -220,6 +232,8 @@ impl Job {
             Job::Install(_) => Kind::Install,
             Job::List(_) => Kind::List,
             Job::Fetch(..) => Kind::Fetch,
+            #[cfg(feature = "security-key")]
+            Job::FetchKey(..) => Kind::Fetch,
             Job::Sync(_) => Kind::Sync,
             Job::Restart => Kind::Restart,
         }
@@ -233,6 +247,16 @@ impl Job {
             Job::Fetch(c, id, path) => {
                 let got = setup::fetch(runner, log, &c, id, &path);
                 Done::Got(got, path)
+            }
+            // The key file only after the vault file was saved.
+            #[cfg(feature = "security-key")]
+            Job::FetchKey(c, id, path) => {
+                let got = setup::fetch(runner, log, &c, id, &path);
+                if !matches!(got, Got::Saved { .. }) {
+                    return Done::Got(got, path);
+                }
+                let key = setup::fetch_key(runner, log, &c, id, &path);
+                Done::GotKey(got, path, key)
             }
             Job::Sync(c) => Done::Synced(setup::sync_now(runner, log, &c), c.vaults),
             Job::Restart => Done::Restarted(setup::restart(system, Duration::from_millis(100))),
@@ -262,6 +286,9 @@ enum Done {
     Installed(Installed),
     Listed(Result<Vec<ListEntry>, Checked>, Config),
     Got(Got, PathBuf),
+    /// A saved vault version, and what its key file fetch did.
+    #[cfg(feature = "security-key")]
+    GotKey(Got, PathBuf, setup::KeyGot),
     Synced(Vec<Outcome>, Vec<PathBuf>),
     Restarted(Restarted),
 }
@@ -401,6 +428,13 @@ struct App {
     listing: Vec<ListEntry>,
     listed: Option<Config>,
     picked: Option<usize>,
+    /// "열쇠 파일도 받기" (security-key build; not stored in goyo-sync.conf).
+    #[cfg(feature = "security-key")]
+    fetch_key: bool,
+    /// The vaults the forced-command line names in `--key-sync` (security-
+    /// key build; shown only, not stored in goyo-sync.conf).
+    #[cfg(feature = "security-key")]
+    key_sync: Vec<[u8; 16]>,
     autostart_error: Option<i32>,
     system: Arc<dyn System>,
     runner: MakeRunner,
@@ -480,6 +514,10 @@ impl App {
             listing: Vec::new(),
             listed: None,
             picked: None,
+            #[cfg(feature = "security-key")]
+            fetch_key: true,
+            #[cfg(feature = "security-key")]
+            key_sync: Vec::new(),
             autostart_error: None,
             system,
             runner,
@@ -792,18 +830,40 @@ impl App {
             (fetch_x - 208, v + 10, 96, 34),
             theme::SECONDARY,
         );
+        // The security-key build's row under the list: the key-file sync
+        // tick of the selected vault and the forced-command line.
+        #[cfg(feature = "security-key")]
+        let list_h = {
+            let label = crate::keys_gui::ALLOW;
+            let w = self.toggle_width(label);
+            let variant = if self.key_sync_selected() {
+                theme::TOGGLE_ON
+            } else {
+                theme::TOGGLE
+            };
+            self.button(KEY_SYNC_ALLOW, label, (IX, v + 166, w, 32), variant);
+            self.button(
+                KEY_LINE,
+                crate::keys_gui::LINE_BUTTON,
+                (IX + IW - 200, v + 166, 200, 32),
+                theme::SECONDARY,
+            );
+            104
+        };
+        #[cfg(not(feature = "security-key"))]
+        let list_h = 144;
         if self.rows.is_empty() {
             self.frames.push((
                 Rect {
                     left: IX,
                     top: v + 52,
                     right: IX + IW,
-                    bottom: v + 196,
+                    bottom: v + 52 + list_h,
                 },
                 VAULT_LIST,
             ));
         } else {
-            let list = self.list(VAULT_LIST, (IX, v + 52, IW, 144));
+            let list = self.list(VAULT_LIST, (IX, v + 52, IW, list_h));
             for row in &self.rows {
                 unsafe {
                     SendMessageW(
@@ -922,7 +982,21 @@ impl App {
             TONE_MUTED,
         );
         let top = S + 72;
-        let list = self.list(SERVER_LIST, (IX, top, IW, bottom - 70 - top));
+        // "열쇠 파일도 받기" under the list (security-key build).
+        #[cfg(feature = "security-key")]
+        let bottom_list = {
+            let label = crate::keys_gui::fetch_key_label(self.fetch_key);
+            self.button(
+                FETCH_KEY,
+                label,
+                (IX, bottom - 70 - 40, 240, 34),
+                theme::SECONDARY,
+            );
+            bottom - 70 - 48
+        };
+        #[cfg(not(feature = "security-key"))]
+        let bottom_list = bottom - 70;
+        let list = self.list(SERVER_LIST, (IX, top, IW, bottom_list - top));
         for e in &self.listing {
             unsafe {
                 SendMessageW(
@@ -1125,12 +1199,16 @@ impl App {
                 CHECK | INSTALL | FETCH | SAVE | SYNC => idle,
                 HOST | REMOTE | PYTHON | IDENTITY | INTERVAL | TIMEOUT | VAULT_LIST | ADVANCED
                 | BROWSE_KEY | ADD | REMOVE | AUTOSTART | STOP | LOG => true,
+                #[cfg(feature = "security-key")]
+                KEY_SYNC_ALLOW | KEY_LINE => true,
                 _ => false,
             },
             Screen::Log => matches!(id, CLOSE | REFRESH | LOG_VIEW | ESCAPE),
             Screen::Server => match id {
                 TAKE => idle,
                 SERVER_LIST | CLOSE | ESCAPE => true,
+                #[cfg(feature = "security-key")]
+                FETCH_KEY => true,
                 _ => false,
             },
         }
@@ -1159,6 +1237,8 @@ impl App {
             1 if id == VAULT_LIST => {
                 let i = unsafe { SendMessageW(self.handle(VAULT_LIST), 0x188, 0, 0) };
                 self.selected = (i >= 0).then_some(i as usize);
+                #[cfg(feature = "security-key")]
+                self.show_key_sync();
                 return None;
             }
             1 if id == SERVER_LIST => {
@@ -1204,6 +1284,31 @@ impl App {
                 None
             }
             BROWSE_KEY => Some(Ask::Key),
+            // The selected vault named in `--key-sync`, or no longer.
+            #[cfg(feature = "security-key")]
+            KEY_SYNC_ALLOW => {
+                let Some(row) = self.selected.and_then(|i| self.rows.get(i)) else {
+                    self.set_run_note(Note::PickFirst);
+                    return None;
+                };
+                let Some(id) = crate::keys_gui::vault_id(&row.path) else {
+                    return Some(Ask::Tell(tr(crate::keys_gui::NO_ID).to_owned()));
+                };
+                match self.key_sync.iter().position(|x| *x == id) {
+                    Some(i) => {
+                        self.key_sync.remove(i);
+                    }
+                    None => self.key_sync.push(id),
+                }
+                self.show_key_sync();
+                None
+            }
+            #[cfg(feature = "security-key")]
+            KEY_LINE => Some(Ask::Tell(crate::keys_gui::forced_text(
+                &self.fields.python,
+                &self.fields.remote,
+                &self.key_sync_ids(),
+            ))),
             ADD => Some(Ask::Vault),
             REMOVE => {
                 match self.selected.filter(|i| *i < self.rows.len()) {
@@ -1281,8 +1386,60 @@ impl App {
                 let e = self.picked.and_then(|i| self.listing.get(i))?;
                 Some(Ask::Fetch(e.id, self.suggested(&e.id)))
             }
+            #[cfg(feature = "security-key")]
+            FETCH_KEY => {
+                self.fetch_key = !self.fetch_key;
+                unsafe {
+                    SetWindowTextW(
+                        self.handle(FETCH_KEY),
+                        wide(crate::keys_gui::fetch_key_label(self.fetch_key)).as_ptr(),
+                    );
+                    InvalidateRect(self.handle(FETCH_KEY), null(), 1);
+                }
+                None
+            }
             _ => None,
         }
+    }
+    /// The selected vault is named in `--key-sync` (security-key build).
+    #[cfg(feature = "security-key")]
+    fn key_sync_selected(&self) -> bool {
+        self.selected
+            .and_then(|i| self.rows.get(i))
+            .and_then(|r| crate::keys_gui::vault_id(&r.path))
+            .is_some_and(|id| self.key_sync.contains(&id))
+    }
+    /// The tick follows the selected vault.
+    #[cfg(feature = "security-key")]
+    fn show_key_sync(&self) {
+        let variant = if self.key_sync_selected() {
+            theme::TOGGLE_ON
+        } else {
+            theme::TOGGLE
+        };
+        let h = self.handle(KEY_SYNC_ALLOW);
+        if h != 0 {
+            unsafe {
+                SetWindowLongPtrW(h, -21, variant);
+                InvalidateRect(h, null(), 0);
+            }
+        }
+    }
+    /// The IDs the line names: the ticked vaults still in the list, in the
+    /// list's order.
+    #[cfg(feature = "security-key")]
+    fn key_sync_ids(&self) -> Vec<[u8; 16]> {
+        let mut ids: Vec<[u8; 16]> = Vec::new();
+        for id in self
+            .rows
+            .iter()
+            .filter_map(|r| crate::keys_gui::vault_id(&r.path))
+        {
+            if self.key_sync.contains(&id) && !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
     }
     /// A new file name for a fetched copy next to the exe.
     fn suggested(&self, id: &[u8; 16]) -> PathBuf {
@@ -1352,6 +1509,11 @@ impl App {
                 if setup::key_file(&path) {
                     self.set_server_note(Note::GotWrite);
                 } else if let Some(c) = self.listed.clone() {
+                    #[cfg(feature = "security-key")]
+                    if self.fetch_key {
+                        self.start(Job::FetchKey(c, id, path));
+                        return None;
+                    }
                     self.start(Job::Fetch(c, id, path));
                 }
                 None
@@ -1503,6 +1665,17 @@ impl App {
                     None
                 }
                 Got::Cancelled => None,
+            },
+            // Only a saved vault version fetches its key file.
+            #[cfg(feature = "security-key")]
+            Done::GotKey(got, path, key) => match got {
+                Got::Saved { version, bytes } => {
+                    self.set_server_note(Note::Got { version, bytes });
+                    Some(Ask::Tell(crate::keys_gui::fetched(
+                        version, bytes, &path, &key,
+                    )))
+                }
+                _ => None,
             },
             Done::Synced(outcomes, paths) => {
                 let now = Instant::now();
@@ -3002,6 +3175,76 @@ mod tests {
         assert_ne!(unsafe { IsWindow(w.h) }, 0);
     }
 
+    /// Spec v3 §7.12 (security-key build): "열쇠 파일 동기화 허용 (실험)"
+    /// ticks the selected vault, and [강제 명령 줄…] shows the line with the
+    /// ticked vaults' IDs in `--key-sync`, or none; a file that is no
+    /// synced vault cannot be ticked. Nothing of it is saved.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn the_forced_command_line_names_the_ticked_vaults() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let w = Window::with("keyline", |dir| {
+            let mut v = b"GOYOVA04".to_vec();
+            v.extend([7u8; 16]);
+            v.resize(200, 0);
+            std::fs::write(dir.join("vault.goyo"), v).unwrap()
+        });
+        let id = syncfile::hex(&[7u8; 16]);
+        // Nothing selected: nothing is ticked.
+        w.click(KEY_SYNC_ALLOW);
+        assert!(w.app(|a| a.key_sync.is_empty()));
+        w.app(|a| a.selected = Some(0));
+        w.click(KEY_SYNC_ALLOW);
+        assert_eq!(w.app(|a| a.key_sync.clone()), vec![[7u8; 16]]);
+        assert!(w.app(|a| a.key_sync_selected()));
+        w.click(KEY_LINE);
+        let shown = told();
+        assert_eq!(shown.len(), 1);
+        let line = format!(
+            "command=\"python3 -I .local/share/goyo-sync/goyo-sync-server.py serve --key-sync={id}\""
+        );
+        assert!(shown[0].contains(&line), "{}", shown[0]);
+        assert!(shown[0].starts_with("restrict,") || shown[0].contains("\nrestrict,"));
+        // Unticked: the line names no vault.
+        w.click(KEY_SYNC_ALLOW);
+        w.click(KEY_LINE);
+        let shown = told();
+        assert!(!shown[0].contains("--key-sync="), "{}", shown[0]);
+        assert!(shown[0].contains("goyo-sync-server.py serve\" "));
+        // A script path or Python command that could close the quoted
+        // command (and reopen options after `restrict`) gives no line.
+        for (python, remote) in [
+            (
+                "x\",agent-forwarding,command=\"y",
+                ".local/share/goyo-sync/goyo-sync-server.py",
+            ),
+            ("python3", "s.py\nssh-ed25519 AAAA other"),
+            ("python3", "s,py"),
+        ] {
+            w.app(|a| {
+                a.fields.python = python.to_owned();
+                a.fields.remote = remote.to_owned();
+            });
+            w.click(KEY_LINE);
+            assert_eq!(
+                told(),
+                [tr(crate::keys_gui::UNSAFE_LINE)],
+                "{python} {remote}"
+            );
+        }
+        w.app(|a| {
+            a.fields.python = "python3".to_owned();
+            a.fields.remote = ".local/share/goyo-sync/goyo-sync-server.py".to_owned();
+        });
+        // A file that is no synced vault has no ID to name.
+        std::fs::write(w.t.0.join("vault.goyo"), b"GOYOVA03 not synced at all").unwrap();
+        w.click(KEY_SYNC_ALLOW);
+        assert_eq!(told(), [tr(crate::keys_gui::NO_ID)]);
+        assert!(w.app(|a| a.key_sync.is_empty()));
+        assert!(!w.t.0.join(crate::CONFIG).exists());
+    }
+
     /// "Save and start", then closing the window at once: the process waits
     /// for the restart, so the old helper is never left stopped without the
     /// new one started.
@@ -3141,6 +3384,14 @@ mod tests {
         blob.resize(160, 1);
         w.script.push(reply(Status::Ok, 4, &blob));
         let target = w.t.0.join("from-server.goyo");
+        // "열쇠 파일도 받기" starts on in the security-key build; off, the
+        // fetch is the vault file alone (no GETKEY).
+        #[cfg(feature = "security-key")]
+        {
+            assert!(w.app(|a| a.fetch_key));
+            w.click(FETCH_KEY);
+            assert!(!w.app(|a| a.fetch_key));
+        }
         choose(Some(target.clone()));
         w.click(TAKE);
         w.wait();

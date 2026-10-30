@@ -181,6 +181,14 @@ pub enum SyncNotice {
         seq: u64,
         admin: bool,
     },
+    /// KeyFork-SK of a fork that the kind-9 merge of two removals made
+    /// from one state would join (spec v3 §7.4, §5.8): `auto`, at the next
+    /// unlock with no question (KeyFork-SK-AUTO); otherwise with [받기]
+    /// (KeyFork-SK-MERGE).
+    #[cfg(feature = "security-key")]
+    KeyForkMerge {
+        auto: bool,
+    },
 }
 impl SyncNotice {
     /// Lower wins when one event has several.
@@ -190,7 +198,10 @@ impl SyncNotice {
             #[cfg(feature = "security-key")]
             Self::KeyRollback => 0,
             #[cfg(feature = "security-key")]
-            Self::KeyFileRefused(_) | Self::BadKeyIncoming | Self::GatePending => 1,
+            Self::KeyFileRefused(_)
+            | Self::BadKeyIncoming
+            | Self::GatePending
+            | Self::KeyForkMerge { .. } => 1,
             #[cfg(feature = "security-key")]
             Self::KeySyncGone => 2,
             #[cfg(feature = "security-key")]
@@ -235,6 +246,7 @@ impl SyncNotice {
                 | Self::KeySyncHelper
                 | Self::KeySyncDeleted { .. }
                 | Self::KeyFork
+                | Self::KeyForkMerge { .. }
         )
     }
     /// Whether the helper's status file causes this notice.
@@ -650,6 +662,10 @@ pub(super) struct Own<'a> {
     pub state: KeyState,
     /// A local rollback holds: nothing is merged (spec v3 §5.10).
     pub hold: bool,
+    /// The anchor's `sup` (security-key build, spec v3 §5.10): data keys of
+    /// candidates this PC superseded, each with that candidate's state.
+    #[cfg(feature = "security-key")]
+    pub sup: &'a [super::anchor::Sup],
 }
 impl Own<'_> {
     /// What a vault file of this session adds to its plaintext.
@@ -707,6 +723,16 @@ impl Own<'_> {
         };
         let index = match self.index(&header) {
             Some(index) => index,
+            // A head under the state of a candidate this PC superseded
+            // (spec v3 §7.1, S6-1 #2): treated as an older-key copy, never
+            // decrypted, and pushed over. Under such a key with another
+            // state it stays UnknownKey, for the attended override.
+            #[cfg(feature = "security-key")]
+            None if matches!(header, Header::Keyed { key_id, state, .. }
+                if self.sup.iter().any(|s| s.keyid == key_id && s.epoch == state.epoch && s.tag == state.tag)) =>
+            {
+                return Verdict::OlderKey(0, true);
+            }
             None => {
                 let (newer, hardware) = match header {
                     Header::Keyed { state, flags, .. } => {
@@ -897,6 +923,13 @@ impl Session {
             ids: self.key_file.header().map(|h| h.key_ids.as_slice()),
             state: self.key_state,
             hold: self.merges_held(),
+            #[cfg(feature = "security-key")]
+            sup: self
+                .anchor
+                .lines
+                .vault
+                .as_ref()
+                .map_or(&[][..], |l| l.state.sup.as_slice()),
         }
     }
     /// Whether no incoming copy is merged: a local rollback, and a changed

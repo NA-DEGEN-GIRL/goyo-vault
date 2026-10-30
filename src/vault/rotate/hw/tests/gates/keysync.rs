@@ -1019,3 +1019,1036 @@ fn a_pending_gate_without_its_candidate_can_be_dropped() {
     assert!(uploads(&b, &mut sb, "dropped"));
     set_kdf_profile(KdfProfile::Real);
 }
+
+/// A login of `pc` with `password` and a touch of key `number` that hands
+/// back what the login flow gets (spec §5.3): the session and its
+/// `UnlockProof`, or the failed-unlock entry; and the touch.
+#[allow(clippy::type_complexity)]
+fn login_proved(
+    pc: &Pc,
+    password: &str,
+    codes: &mut Codes,
+    keys: &Keys,
+    number: u8,
+) -> (
+    std::result::Result<(Session, crate::vault::UnlockProof), crate::vault::Failed>,
+    Touch,
+) {
+    pc.here();
+    let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
+    let (code, typed) = codes.next();
+    let t = keys
+        .touch(number, &prepared.unlock_request(0).unwrap())
+        .unwrap();
+    let result = Session::login_proved(prepared, password, &code, typed, None, &t);
+    (result, t)
+}
+/// A and B both GOYOKS01 (B took A's "on" with its code), and A's password
+/// changed to NEW on top, landed and fetched by B's helper. With an OTP,
+/// one step is left for one login.
+#[allow(clippy::type_complexity)]
+fn new_password_waiting(with_otp: bool) -> (Pc, Session, Pc, Codes, Keys, KeyServer, [u8; 16]) {
+    let a = Pc::new();
+    let (mut sa, mut codes, keys) = create_with(&a, 2, with_otp, true, true);
+    let id = sa.id;
+    let b = synced_pc(&a, &mut codes, &keys, 2);
+    a.here();
+    let mut server = KeyServer::default();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    polls(&mut sb);
+    take_server(&mut sb, &mut codes, &keys, 2, code(code_of(&sa))).unwrap();
+    polls(&mut sb);
+    drop(sb);
+    a.here();
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    (a, sa, b, codes, keys, server, id)
+}
+
+/// Spec §5.2 step 9(b), §5.3, §7.15 at login (§14.10 walkthrough 2): the
+/// server's successor is taken inside the login, with the unlock's touch
+/// and the login's own Reauth, on an OTP vault with no second code; the
+/// proof serves its own session only and only the snapshot the login read.
+#[test]
+fn the_server_key_file_is_taken_at_login_with_the_unlocks_touch() {
+    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(true);
+    let changed = header(&a);
+    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (mut sb, proof) = result.ok().unwrap();
+    let (f, seq) = sb.login_candidate(&proof).unwrap();
+    let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
+    assert_eq!(
+        (check.class, check.keys.gate),
+        (AdoptClass::Successor, None)
+    );
+    // No code is taken from `codes` here: the login's step serves.
+    let r = sb.reauth_from_unlock(proof, &t).unwrap();
+    let opened = sb.adopt_open_with(&r, &f, Some(NEW), Some(&t)).unwrap();
+    let plan = sb
+        .adopt_preview_with(
+            &r,
+            &f,
+            opened,
+            &check,
+            GatePass::none(&check),
+            ForkOption::Both,
+        )
+        .unwrap();
+    let acks = acks(plan.preview(), ForkOption::Both);
+    sb.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
+        .unwrap();
+    assert_eq!(header(&b).state(), changed.state());
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.2 second entry point, §7.15 step 4 (§14.10 walkthrough 2, the
+/// new password at B): the unlock with the new password fails on B's own
+/// key file and returns the entry; the server's file opens with it and the
+/// same touch, chains under B's data key, and is installed before the
+/// session is returned. A password that opens neither file installs
+/// nothing.
+#[test]
+fn the_new_password_at_login_takes_the_server_key_file() {
+    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(false);
+    let changed = header(&a);
+    let before = fs::read(b.key()).unwrap();
+    // A proof serves its own session only (spec §5.3).
+    let (result, _) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (s1, stale) = result.ok().unwrap();
+    drop(s1);
+    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (mut s2, _) = result.ok().unwrap();
+    assert_eq!(
+        s2.reauth_from_unlock(stale, &t).err(),
+        Some(crate::vault::rotate::REAUTH_STALE)
+    );
+    drop(s2);
+    // Neither file opens.
+    let (result, t) = login_proved(&b, "wrong-password-1", &mut codes, &keys, 2);
+    let failed = result.err().unwrap();
+    assert_eq!(failed.error, AUTH_ERROR);
+    let mut entry = failed.entry.unwrap();
+    assert!(entry.gate().is_none() && entry.own_tried());
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, None, false).err(),
+        Some(AUTH_ERROR)
+    );
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    // The new password.
+    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    let (mut s, adopted) = Session::login_via_server(&mut entry, &t, None, false).unwrap();
+    assert_eq!(adopted.state, changed.state());
+    // That entry's Reauth serves its accept only: no key change takes it.
+    let r = s.reauth_server(NEW, &t).unwrap();
+    assert_eq!(
+        s.rekey(
+            r,
+            Vec::new(),
+            password("another synthetic password"),
+            Consent::default(),
+            true
+        )
+        .err(),
+        Some(crate::vault::rotate::REAUTH_STALE)
+    );
+    assert_eq!(adopted.password, crate::vault::PassInForce::Other);
+    assert_eq!(s.key_state(), changed.state());
+    assert_eq!(header(&b).state(), changed.state());
+    assert!(b.lines(&s.id).vault.unwrap().state.flags.t);
+    assert!(has(&s, "one"));
+    drop(s);
+    let s = open(&b, NEW, &mut codes, &keys, 2).unwrap();
+    assert!(!s.tofu() && !s.gate_pending());
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.2, §7.15a (S6-1 #4, round 3 findings 7 and 27): on the failed-
+/// unlock entry the gate is asked before the open and judged only once the
+/// server's file opened, chained and the local vault file read: a pick made
+/// with a password that opens nothing is discarded unseen (G2 stays on); a
+/// wrong pick after the open turns G2 off and installs nothing; the next
+/// login asks G1, and the other PC's code takes the removal.
+#[test]
+fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
+    let (a, mut sa, b, sb, mut codes, keys, mut server, id) = both_on(3);
+    drop(sb);
+    a.here();
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let change = remove(&[3], Some(lost()), Some(NEW));
+    assert_eq!(
+        sa.rekey(r, Vec::new(), change, Consent::default(), false),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    let before = fs::read(b.key()).unwrap();
+    let three = credhash(&parse(&before).unwrap(), 3);
+    let one = credhash(&parse(&before).unwrap(), 1);
+    // A pick with a password that opens nothing: discarded unseen.
+    let (result, t) = login_proved(&b, "wrong-password-1", &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    let (kind, choices, touched, _) = entry.gate().unwrap();
+    assert_eq!((kind, touched), (GateKind::G2, Some(2)));
+    assert_eq!(choices.len(), 3);
+    let wrong = Some(GateAnswer::Pick(vec![one]));
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, wrong.clone(), false).err(),
+        Some(AUTH_ERROR)
+    );
+    assert!(b.lines(&id).gate.is_none_or(|g| g.g2));
+    // The right password, a wrong pick: G2 off, nothing installed.
+    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, wrong, false).err(),
+        Some(GATE_G2FAIL)
+    );
+    assert!(!b.lines(&id).gate.unwrap().g2);
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    // The next login asks G1; a wrong code may be typed again.
+    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    assert_eq!(entry.gate().unwrap().0, GateKind::G1);
+    let bad = Some(GateAnswer::Code(Code([7; 8])));
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, bad, false).err(),
+        Some(GATE_CODE_WRONG)
+    );
+    let good = Some(GateAnswer::Code(code_of(&sa)));
+    let (s, _) = Session::login_via_server(&mut entry, &t, good, false).unwrap();
+    assert_eq!(header(&b).state(), header(&a).state());
+    assert!(
+        !parse(&fs::read(b.key()).unwrap())
+            .unwrap()
+            .slots
+            .iter()
+            .any(|x| x.credhash == three)
+    );
+    assert!(s.review_due.is_some(), "a loss makes the review due");
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.2 (S6-1 #1, S6-2 #4; §14.10 walkthrough 20): a key that only
+/// the server's file lists is never in the unlock's allow list; after
+/// Windows' cancel, S-TRY-OTHERKEY's ceremony holds that key alone, and its
+/// touch takes the file behind G1 (the key is new to this PC).
+#[test]
+fn a_key_only_the_server_file_lists_opens_after_a_cancel() {
+    let (a, mut sa, b, sb, mut codes, mut keys, mut server, id) = both_on(2);
+    drop(sb);
+    a.here();
+    let key3 = keys.register(&id, 3, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key3),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    b.here();
+    let prepared = prepare(&b.vault(), &b.key()).unwrap();
+    let cred3 = header(&a)
+        .slots
+        .iter()
+        .find(|s| s.number == 3)
+        .unwrap()
+        .cred_id
+        .clone();
+    // Never in the unlock's allow list.
+    let unlock = prepared.unlock_request(0).unwrap();
+    assert!(!unlock.allow.iter().any(|(c, ..)| *c == cred3));
+    assert!(prepared.offers_other_key());
+    let (otp, typed) = codes.next();
+    let mut entry = prepared.other_key_entry(OLD, &otp, typed, None).unwrap();
+    assert!(!entry.own_tried());
+    assert_eq!(entry.other_numbers(), [3]);
+    let request = entry.other_request(0).unwrap();
+    assert_eq!(request.allow.len(), 1);
+    let t = keys.touch(3, &request).unwrap();
+    let (kind, _, touched, _) = entry.gate().unwrap();
+    assert_eq!((kind, touched), (GateKind::G1, None));
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, None, false).err(),
+        Some(GATE_NOT_PENDING)
+    );
+    let good = Some(GateAnswer::Code(code_of(&sa)));
+    let (s, _) = Session::login_via_server(&mut entry, &t, good, false).unwrap();
+    assert_eq!(s.key_state(), header(&a).state());
+    drop(s);
+    // Key 3 now opens B's own key file.
+    open(&b, OLD, &mut codes, &keys, 3).unwrap();
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Moves the OTP clock `secs` forward and `codes` with it: codes typed from
+/// now on fall inside the three minutes again.
+fn later(codes: &mut Codes, secs: u64) {
+    otp::shift(secs);
+    codes.at = codes.at.max(otp::now().unwrap() - 150);
+}
+
+/// Spec §5.2, §7.15 step 4 (final review findings 1 and 3): on an OTP vault
+/// the failed-unlock entry checks the code's three minutes once, when it
+/// starts; a wrong G1 code typed again after more than three minutes at
+/// the other PC still takes the same OTP code (its own call saved that
+/// step), and a stale start is OTP_STALE, not a wrong password.
+#[test]
+fn an_otp_vaults_failed_unlock_entry_takes_its_code_for_every_try() {
+    let a = Pc::new();
+    let (mut sa, mut codes, mut keys) = create_with(&a, 2, true, true, true);
+    let id = sa.id;
+    let b = synced_pc(&a, &mut codes, &keys, 2);
+    later(&mut codes, 300);
+    a.here();
+    let mut server = KeyServer::default();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    polls(&mut sb);
+    take_server(&mut sb, &mut codes, &keys, 2, code(code_of(&sa))).unwrap();
+    drop(sb);
+    later(&mut codes, 300);
+    a.here();
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
+        Ok(Rekeyed::Done)
+    );
+    let key3 = keys.register(&id, 3, true);
+    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key3),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    let before = fs::read(b.key()).unwrap();
+    // A start more than three minutes after the code was typed.
+    let (result, _) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut stale = result.err().unwrap().entry.unwrap();
+    otp::shift(200);
+    assert_eq!(stale.start().err(), Some(crate::vault::OTP_STALE));
+    drop(stale);
+    later(&mut codes, 0);
+    // In time at the start; then more than three minutes at the other PC.
+    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    entry.start().unwrap();
+    assert_eq!(entry.gate().unwrap().0, GateKind::G1);
+    otp::shift(200);
+    let bad = Some(GateAnswer::Code(Code([7; 8])));
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, bad, false).err(),
+        Some(GATE_CODE_WRONG)
+    );
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    let good = Some(GateAnswer::Code(code_of(&sa)));
+    let (s, _) = Session::login_via_server(&mut entry, &t, good, false).unwrap();
+    assert_eq!(s.key_state(), header(&a).state());
+    drop(s);
+    // The step stays spent: that entry is gone, and a new login needs a
+    // new code.
+    later(&mut codes, 0);
+    open(&b, NEW, &mut codes, &keys, 3).unwrap();
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// The same for S-KEYSYNC-ON's second call (final review finding 1): a
+/// GOYOKH01 PC opens with the new password on top of another PC's "on";
+/// the gate passes, S-KEYSYNC-ON is asked, and the yes takes it with the
+/// same OTP code more than three minutes later.
+#[test]
+fn an_otp_vaults_keysync_consent_takes_the_same_code() {
+    let a = Pc::new();
+    let (mut sa, mut codes, keys) = create_with(&a, 2, true, true, true);
+    let id = sa.id;
+    let b = synced_pc(&a, &mut codes, &keys, 2);
+    later(&mut codes, 300);
+    a.here();
+    let mut server = KeyServer::default();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    later(&mut codes, 0);
+    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let mut entry = result.err().unwrap().entry.unwrap();
+    entry.start().unwrap();
+    assert_eq!(entry.gate().unwrap().0, GateKind::G1);
+    otp::shift(200);
+    let good = Some(GateAnswer::Code(code_of(&sa)));
+    assert_eq!(
+        Session::login_via_server(&mut entry, &t, good.clone(), false).err(),
+        Some(crate::vault::KEYSYNC_CONSENT)
+    );
+    let (s, adopted) = Session::login_via_server(&mut entry, &t, good, true).unwrap();
+    assert_eq!(adopted.state, header(&a).state());
+    assert_eq!(s.key_state(), header(&a).state());
+    assert!(header(&b).magic.hardware() && header(&b).magic == header(&a).magic);
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.1 step 10, §7.17 (round 4, finding 1): in a bootstrap the
+/// server's key file is no snapshot: nothing is offered or taken at login.
+#[test]
+fn a_bootstrap_takes_nothing_from_the_server_at_login() {
+    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(false);
+    let c = Pc::new();
+    carry(&b, &c);
+    fs::create_dir(dir(&c)).unwrap();
+    fs::copy(dir(&b).join(KEY_VIEW), dir(&c).join(KEY_VIEW)).unwrap();
+    let (result, _) = login_proved(&c, NEW, &mut codes, &keys, 2);
+    assert!(result.err().unwrap().entry.is_none());
+    let (result, _) = login_proved(&c, OLD, &mut codes, &keys, 2);
+    let (s, proof) = result.ok().unwrap();
+    assert!(s.tofu());
+    assert!(s.login_candidate(&proof).is_none());
+    assert_ne!(header(&c).state(), header(&a).state());
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.1 step 10 (round 2, finding 8): the login takes only the
+/// snapshot precheck read; a key view that changed during the login is
+/// not taken there (it waits for [받기…]).
+#[test]
+fn a_key_view_swapped_during_the_login_is_not_taken() {
+    let (a, mut sa, b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    b.here();
+    let prepared = prepare(&b.vault(), &b.key()).unwrap();
+    // A changes the password again; B's helper writes that file meanwhile.
+    a.here();
+    assert_eq!(
+        rekey_new(
+            &mut sa,
+            &mut codes,
+            &keys,
+            password("third synthetic password")
+        ),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    server.pass(&b, &id);
+    b.here();
+    let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
+    let (code, typed) = codes.next();
+    let (sb, proof) = Session::login_proved(prepared, OLD, &code, typed, None, &t)
+        .ok()
+        .unwrap();
+    assert!(matches!(
+        sb.server_class(),
+        Some(KeyClass::Successor { .. })
+    ));
+    assert!(sb.login_candidate(&proof).is_none());
+    set_kdf_profile(KdfProfile::Real);
+}
+/// A Restore of `pc`'s vault file into `dest` with the server's key file
+/// from its key view, touched with key `number`.
+fn restore_fetched(
+    pc: &Pc,
+    dest: &Path,
+    password: &str,
+    codes: &mut Codes,
+    keys: &Keys,
+    number: u8,
+) -> Result<Session> {
+    pc.here();
+    let prepared = crate::vault::prepare_restore_fetched(&pc.vault())?;
+    let t = keys
+        .touch(number, &prepared.unlock_request(0).unwrap())
+        .unwrap();
+    let (code, typed) = codes.next();
+    Session::restore_with(prepared, dest, password, &code, typed, &t)
+}
+
+/// Spec §7.17 (§14.10 walkthrough 4, a new PC from the server): the vault
+/// fetched with "열쇠 파일도 받기" restores with the server's key file read
+/// only: nothing is written outside the sync folder before G1 (no key
+/// file, no restored vault file, no anchor line), no edit; a wrong code
+/// writes nothing; the save step never writes into a sync folder or over a
+/// file; then the key file, the vault file and the confirmed line with `t`,
+/// and the pair opens as a login with no gate.
+#[test]
+fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
+    let (a, sa, _b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    let shown = code_of(&sa);
+    // PC C: the vault file fetched next to its own sync folder and the
+    // server's key file in its view.
+    let c = Pc::new();
+    fs::copy(a.vault(), c.vault()).unwrap();
+    fs::create_dir(dir(&c)).unwrap();
+    server.pass(&c, &id);
+    assert_eq!(
+        crate::vault::fetched_key(&c.vault()),
+        Some(dir(&c).join(KEY_VIEW))
+    );
+    let dest = c.file("restored.goyo");
+    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    assert!(s.tofu() && s.fetched_unsaved());
+    assert!(!dest.exists() && !c.key().exists() && c.anchor().is_empty());
+    assert_eq!(
+        s.put(None, entry("three")).err(),
+        Some(crate::vault::TOFU_HELD)
+    );
+    assert_eq!(s.tofu_confirm(Some(&shown)).err(), Some(GATE_NOT_PENDING));
+    assert_eq!(
+        s.tofu_check(Some(&Code([7; 8]))).err(),
+        Some(GATE_CODE_WRONG)
+    );
+    assert_eq!(
+        s.tofu_save(Some(&Code([7; 8])), &c.key()).err(),
+        Some(GATE_CODE_WRONG)
+    );
+    assert!(!c.key().exists() && c.anchor().is_empty());
+    s.tofu_check(Some(&shown)).unwrap();
+    let inside = dir(&c).join("vault.goyokey");
+    assert_eq!(
+        s.tofu_save(Some(&shown), &inside).err(),
+        Some(crate::vault::FETCHED_IN_SYNC)
+    );
+    fs::write(c.key(), b"taken").unwrap();
+    assert_eq!(
+        s.tofu_save(Some(&shown), &c.key()).err(),
+        Some(crate::vault::FETCHED_EXISTS)
+    );
+    fs::remove_file(c.key()).unwrap();
+    s.tofu_save(Some(&shown), &c.key()).unwrap();
+    assert!(!s.tofu() && !s.fetched_unsaved());
+    assert_eq!(fs::read(c.key()).unwrap(), fs::read(a.key()).unwrap());
+    assert!(dest.exists());
+    let line = c.lines(&id).vault.unwrap();
+    assert!(line.state.flags.t && c.lines(&id).pending.is_none());
+    assert_eq!(line.state.key_state(), header(&a).state());
+    s.put(None, entry("three")).unwrap();
+    drop(s);
+    c.here();
+    let prepared = prepare(&dest, &c.key()).unwrap();
+    let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
+    let (otp, typed) = codes.next();
+    let s = Session::login_with(prepared, NEW, &otp, typed, None, &t).unwrap();
+    assert!(!s.tofu() && !s.gate_pending());
+    assert!(has(&s, "three"));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §7.17 (a lost key file on a PC that still has its vault): a save
+/// step cut off after its pending entry is resumed by the next Restore
+/// with no second code; and the local vault file is the floor, so a
+/// server key file older than it is refused.
+#[test]
+fn a_lost_key_file_comes_back_from_the_server_once_and_not_older() {
+    let (a, mut sa, b, mut codes, mut keys, mut server, id) = new_password_waiting(false);
+    let shown = code_of(&sa);
+    // The save is cut off after its pending entry, in the key file's write.
+    let c = c_with_view(&b, &id, &mut server);
+    let dest = c.file("restored.goyo");
+    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    CRASH.with(|x| x.set(Some("tmp_synced")));
+    assert!(s.tofu_save(Some(&shown), &c.key()).is_err());
+    assert!(!c.key().exists());
+    assert_eq!(
+        c.lines(&id).pending.unwrap().src,
+        crate::vault::anchor::Src::Tofu
+    );
+    assert!(!dest.exists());
+    drop(s);
+    // The next Restore resumes at the save step: no code. A file under the
+    // pending entry's own name is taken only when it holds exactly the key
+    // file (a cut after its write, final review finding 10).
+    fs::write(c.key(), b"taken").unwrap();
+    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    assert!(!s.tofu() && s.fetched_unsaved());
+    assert_eq!(
+        s.put(None, entry("x")).err(),
+        Some(crate::vault::FETCHED_UNSAVED)
+    );
+    assert_eq!(
+        s.tofu_save(None, &c.key()).err(),
+        Some(crate::vault::FETCHED_EXISTS)
+    );
+    assert_eq!(fs::read(c.key()).unwrap(), b"taken");
+    fs::write(c.key(), fs::read(a.key()).unwrap()).unwrap();
+    s.tofu_save(None, &c.key()).unwrap();
+    assert!(c.lines(&id).vault.unwrap().state.flags.t);
+    assert!(c.lines(&id).pending.is_none() && dest.exists());
+    drop(s);
+    // A adds a key, which keeps the data key: A's vault file is now above
+    // the server's key file, which is refused as a rollback.
+    a.here();
+    let key3 = keys.register(&id, 3, true);
+    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key3),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    let older = c_with_view(&a, &id, &mut server);
+    assert_eq!(
+        restore_fetched(&older, &older.file("x.goyo"), NEW, &mut codes, &keys, 1).err(),
+        Some(crate::vault::FETCHED_OLDER)
+    );
+    set_kdf_profile(KdfProfile::Real);
+}
+/// A PC with `from`'s vault file and a key view of the server's top.
+fn c_with_view(from: &Pc, id: &[u8; 16], server: &mut KeyServer) -> Pc {
+    let c = Pc::new();
+    fs::copy(from.vault(), c.vault()).unwrap();
+    fs::create_dir(dir(&c)).unwrap();
+    server.pass(&c, id);
+    c
+}
+
+/// Spec §7.15a (§14.10 walkthrough 26, round 2 findings 13 and 23, S6-1
+/// #2): A adds key 3 and changes its password, and its disk dies before
+/// anyone typed its code. B is held (GatePending, G1); [다른 PC가 없어 이
+/// PC 상태로 올리기…] is offered; the supersede writes B's own keyset
+/// again above A's file (kind 6, B's data key kept, key 3 not in it),
+/// marks the gate superseded, keeps A's data key in `sup` with A's state,
+/// and uploads on A's record; A's vault head, under that state, is pushed
+/// over at the next poll and at every later unlock.
+#[test]
+fn a_change_whose_pc_is_gone_is_superseded() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(2);
+    a.here();
+    let key3 = keys.register(&id, 3, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key3),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    let gone = header(&a);
+    // A's last vault upload, under its new data key and state.
+    assert!(uploads(&a, &mut sa, "written on a"));
+    let out = fs::read(dir(&a).join(OUTGOING)).unwrap();
+    let copy = syncfile::parse_outgoing(&out).unwrap().1.to_vec();
+    drop(sa);
+    // B: A's change waits for A's code, which nobody can read any more.
+    b.here();
+    let before = header(&b);
+    server.pass(&b, &id);
+    let told = polls(&mut sb);
+    assert!(told.contains(&SyncNotice::GatePending), "{told:?}");
+    let incoming = syncfile::render_incoming(7, &copy).unwrap();
+    syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
+    polls(&mut sb);
+    let waiting = sb.key_sync_view().unwrap().waiting.unwrap();
+    assert!(waiting.supersede && waiting.pending_gate);
+    assert_eq!(sb.change_gate(&password(THIRD)).err(), Some(GATE_PENDING));
+    let wrong = Change::Supersede {
+        epoch: gone.epoch,
+        tag: [9; 16],
+    };
+    assert_eq!(
+        rekey(&mut sb, &mut codes, &keys, 2, wrong).err(),
+        Some(crate::vault::NOT_SUPERSEDABLE)
+    );
+    let change = Change::Supersede {
+        epoch: gone.epoch,
+        tag: gone.state().tag,
+    };
+    assert_eq!(sb.change_gate(&change), Ok(None));
+    assert_eq!(
+        rekey(&mut sb, &mut codes, &keys, 2, change),
+        Ok(Rekeyed::Done)
+    );
+    let up = header(&b);
+    assert_eq!((up.magic, up.kind), (Magic::Ks01, keyfile::Kind::SyncOn));
+    assert_eq!(up.epoch, gone.epoch + 1);
+    assert_eq!(up.key_ids, before.key_ids, "the data key is kept");
+    assert_eq!(numbers(&up), [1, 2], "key 3 is not taken");
+    let lines = b.lines(&id);
+    assert_eq!(lines.gate.unwrap().state, GateState::Superseded);
+    let line = lines.vault.unwrap();
+    assert!(line.state.flags.p, "the rollout reminder");
+    assert!(
+        line.state
+            .sup
+            .iter()
+            .any(|e| e.keyid == gone.key_ids[0]
+                && (e.epoch, e.tag) == (gone.epoch, gone.state().tag))
+    );
+    assert!(
+        !line
+            .state
+            .sup
+            .iter()
+            .any(|e| before.key_ids.contains(&e.keyid))
+    );
+    // The key request: a PUT on A's record, above its epoch; A's vault
+    // head is pushed over, B's state going up from version 7.
+    let _ = fs::remove_file(dir(&b).join(OUTGOING));
+    polls(&mut sb);
+    let bytes = kreq(&b).unwrap();
+    let req = parse_key_request(&bytes, &id).unwrap();
+    assert_eq!(
+        (req.op, req.base, req.floor),
+        (KeyOp::Put, server.top(), gone.epoch)
+    );
+    let out = fs::read(dir(&b).join(OUTGOING)).unwrap();
+    assert_eq!(syncfile::parse_outgoing(&out).unwrap().0, 7);
+    server.pass(&b, &id);
+    polls(&mut sb);
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    assert!(sb.key_sync_view().unwrap().waiting.is_none());
+    drop(sb);
+    // At the next unlock `sup` still pushes that head over.
+    let _ = fs::remove_file(dir(&b).join(OUTGOING));
+    syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
+    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let told = polls(&mut sb);
+    assert!(
+        !told
+            .iter()
+            .any(|n| matches!(n, SyncNotice::KeyChanged { .. } | SyncNotice::KeyFork)),
+        "{told:?}"
+    );
+    assert!(dir(&b).join(OUTGOING).exists());
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §7.15a (round 3, finding 1; round 4, finding 7): a removal of one
+/// of this PC's keys (R ≠ ∅) is never superseded; a GOYOKH01 PC supersedes
+/// another PC's "on" (a GOYOKS01 successor) and so turns key-file sync on
+/// itself.
+#[test]
+fn a_removal_is_never_superseded_and_an_on_is() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    a.here();
+    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    server.pass(&a, &id);
+    polls(&mut sa);
+    b.here();
+    server.pass(&b, &id);
+    polls(&mut sb);
+    assert!(!sb.key_sync_view().unwrap().waiting.unwrap().supersede);
+    // A removal with an addition on top needs the code (G1), and is still
+    // never superseded.
+    a.here();
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    let removal = header(&a);
+    b.here();
+    server.pass(&b, &id);
+    polls(&mut sb);
+    assert_eq!(
+        sb.server_class(),
+        Some(KeyClass::Successor {
+            carry: false,
+            gate: Some(GateKind::G1)
+        })
+    );
+    assert!(!sb.key_sync_view().unwrap().waiting.unwrap().supersede);
+    let change = Change::Supersede {
+        epoch: removal.epoch,
+        tag: removal.state().tag,
+    };
+    assert_eq!(
+        rekey(&mut sb, &mut codes, &keys, 2, change).err(),
+        Some(crate::vault::NOT_SUPERSEDABLE)
+    );
+    drop((sa, sb));
+
+    // A GOYOKH01 PC and another PC's "on".
+    let a = Pc::new();
+    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let id = sa.id;
+    let b = synced_pc(&a, &mut codes, &keys, 2);
+    a.here();
+    let mut server = KeyServer::default();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    let on = header(&a);
+    drop(sa);
+    server.pass(&b, &id);
+    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    polls(&mut sb);
+    assert_eq!(header(&b).magic, Magic::Kh01);
+    assert!(sb.key_sync_view().unwrap().waiting.unwrap().supersede);
+    let change = Change::Supersede {
+        epoch: on.epoch,
+        tag: on.state().tag,
+    };
+    assert_eq!(
+        rekey(&mut sb, &mut codes, &keys, 2, change),
+        Ok(Rekeyed::Done)
+    );
+    let up = header(&b);
+    assert_eq!((up.magic, up.epoch), (Magic::Ks01, on.epoch + 1));
+    polls(&mut sb);
+    let bytes = kreq(&b).unwrap();
+    let req = parse_key_request(&bytes, &id).unwrap();
+    assert_eq!((req.op, req.base, req.floor), (KeyOp::Put, 1, on.epoch));
+    server.pass(&b, &id);
+    polls(&mut sb);
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    assert!(uploads(&b, &mut sb, "up again"));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §7.18: the PC that changed a GOYOKS01 key file is reminded at each
+/// unlock, worded per change, until [모든 PC 확인 완료].
+#[test]
+fn the_rollout_reminder_stays_until_every_pc_is_confirmed() {
+    let (a, sa, b, sb, mut codes, mut keys, mut server, id) = both_on(3);
+    a.here();
+    // The "on" asks a code only of a PC that keeps its key file to itself.
+    let code = sa.key_code().unwrap();
+    assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Maybe(code)));
+    // B took the "on": no reminder there.
+    b.here();
+    assert_eq!(sb.rollout(), None);
+    drop((sa, sb));
+    let mut sa = open(&a, OLD, &mut codes, &keys, 1).unwrap();
+    assert!(sa.rollout().is_some(), "at every unlock");
+    sa.rollout_done().unwrap();
+    assert_eq!(sa.rollout(), None);
+    assert!(!a.lines(&id).vault.unwrap().state.flags.p);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
+        Ok(Rekeyed::Done)
+    );
+    assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Plain));
+    server.pass(&a, &id);
+    polls(&mut sa);
+    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    let change = remove(&[3], Some(lost()), None);
+    assert_eq!(
+        sa.rekey(r, Vec::new(), change, Consent::default(), false),
+        Ok(Rekeyed::Done)
+    );
+    let code = sa.key_code().unwrap();
+    assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Remove(code)));
+    // An added key: always the code.
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    let code = sa.key_code().unwrap();
+    assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Code(code)));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// The kind-9 merge's other file `f` taken with the unlock's touch `t`
+/// and the login's own Reauth, no gate and no question (spec §5.8).
+fn merge_at_login(
+    s: &mut Session,
+    proof: crate::vault::UnlockProof,
+    t: &Touch,
+    f: &KeyFile,
+    seq: u64,
+) -> Adopted {
+    let check = s.adopt_check(f, Source::Server { seq }).unwrap();
+    let r = s.reauth_from_unlock(proof, t).unwrap();
+    let opened = s.adopt_open_with(&r, f, None, Some(t)).unwrap();
+    let pass = GatePass::none(&check);
+    let plan = s
+        .adopt_preview_with(&r, f, opened, &check, pass, ForkOption::Both)
+        .unwrap();
+    let acks = acks(plan.preview(), ForkOption::Both);
+    s.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
+        .unwrap()
+}
+
+/// Spec §5.8 the kind-9 merge (§14.10 walkthrough 18, S6-1 #5): A and B
+/// remove the same lost key from one state; A's PUT wins and B's meets it
+/// (KeyFork). B is told the merge comes at its next unlock (KeyFork-SK-
+/// AUTO); that unlock merges with its own touch and password, no question
+/// and no second code, and uploads on A's record; at A the merge is a
+/// successor with no gate, taken at A's next unlock.
+#[test]
+fn two_removals_from_one_state_merge_at_the_next_unlock() {
+    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let three = credhash(&header(&a), 3);
+    a.here();
+    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    server.pass(&a, &id);
+    polls(&mut sa);
+    let ka = header(&a);
+    b.here();
+    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    let kb = header(&b);
+    server.pass(&b, &id);
+    assert_eq!(kview(&b, &id).unwrap().outcome, KeyOutcome::Conflict);
+    let told = polls(&mut sb);
+    assert!(
+        told.contains(&SyncNotice::KeyForkMerge { auto: true }),
+        "{told:?}"
+    );
+    assert_eq!(sb.removal_merge(), Some(crate::vault::RemovalMerge::Auto));
+    drop(sb);
+    // The next unlock.
+    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (mut sb, proof) = result.ok().unwrap();
+    assert!(sb.login_candidate(&proof).is_none());
+    let (f, seq) = sb.login_merge(&proof).unwrap();
+    merge_at_login(&mut sb, proof, &t, &f, seq);
+    let merged = header(&b);
+    assert_eq!(merged.kind, keyfile::Kind::Union);
+    assert_eq!(merged.epoch, ka.epoch.max(kb.epoch) + 1);
+    assert_eq!(numbers(&merged), [1, 2]);
+    assert!(merged.tombstones.iter().any(|x| x.credhash == three));
+    polls(&mut sb);
+    let bytes = kreq(&b).unwrap();
+    let req = parse_key_request(&bytes, &id).unwrap();
+    assert_eq!((req.op, req.base), (KeyOp::Put, server.top()));
+    server.pass(&b, &id);
+    polls(&mut sb);
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    // A: B's merge needs no gate, and is taken at A's next unlock.
+    a.here();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        sa.server_class(),
+        Some(KeyClass::Successor {
+            carry: false,
+            gate: None
+        })
+    );
+    drop(sa);
+    let (result, t) = login_proved(&a, OLD, &mut codes, &keys, 1);
+    let (mut sa, proof) = result.ok().unwrap();
+    assert!(sa.login_merge(&proof).is_none(), "the head never merges");
+    let (f, seq) = sa.login_candidate(&proof).unwrap();
+    merge_at_login(&mut sa, proof, &t, &f, seq);
+    assert_eq!(header(&a).state(), merged.state());
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §5.8 (S6-1 #5, S6-2 #5): a removal made with a new password on
+/// the other PC is merged only with [받기] (KeyFork-SK-MERGE), never at
+/// login; a merge whose other file did not open is remembered, and that
+/// file is then Refused{"위조된 연결"} with no merge offered.
+#[test]
+fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
+    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    a.here();
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let change = remove(&[3], Some(lost()), Some(NEW));
+    assert_eq!(
+        sa.rekey(r, Vec::new(), change, Consent::default(), false),
+        Ok(Rekeyed::Done)
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    b.here();
+    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    server.pass(&b, &id);
+    let told = polls(&mut sb);
+    assert!(
+        told.contains(&SyncNotice::KeyForkMerge { auto: false }),
+        "{told:?}"
+    );
+    drop(sb);
+    let (result, _) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (mut sb, proof) = result.ok().unwrap();
+    assert!(sb.login_merge(&proof).is_none());
+    let (f, _) = sb.server_key_file().unwrap();
+    sb.merge_failed(&f);
+    assert_eq!(
+        sb.server_class(),
+        Some(KeyClass::Refused(crate::vault::FORGED_LINK))
+    );
+    assert_eq!(sb.removal_merge(), None);
+    let told = polls(&mut sb);
+    assert!(
+        !told
+            .iter()
+            .any(|n| matches!(n, SyncNotice::KeyForkMerge { .. })),
+        "{told:?}"
+    );
+    set_kdf_profile(KdfProfile::Real);
+}
