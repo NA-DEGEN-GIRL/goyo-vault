@@ -192,6 +192,7 @@ AUTO_T = KS_T + 'auto_apply_takes_server_changes_with_no_gate_and_only_those'
 AUTO_REFUSES_T = KS_T + 'auto_apply_still_refuses_a_file_of_a_removed_key'
 AUTO_FORK_T = KS_T + 'auto_apply_never_joins_a_fork'
 NOTICE_T = KS_T + 'a_copy_under_another_pcs_new_key_points_to_the_server_key_file'
+KS_LATER = KS_T + 'keys_on_then_key_file_sync_reaches_a_password_only_pc'
 AUTO_ANCHOR_T = ANCHOR_T + 'auto_round_trips_and_is_kept'
 AUTO_UI_T = CEREMONY_T + 'server_key_changes_apply_by_themselves_once_the_server_is_trusted'
 AUTO_BOUND_T = KS_T + 'auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write'
@@ -273,9 +274,23 @@ ROWS = [
      [NOTICE_T, SYNC_T + 'copies_are_judged_by_their_key_first']),
     ('A a copy written under key-file sync points to the server key file', 11, 'feature',
      'lib', SYNC,
-     '                let server = cfg!(feature = "security-key") && flags & 2 != 0;',
+     '                let server = flags & 2 != 0 && self.keyed;',
      '                let server = false;',
-     [NOTICE_T, SYNC_T + 'copies_are_judged_by_their_key_first']),
+     [NOTICE_T]),
+    # Security keys turned on later, for a vault made without them: a
+    # password-only PC is pointed to USB (it has neither [받기…] nor an
+    # unlock touch), and takes a GOYOKS01 file with the transport of the
+    # touch that opened it.
+    ('A a password-only PC gets the USB advice for a key-file sync copy', 11, 'feature',
+     'lib', SYNC,
+     '                let server = flags & 2 != 0 && self.keyed;',
+     '                let server = flags & 2 != 0;',
+     [KS_LATER, SYNC_T + 'copies_are_judged_by_their_key_first']),
+    ('A a password-only PC takes a GOYOKS01 file with its opening touch', 11, 'feature',
+     'lib', ADOPT,
+     '                .or_else(|| plan.other.touched.as_ref().and_then(|t| t.transport));',
+     '                .or(None);',
+     [KS_LATER]),
     # Stage 4: the public checks, the gate and E5 (§14.11; forger tests of
     # the removed-key simulator, §14.10-5).
     ('P3 (a): a removed key listed live', 4, 'feature', 'lib', GATE,
@@ -1728,6 +1743,11 @@ ROWS = [
      '        file.is_none_or(|f| f == ours)',
      '        file.is_none_or(|_| true)',
      ['setup::tests::an_ignored_dedicated_key_is_refused']),
+    ('U goyo-sync asks a close sent from another thread from its queue', 11, 'both', 'sync',
+     SYNC_GUI,
+     '        0x10 if from_other_thread() => {',
+     '        0x10 if false && from_other_thread() => {',
+     ['gui::tests::closing_with_unsaved_changes_follows_the_answer']),
     ('U a goyo-sync file dialog that cannot open says so', 10, 'both', 'sync', SYNC_GUI,
      '                if picked.is_none() && pick_failed() {',
      '                if picked.is_none() && pick_failed() && false {',
@@ -1767,6 +1787,20 @@ ROWS = [
      '    crate::setup::install_command(remote, python).ok()?;\n',
      '',
      [FORCED_LINE_T]),
+    # Security keys turned on later (UI): what keys on means first, what
+    # the other PCs do afterwards, and a 0.8 key file in TOFU asks no code.
+    ('U keys on says what it means before S-ROTATE (UI)', 11, 'feature', 'bin', UI_SK,
+     '    let mut question = format!("{}\\n\\n{rotate}", tr(KEYSON_PLAN));',
+     '    let mut question = rotate.to_owned();',
+     [CEREMONY_T + 'keys_on_add_pair_reseed_and_off']),
+    ('U keys on tells what the other PCs do (UI)', 11, 'feature', 'bin', UI_SK,
+     '        done.more(tr(keys_on_others(synced)).to_owned())',
+     '        done',
+     [CEREMONY_T + 'keys_on_add_pair_reseed_and_off']),
+    ('U a 0.8 key file in TOFU shows no code field (UI)', 11, 'feature', 'bin', UI_SK,
+     '        if tofu && !legacy {\n            self.field(GATE_CODE',
+     '        if tofu {\n            self.field(GATE_CODE',
+     [BIN_T + 'a_0_8_key_file_waiting_for_trust_asks_no_code']),
     ('B2 the login runs the kind-9 merge (UI)', 8, 'feature', 'bin', UI_SK,
      '                    Some((file, seq)) => {\n                        removal = true;',
      '                    Some((file, seq)) => {\n                        removal = false;',

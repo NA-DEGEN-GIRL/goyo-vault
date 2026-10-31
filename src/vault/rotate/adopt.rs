@@ -875,10 +875,15 @@ impl Session {
         }
         // Key-file sync turned on here only with S-KEYSYNC-ON's yes, a
         // touch that stated its transport, and no off of this PC pending;
-        // the `ks` and `merged` this write records (spec §7.16).
+        // the `ks` and `merged` this write records (spec §7.16). A PC
+        // whose own key file has no keys touches none for its Reauth: the
+        // touch that opened the other file states it then.
         #[cfg(feature = "security-key")]
         let landing = {
-            if plan.preview.keysync_on && (!acks.keysync_on || r.transport().is_none()) {
+            let transport = r
+                .transport()
+                .or_else(|| plan.other.touched.as_ref().and_then(|t| t.transport));
+            if plan.preview.keysync_on && (!acks.keysync_on || transport.is_none()) {
                 return Err(if acks.keysync_on {
                     super::super::keysync::KEYSYNC_NOTRANSPORT
                 } else {

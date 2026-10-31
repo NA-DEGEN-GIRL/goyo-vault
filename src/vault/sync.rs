@@ -700,6 +700,11 @@ pub(super) struct Own<'a> {
     /// candidates this PC superseded, each with that candidate's state.
     #[cfg(feature = "security-key")]
     pub sup: &'a [super::anchor::Sup],
+    /// This PC's key file has security keys: only then does the Keys
+    /// screen offer [받기…] for the server's key file, and the unlock take
+    /// it with its touch (security-key build).
+    #[cfg(feature = "security-key")]
+    pub keyed: bool,
 }
 impl Own<'_> {
     /// What a vault file of this session adds to its plaintext.
@@ -775,7 +780,14 @@ impl Own<'_> {
                 // The security-key build opens a security-key file: only the
                 // default build is told it cannot (KeyChanged{hardware}).
                 let hardware = cfg!(not(feature = "security-key")) && flags & 1 != 0;
-                let server = cfg!(feature = "security-key") && flags & 2 != 0;
+                // A key file that came through the server is taken from
+                // there by a PC with keys; a password-only PC (one that
+                // never turned keys on) has neither [받기…] nor an unlock
+                // touch, so it gets the USB advice of KeyChanged.
+                #[cfg(feature = "security-key")]
+                let server = flags & 2 != 0 && self.keyed;
+                #[cfg(not(feature = "security-key"))]
+                let server = false;
                 return halt(Halt::UnknownKey {
                     newer,
                     hardware,
@@ -970,6 +982,8 @@ impl Session {
                 .vault
                 .as_ref()
                 .map_or(&[][..], |l| l.state.sup.as_slice()),
+            #[cfg(feature = "security-key")]
+            keyed: self.key_file.needs_security_key(),
         }
     }
     /// Whether no incoming copy is merged: a local rollback, and a changed
@@ -3098,16 +3112,17 @@ mod tests {
             let halt = Want::Halt;
             // A copy whose writer's key file needs a security key: the
             // default build cannot take that key file at any epoch (spec
-            // §2.18 #58); the security-key build judges it like any other,
-            // and one written under key-file sync (flags 3) at a later state
-            // is a change [받기…] or the next unlock takes (spec §2.30).
+            // §2.18 #58); the security-key build judges it like any other.
+            // One written under key-file sync (flags 3) at a later state is
+            // a change [받기…] or the next unlock takes on a PC with keys
+            // (spec §2.30, keysync.rs); this PC's key file has none, so it
+            // has neither and gets the USB advice all the same.
             #[cfg(not(feature = "security-key"))]
             let sk = |_newer: bool, _server: bool| halt(SyncNotice::KeyChanged { hardware: true });
             #[cfg(feature = "security-key")]
-            let sk = |newer: bool, server: bool| match (newer, server) {
-                (true, true) => halt(SyncNotice::KeyChangedServer),
-                (true, false) => halt(SyncNotice::KeyChanged { hardware: false }),
-                (false, _) => halt(SyncNotice::KeyFork),
+            let sk = |newer: bool, _server: bool| match newer {
+                true => halt(SyncNotice::KeyChanged { hardware: false }),
+                false => halt(SyncNotice::KeyFork),
             };
             // A GOYOVA03/04 header states an epoch of 1 at least.
             let at_own = if kf2 { own } else { state(1, own.tag) };

@@ -175,6 +175,13 @@ pub const REAUTH_AGAIN_BOTH: &str = "확인한 지 오래되어 한 번 더 확�
 pub const KEYSON_OLDFILES: &str = "비밀번호를 그대로 두면, 보안 키를 켜기 전에 만든 열쇠 파일과 그 백업(비밀번호만으로 열림)을 가진 사람은 누구나 이 비밀번호를 오프라인으로 계속 추측할 수 있고, 맞히면 남은 것은 등록한 보안 키(와 PIN)뿐입니다. 그 사본들을 지우거나 비밀번호도 바꾸세요.";
 pub const KEYS_ON_DONE: &str =
     "보안 키를 켰습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다.";
+/// S-KEYSON-PLAN: what keys on means, before S-ROTATE, for a vault made
+/// without keys (a user who never used them).
+pub const KEYSON_PLAN: &str = "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키 빌드여야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.";
+/// S-KEYSON-OTHERS: after keys on, what every other PC of the vault does.
+pub const KEYSON_OTHERS: &str = "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.";
+/// The same for a vault that syncs: those PCs halt until then.
+pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.";
 /// The same with one key, which has no other key to pair with.
 pub const KEYS_ON_DONE_ONE: &str = "보안 키를 켰습니다. 보안 키 1개가 등록되었습니다.";
 /// S-CODE-SK (spec §9.3), in the one-time dialog after a key change: the
@@ -427,6 +434,10 @@ pub const GATE_LATER_TEXT: &str = "바뀐 열쇠 파일을 확인하기 전에�
 pub const TOFU_TITLE: &str = "이 열쇠 파일 확인";
 /// S-TOFU, filled with the key file's own epoch.
 pub const TOFU: &str = "이 PC는 이 열쇠 파일(수정 {e})을 아직 확인하지 않았습니다. 다른 PC의 '열쇠 관리'에 지금 보이는 열쇠 확인 코드를 입력하세요. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다.";
+/// S-TOFU-LEGACY: S-TOFU and S-TOFU-PWONLY for a 0.8 key file, which has
+/// no key check code to type: most likely another PC turned security keys
+/// on, and this PC takes that key file once it trusts its own.
+pub const TOFU_LEGACY: &str = "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리 › 새 열쇠 파일 받기'로 그 PC의 새 열쇠 파일을 받으세요.";
 /// S-TOFU-PWONLY.
 pub const TOFU_PWONLY: &str = "이 열쇠 파일은 보안 키 없이 열리지만, 이 금고에는 보안 키를 쓴 흔적이 있습니다. 다른 PC에서 보안 키를 끈 것이 맞을 때만, 그 PC의 열쇠 확인 코드를 입력하세요.";
 /// S-TOFU-OTHEREPOCH, after the mismatch.
@@ -781,6 +792,9 @@ thread_local! {
     /// With TOFU_SHOWN: the banner as a session in TOFU shows it, and as
     /// one whose key file came from the server's key view when this is set.
     pub static TOFU_FETCHED_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// With TOFU_SHOWN: the banner of a GOYOKE03 key file (S-TOFU and
+    /// S-TOFU-PWONLY) for a session whose key file is a 0.8 one.
+    pub static TOFU_KF2_SHOWN: Cell<bool> = const { Cell::new(false) };
     /// What the review screen lists, set by a layout test in place of the
     /// session's merge log.
     pub static REVIEW_SHOWN: RefCell<Option<vault::ReviewList>> = const { RefCell::new(None) };
@@ -1345,8 +1359,20 @@ impl App {
         } else {
             (tofu, fetched)
         };
+        // A 0.8 key file has no key check code: no code field, and words
+        // that say what to do instead (S-TOFU-LEGACY).
+        let legacy = tofu
+            && !fetched
+            && matches!(
+                s.key_magic(),
+                Some(vault::keyfile::Magic::Ke01 | vault::keyfile::Magic::Ke02)
+            );
+        #[cfg(test)]
+        let legacy = legacy && !TOFU_KF2_SHOWN.with(Cell::get);
         let mut text = fill(TOFU, &[&s.key_state().epoch]);
-        if s.keys_overview().is_none() {
+        if legacy {
+            text = tr(TOFU_LEGACY).to_owned();
+        } else if s.keys_overview().is_none() {
             text = format!("{text}\r\n{}", tr(TOFU_PWONLY));
         }
         if fetched {
@@ -1363,12 +1389,22 @@ impl App {
             TOFU_TITLE
         };
         self.text(0, title, (CARD_X, 104, CARD_W, 26), strong, TONE_TEXT, 0);
-        self.text(0, &text, (CARD_X, 136, CARD_W, 154), small, TONE_DANGER, 0);
-        if tofu {
+        let text_h = if legacy { 232 } else { 154 };
+        self.text(
+            0,
+            &text,
+            (CARD_X, 136, CARD_W, text_h),
+            small,
+            TONE_DANGER,
+            0,
+        );
+        if tofu && !legacy {
             self.field(GATE_CODE, TOFU_CODE_LABEL, "", CARD_X, 298, CARD_W, false);
         }
         let ok = if tofu { TOFU_OK_LABEL } else { SAVE_STEP_LABEL };
-        self.button(TOFU_OK, ok, CARD_X, 376, 240, 40, theme::PRIMARY);
+        if !legacy {
+            self.button(TOFU_OK, ok, CARD_X, 376, 240, 40, theme::PRIMARY);
+        }
         self.button(
             TOFU_LOCK,
             TOFU_LOCK_LABEL,
@@ -2641,12 +2677,12 @@ fn keys_on_flow(h: Hwnd) -> crypto::Result<()> {
             s.badge().is_some(),
         ))
     })?;
-    let mut question = tr(if synced {
+    let rotate = tr(if synced {
         ROTATE_QUESTION_SYNCED
     } else {
         ROTATE_QUESTION
-    })
-    .to_owned();
+    });
+    let mut question = format!("{}\n\n{rotate}", tr(KEYSON_PLAN));
     if new_password.is_none() {
         question = format!("{question}\n\n{}", tr(KEYSON_OLDFILES));
     }
@@ -2676,7 +2712,7 @@ fn keys_on_flow(h: Hwnd) -> crypto::Result<()> {
         if !changed {
             done = done.more(tr(KEYSON_OLDFILES).to_owned());
         }
-        done
+        done.more(tr(keys_on_others(synced)).to_owned())
     };
     if let Some(told) = write(
         h,
@@ -2691,6 +2727,16 @@ fn keys_on_flow(h: Hwnd) -> crypto::Result<()> {
         tell_after(h, &told);
     }
     Ok(())
+}
+/// What every other PC of the vault does after keys on: take this PC's
+/// new key file by USB with its code and a touch, on the security-key
+/// build; a synced one has halted until then.
+fn keys_on_others(synced: bool) -> &'static str {
+    if synced {
+        KEYSON_OTHERS_SYNCED
+    } else {
+        KEYSON_OTHERS
+    }
 }
 /// Keys on's status lines (spec §9.2 keys on step 5): S-ONEKEY first in
 /// the danger tone with one key, then the done line with the password in
@@ -6557,6 +6603,17 @@ mod tests {
         assert_eq!(one.lines[1], format!("{KEYS_ON_DONE_ONE} {PASS_NEW}"));
         let two = keys_on_done(2, false);
         assert!(!two.danger && two.lines == [fill(KEYS_ON_DONE, &[&2])]);
+        // After keys on, every other PC takes the new key file by USB with
+        // the code and a touch, on the security-key build; a synced one has
+        // halted until then.
+        assert_eq!(keys_on_others(false), KEYSON_OTHERS);
+        assert_eq!(keys_on_others(true), KEYSON_OTHERS_SYNCED);
+        for text in [KEYSON_OTHERS, KEYSON_OTHERS_SYNCED, KEYSON_PLAN] {
+            assert!(text.contains("보안 키 빌드"), "{text}");
+            assert!(text.contains("새 열쇠 파일"), "{text}");
+        }
+        assert!(KEYSON_OTHERS_SYNCED.contains("동기화를 멈춥니다"));
+        assert!(!KEYSON_OTHERS.contains("동기화"));
     }
 
     /// The Keys screen's key-file sync line (spec §9.1, §7.15, §7.15a):

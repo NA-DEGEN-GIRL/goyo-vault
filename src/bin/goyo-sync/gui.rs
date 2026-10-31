@@ -173,9 +173,19 @@ fn ask(h: Hwnd, text: &str) -> bool {
 }
 #[cfg(test)]
 fn ask(_: Hwnd, text: &str) -> bool {
+    // The real box drops every answer given while this thread handles a
+    // message sent from another thread (confirm_proc): it could never be
+    // closed. Recorded so a test fails instead of hanging.
+    if from_other_thread() {
+        ASKED.with(|a| a.borrow_mut().push(format!("{UNANSWERABLE}{text}")));
+        return false;
+    }
     ASKED.with(|a| a.borrow_mut().push(text.to_owned()));
     modal(|| ANSWERS.with(|a| a.borrow_mut().pop_front().unwrap_or(false)))
 }
+/// Marks a question [`ask`] got where the user could not have answered it.
+#[cfg(test)]
+const UNANSWERABLE: &str = "(unanswerable) ";
 #[cfg(not(test))]
 fn tell(h: Hwnd, text: &str) {
     message_in(h, text, TITLE);
@@ -2606,6 +2616,17 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         // A close request while a dialog runs waits for it (the user cannot
         // reach the window meanwhile).
         0x10 if in_modal() => return 0,
+        // Sent from another thread (the taskbar's "close window", Task
+        // Manager): everything this thread does until the sender is
+        // answered still counts as sent from another thread, so the box
+        // below would drop the user's own 예/아니요 (confirm_proc) and never
+        // close. Ask again from the queue, outside that send.
+        0x10 if from_other_thread() => {
+            unsafe {
+                PostMessageW(h, 0x10, 0, 0);
+            }
+            return 0;
+        }
         0x10 => {
             match with_app(App::closing) {
                 Some(Some(ask)) => run_asks(h, Some(ask)),
@@ -3938,6 +3959,95 @@ mod tests {
         }
         pump();
         assert!(w.app(|a| a.busy.is_none()));
+    }
+
+    /// Closing with unsaved changes asks "저장하지 않고 닫을까요?": 예 closes
+    /// without saving, 아니요 keeps the window and what was typed. A close
+    /// sent from another thread (the taskbar's "close window", Task
+    /// Manager) is asked from the queue instead, where the box can be
+    /// answered; asked inside that send, the real box dropped both buttons
+    /// and the window could only be killed. Without changes it just closes.
+    #[test]
+    fn closing_with_unsaved_changes_follows_the_answer() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let question = tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?").to_owned();
+        let saved_config = |dir: &Path| {
+            std::fs::write(dir.join("vault.goyo"), b"never read").unwrap();
+            let fields = Fields {
+                host: "my-server".into(),
+                vaults: vec![dir.join("vault.goyo")],
+                ..Fields::default()
+            };
+            let (text, _) = setup::render(&fields).unwrap();
+            std::fs::write(dir.join(CONFIG), text).unwrap();
+        };
+        // Sends WM_CLOSE from another thread and pumps until it returns.
+        let close_from_another_thread = |h: Hwnd| {
+            let other = std::thread::spawn(move || unsafe { SendMessageW(h, 0x10, 0, 0) });
+            while !other.is_finished() {
+                pump();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            other.join().unwrap();
+            pump();
+        };
+        // Nothing changed: no question.
+        let w = Window::with("close-clean", saved_config);
+        assert!(!w.app(|a| {
+            a.read_fields();
+            a.dirty()
+        }));
+        unsafe {
+            window_proc(w.h, 0x10, 0, 0);
+        }
+        assert!(asked().is_empty());
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        drop(w);
+
+        for from_another_thread in [false, true] {
+            // 아니요: the window stays with the change, nothing is written.
+            let w = Window::with("close-no", saved_config);
+            let config_before = std::fs::read(w.t.0.join(CONFIG)).unwrap();
+            w.type_in(HOST, "other-server");
+            answer(false);
+            if from_another_thread {
+                close_from_another_thread(w.h);
+            } else {
+                unsafe {
+                    window_proc(w.h, 0x10, 0, 0);
+                }
+            }
+            assert_eq!(
+                asked(),
+                std::slice::from_ref(&question),
+                "another thread: {from_another_thread}"
+            );
+            assert_ne!(unsafe { IsWindow(w.h) }, 0);
+            assert_eq!(read_text(w.app(|a| a.handle(HOST))), "other-server");
+            assert!(w.app(|a| a.dirty()));
+            assert_eq!(std::fs::read(w.t.0.join(CONFIG)).unwrap(), config_before);
+            // Asked again, 예: closed, still without saving.
+            answer(true);
+            if from_another_thread {
+                close_from_another_thread(w.h);
+            } else {
+                unsafe {
+                    window_proc(w.h, 0x10, 0, 0);
+                }
+            }
+            assert_eq!(
+                asked(),
+                std::slice::from_ref(&question),
+                "another thread: {from_another_thread}"
+            );
+            assert_eq!(unsafe { IsWindow(w.h) }, 0, "예 did not close the window");
+            assert_eq!(std::fs::read(w.t.0.join(CONFIG)).unwrap(), config_before);
+            assert!(calls(&w.fake).iter().all(|c| c != "start"));
+            drop(w);
+        }
+        // Both answers were used.
+        assert!(ANSWERS.with(|a| a.borrow().is_empty()));
     }
 
     /// Builds each view with synthetic data and calls `visit` on it.

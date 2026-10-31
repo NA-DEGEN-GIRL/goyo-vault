@@ -2135,6 +2135,18 @@ pub const EN_SK: &[(&str, &str)] = &[
         "If the password stays, anyone with a key file made before security keys were on, or its backup (which opens with the password alone), can keep guessing this password offline, and once it is guessed only the registered keys (and PIN) remain. Delete those copies or change the password too.",
     ),
     (
+        "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키 빌드여야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.",
+        "With security keys on, every time this vault is opened you also plug in one registered security key, touch it and enter its PIN, besides the password.\n• Have every key you will register at this PC now (2 or more recommended). Windows opens three windows per key.\n• If you also use this vault on other PCs, Goyo Vault there must be the security-key build too, and afterwards each of those PCs must take this PC's new key file.",
+    ),
+    (
+        "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.",
+        "If you also use this vault on other PCs: on each of them, bring this PC's new key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.",
+    ),
+    (
+        "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.",
+        "This vault syncs. The other PCs stop syncing until they take this PC's new key file. On each of them, bring this key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.",
+    ),
+    (
         "보안 키를 켰습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다.",
         "Security keys are on. {n} security keys are registered and paired with each other.",
     ),
@@ -2255,6 +2267,10 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "이 열쇠 파일은 보안 키 없이 열리지만, 이 금고에는 보안 키를 쓴 흔적이 있습니다. 다른 PC에서 보안 키를 끈 것이 맞을 때만, 그 PC의 열쇠 확인 코드를 입력하세요.",
         "This key file opens without a security key, but this vault shows signs of security keys. Enter the other PC's key check code only if security keys really were turned off there.",
+    ),
+    (
+        "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리 › 새 열쇠 파일 받기'로 그 PC의 새 열쇠 파일을 받으세요.",
+        "This PC has not confirmed this key file yet. Until then, no entry is edited and nothing is uploaded. This vault shows signs of security keys, but this key file has the old (0.8) format, which no key check code can confirm.\r\nOnly if security keys were turned on on another PC and this is the key file this PC has been using: press 'Trust this key file without a code…' below, then take that PC's new key file with 'Key management › Receive a new key file'.",
     ),
     (
         "다른 PC의 코드가 다른 수정 번호(E…)로 시작하면, 이 열쇠 파일을 복사한 뒤 그 PC에서 열쇠를 다시 바꾼 것입니다. 그 PC의 지금 열쇠 파일을 다시 복사해 와서 여세요.",

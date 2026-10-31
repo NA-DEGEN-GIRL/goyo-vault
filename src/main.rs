@@ -6669,7 +6669,13 @@ mod tests {
             {
                 keys_ui::TOFU_SHOWN.with(|t| t.set(true));
                 app.build();
+                // This 0.8 key file: S-TOFU-LEGACY, no code field.
                 visit(&mut app, "vault-tofu");
+                // A GOYOKE03 one: S-TOFU and S-TOFU-PWONLY, the code field.
+                keys_ui::TOFU_KF2_SHOWN.with(|t| t.set(true));
+                app.build();
+                visit(&mut app, "vault-tofu-pwonly");
+                keys_ui::TOFU_KF2_SHOWN.with(|t| t.set(false));
                 // A key file from the server: its title and the steps left.
                 keys_ui::TOFU_FETCHED_SHOWN.with(|t| t.set(true));
                 app.build();
@@ -7058,6 +7064,55 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         vault::set_anchor_dir(Some(dir.join("anchor")));
         dir
+    }
+    /// A 0.8 key file that waits for trust (a vault with signs of security
+    /// keys, most likely turned on at another PC) has no key check code: the
+    /// banner says what to do instead (S-TOFU-LEGACY) and shows no code
+    /// field and no [코드 확인], whose code could never match; the trust
+    /// without a code stays, behind its own question. A GOYOKE03 key file
+    /// keeps S-TOFU-PWONLY and the code field.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn a_0_8_key_file_waiting_for_trust_asks_no_code() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let dir = test_dir("tofu-legacy");
+        let session = synthetic_session(&dir, "synthetic layout password");
+        assert!(matches!(
+            session.key_magic(),
+            Some(vault::keyfile::Magic::Ke01 | vault::keyfile::Magic::Ke02)
+        ));
+        unsafe {
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(h, 0);
+            let mut app = App::new(h);
+            app.session = Some(session);
+            app.screen = Screen::Vault;
+            keys_ui::TOFU_SHOWN.with(|t| t.set(true));
+            app.build();
+            let texts =
+                |app: &App| -> Vec<String> { app.children.iter().map(|c| caption(*c)).collect() };
+            assert!(texts(&app).contains(&keys_ui::TOFU_LEGACY.to_owned()));
+            assert!(!texts(&app).iter().any(|t| t.contains(keys_ui::TOFU_PWONLY)));
+            assert_eq!(app.handle(keys_ui::GATE_CODE), 0);
+            assert_eq!(app.handle(keys_ui::TOFU_OK), 0);
+            assert_ne!(app.handle(keys_ui::TOFU_NOPC), 0);
+            assert_ne!(app.handle(keys_ui::TOFU_LOCK), 0);
+            keys_ui::TOFU_KF2_SHOWN.with(|t| t.set(true));
+            app.build();
+            assert!(
+                texts(&app)
+                    .iter()
+                    .any(|t| t.ends_with(keys_ui::TOFU_PWONLY))
+            );
+            assert_ne!(app.handle(keys_ui::GATE_CODE), 0);
+            assert_ne!(app.handle(keys_ui::TOFU_OK), 0);
+            keys_ui::TOFU_KF2_SHOWN.with(|t| t.set(false));
+            keys_ui::TOFU_SHOWN.with(|t| t.set(false));
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
     /// Every label's text fits its box at this machine's DPI, in both
     /// languages: a STATIC clips whatever does not fit and an owner-drawn
@@ -12597,12 +12652,35 @@ mod tests {
                     script.plan(&[Some(k2); 3]);
                     return true;
                 }
-                text.starts_with("열쇠를 바꿉니다.")
+                text.starts_with(keys_ui::KEYSON_PLAN)
+            });
+            let told = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = told.clone();
+            every_input(move |_, text, _| {
+                record.borrow_mut().push(text.to_owned());
+                InputAnswer::Accept { checked: false }
             });
             press(h, keys_ui::KEY_ON);
             stop_answers();
+            INPUT_ANSWER.with(|i| i.borrow_mut().take());
+            // What keys on means first (S-KEYSON-PLAN: the key at every
+            // unlock, the keys at hand, the other PCs), then S-ROTATE.
+            assert_eq!(
+                asked.borrow()[0],
+                format!(
+                    "{}
+
+{ROTATE_QUESTION}",
+                    keys_ui::KEYSON_PLAN
+                )
+            );
             assert_eq!(asked.borrow().last().unwrap(), BACKUP_QUESTION);
             asked.borrow_mut().clear();
+            // After S-BACKUP, once: what every other PC of the vault does,
+            // then the code (a vault that does not sync).
+            assert_eq!(told.borrow().len(), 1);
+            assert!(told.borrow()[0].starts_with(keys_ui::KEYSON_OTHERS));
+            assert!(!told.borrow()[0].contains(keys_ui::KEYSON_OTHERS_SYNCED));
             let o = overview().expect("keys on");
             assert!(o.pin && numbers(&Some(o.clone())) == [1, 2] && o.full == [1, 2]);
             assert!(status().starts_with(&fill(keys_ui::KEYS_ON_DONE, &[&2])));

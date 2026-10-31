@@ -2453,3 +2453,144 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
     assert_eq!(header(&b).state(), served.header().unwrap().state());
     set_kdf_profile(KdfProfile::Real);
 }
+
+/// A vault made without security keys and synced on two PCs (from a 0.8
+/// pair and from a GOYOKE03): A turns keys on, then key-file sync on. B,
+/// still on its password-only key file, has neither [받기…] nor an unlock
+/// touch, so it is told the USB advice (KeyChanged), never KeyChangedServer;
+/// it takes A's GOYOKS01 file from the server's key view or by USB behind
+/// A's code (G1), the touch of one of A's keys stating the transport its
+/// password-only Reauth cannot, and syncs again: both PCs hold the same
+/// key-file state, entries and check code, and B's own edit goes up.
+#[test]
+fn keys_on_then_key_file_sync_reaches_a_password_only_pc() {
+    for kf2 in [false, true] {
+        for usb in [false, true] {
+            keys_on_then_key_file_sync(kf2, usb);
+        }
+    }
+    set_kdf_profile(KdfProfile::Real);
+}
+fn keys_on_then_key_file_sync(kf2: bool, usb: bool) {
+    let case = format!("kf2={kf2} usb={usb}");
+    let a = Pc::new();
+    let (mut sa, mut codes) = setup(&a, kf2, false, true);
+    let id = sa.id;
+    // B: copies of A's pair, syncing with a helper that does key-file sync.
+    let b = Pc::new();
+    carry(&a, &b);
+    fs::create_dir(dir(&b)).unwrap();
+    status(&b);
+    let mut sb = login(&b, OLD, &mut codes).unwrap();
+    sb.enable_sync().unwrap();
+    polls(&mut sb);
+    drop(sb);
+
+    // A: keys on (PIN mode, as the app registers them), its gate question
+    // answered yes; then key-file sync on, once goyo-sync has looked.
+    a.here();
+    let mut keys = Keys::new();
+    let new_keys = vec![keys.register(&id, 1, true), keys.register(&id, 2, true)];
+    let (otp, typed) = codes.next();
+    let r = sa.reauth(OLD, Some((&otp, typed)), None).unwrap();
+    let on = Change::KeysOn {
+        pin: true,
+        keys: new_keys,
+        new_password: None,
+    };
+    assert_eq!(
+        sa.rekey(r, Vec::new(), on, Consent::default(), true),
+        Ok(Rekeyed::Done),
+        "{case}"
+    );
+    let mut server = KeyServer::default();
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        Ok(Rekeyed::Done),
+        "{case}"
+    );
+    server.pass(&a, &id);
+    polls(&mut sa);
+    assert_eq!(sa.server_class(), Some(KeyClass::Equal), "{case}");
+    assert_eq!(header(&a).magic, Magic::Ks01, "{case}");
+    assert!(uploads(&a, &mut sa, "from a"), "{case}");
+    let out = fs::read(dir(&a).join(OUTGOING)).unwrap();
+    let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+    let incoming = syncfile::render_incoming(5, copy).unwrap();
+
+    // B: goyo-sync brought the vault copy and the key view.
+    b.here();
+    server.pass(&b, &id);
+    syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
+    let mut sb = login(&b, OLD, &mut codes).unwrap();
+    let mut told: Vec<SyncNotice> = sb.take_unlock_notice().into_iter().collect();
+    told.extend(polls(&mut sb));
+    assert!(
+        told.contains(&SyncNotice::KeyChanged { hardware: false }),
+        "{case}: {told:?}"
+    );
+    assert!(
+        !told.contains(&SyncNotice::KeyChangedServer),
+        "{case}: {told:?}"
+    );
+    // The server's key file, or A's on a stick, behind A's code, with a
+    // touch of one of A's keys.
+    let (f, seq) = sb.server_key_file().expect("the server's key file");
+    let (f, source) = if usb {
+        let path = b.file("from-a.goyokey");
+        fs::copy(a.key(), &path).unwrap();
+        (KeyFile::read(&path).unwrap(), Source::File(path))
+    } else {
+        (f, Source::Server { seq })
+    };
+    let check = sb.adopt_check(&f, source).unwrap();
+    assert_eq!(
+        (check.class, check.keys.gate),
+        (AdoptClass::Successor, Some(GateKind::G1)),
+        "{case}"
+    );
+    let (otp, typed) = codes.next();
+    let r = sb.reauth(OLD, Some((&otp, typed)), None).unwrap();
+    let t = touch_other(&f, &keys, 2);
+    let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
+    let pass = GatePass::G1Passed {
+        code: code_of(&sa),
+        epoch: check.other.epoch,
+        tag: check.other.tag,
+    };
+    let plan = sb
+        .adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both)
+        .unwrap();
+    let acks = acks(plan.preview(), ForkOption::Both);
+    sb.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
+        .unwrap();
+    assert!(!sb.tofu(), "{case}");
+    assert_eq!(header(&b).state(), header(&a).state(), "{case}");
+    assert_eq!(header(&b).magic, Magic::Ks01, "{case}");
+    // Synced again: the copy merges, B's edit goes up.
+    let told = polls(&mut sb);
+    assert!(
+        !told.iter().any(|n| matches!(
+            n,
+            SyncNotice::KeyChangedServer | SyncNotice::KeyChanged { .. } | SyncNotice::KeyFork
+        )),
+        "{case}: {told:?}"
+    );
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal), "{case}");
+    assert!(has(&sb, "from a"), "{case}");
+    assert!(uploads(&b, &mut sb, "from b"), "{case}");
+    let out = fs::read(dir(&b).join(OUTGOING)).unwrap();
+    let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+    let incoming = syncfile::render_incoming(6, copy).unwrap();
+    a.here();
+    syncfile::replace_file(&dir(&a).join(syncfile::INCOMING), &incoming).unwrap();
+    polls(&mut sa);
+    assert!(has(&sa, "from b"), "{case}");
+    assert_eq!(sa.check_code(), sb.check_code(), "{case}");
+    drop(sb);
+    // B's pair now opens with a key.
+    let s = open(&b, OLD, &mut codes, &keys, 1).unwrap();
+    assert!(has(&s, "from b"), "{case}");
+}

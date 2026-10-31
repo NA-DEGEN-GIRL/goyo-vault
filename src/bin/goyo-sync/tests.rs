@@ -2049,7 +2049,11 @@ fn a_key_file_is_never_uploaded() {
     // The gate on its own.
     let id = [0xDD; 16];
     let path = pc.dir.join(OUTGOING);
+    // What the last refusal left there: the junction, or the file symlink
+    // where Windows lets this account make one (else the write below goes
+    // through it into the key file).
     let _ = fs::remove_dir(&path);
+    let _ = fs::remove_file(&path);
     fs::write(&path, render_outgoing(0, &blob(&id, 1)).unwrap()).unwrap();
     assert!(matches!(gate(&path, Some(&id)), Gate::Ok(g) if g.id == id && g.base == 0));
     assert!(matches!(

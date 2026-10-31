@@ -1913,6 +1913,8 @@ pub(in crate::vault) struct Touched {
     credhash: [u8; 16],
     output: Box<Key>,
     broken: Vec<([u8; 4], [u8; 4])>,
+    /// The transport the touch stated (USB or NFC), or None.
+    pub(super) transport: Option<u32>,
 }
 /// A union planned in memory (spec §5.8), for the preview and the write.
 pub(super) struct UnionPlan {
@@ -1998,6 +2000,7 @@ impl Session {
             credhash: slot.credhash,
             output: super::super::boxed(out),
             broken,
+            transport: touch.transport,
         })
     }
     /// The successor re-seal of a key file with security keys (spec §5.8):
@@ -2572,8 +2575,8 @@ mod tests {
         not_a_failure, prepare, prepare_restore, refusal_values,
     };
     use super::super::tests::{
-        Codes, GAPS, LANDED, NEW, OLD, POINTS, Pc, anchor_doc, consistent, entry, files, notices,
-        secrets, set_before, setup,
+        Codes, GAPS, LANDED, NEW, OLD, POINTS, Pc, anchor_doc, consistent, entry, files, login,
+        notices, secrets, set_before, setup,
     };
     use super::super::{CORRUPT, GATE_STALE};
     use super::*;
@@ -3554,6 +3557,150 @@ mod tests {
         set_kdf_profile(KdfProfile::Real);
     }
 
+    /// A vault made without security keys that turns them on later (spec
+    /// §5.5 keys on, §14.5): from a 0.8 pair (GOYOKE01 or GOYOKE02 with
+    /// GOYOVA01/02, never changed) and from a GOYOKE03 after a password
+    /// change, with and without an OTP, the password kept or changed. The
+    /// entries, the OTP secret, the vault ID and the ID key stay; the data
+    /// key changes, so the key file from before opens nothing written after
+    /// it; the new key file asks for a key and opens with either one. Keys
+    /// off then brings it back to password-only (GOYOKE03) with every
+    /// entry, the one added while keys were on too.
+    #[test]
+    fn a_vault_made_without_keys_turns_keys_on_and_off_again() {
+        for kf2 in [false, true] {
+            for with_otp in [false, true] {
+                for new_password in [false, true] {
+                    keys_on_later(kf2, with_otp, new_password);
+                }
+            }
+        }
+        set_kdf_profile(KdfProfile::Real);
+    }
+    fn keys_on_later(kf2: bool, with_otp: bool, new_password: bool) {
+        let case = format!("kf2={kf2} otp={with_otp} new_password={new_password}");
+        let pc = Pc::new();
+        let (mut s, mut codes) = setup(&pc, kf2, with_otp, false);
+        let id = s.id;
+        let id_key = *s.keys.id_key();
+        let before = secrets(&s);
+        let old_key = fs::read(pc.key()).unwrap();
+        let old_vault = fs::read(pc.vault()).unwrap();
+        // What the user had: a 0.8 pair, or GOYOKE03 after a change.
+        let (key_magic, vault_magics): (&[u8], [&[u8]; 2]) = match (kf2, with_otp) {
+            (false, true) => (b"GOYOKE01", [b"GOYOVA01", b"GOYOVA02"]),
+            (false, false) => (b"GOYOKE02", [b"GOYOVA01", b"GOYOVA02"]),
+            (true, _) => (b"GOYOKE03", [b"GOYOVA03", b"GOYOVA04"]),
+        };
+        assert_eq!(&old_key[..8], key_magic, "{case}");
+        assert!(vault_magics.contains(&&old_vault[..8]), "{case}");
+        assert!(s.key_file.header().is_none_or(|h| h.slots.is_empty()));
+        // Each step types new OTP codes, minutes apart.
+        let later = |codes: &mut Codes| {
+            otp::shift(180);
+            codes.at = codes.at.max(otp::now().unwrap() - 150);
+        };
+        let mut keys = Keys::new();
+        let new: Vec<NewKey> = (1..=2).map(|k| keys.register(&id, k, false)).collect();
+        later(&mut codes);
+        let (code, typed) = codes.next();
+        let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+        let change = Change::KeysOn {
+            pin: false,
+            keys: new,
+            new_password: new_password.then(|| Zeroizing::new(NEW.to_owned())),
+        };
+        assert_eq!(
+            s.rekey(r, Vec::new(), change, Consent::default(), false),
+            Ok(Rekeyed::Done),
+            "{case}"
+        );
+        let on = header(&pc);
+        assert_eq!((on.magic, on.kind), (Magic::Kh01, Kind::KeysOn), "{case}");
+        assert_eq!(numbers(&on), [1, 2], "{case}");
+        assert_eq!(on.vault_id, id, "{case}");
+        let vault = fs::read(pc.vault()).unwrap();
+        assert!(
+            [&b"GOYOVA03"[..], b"GOYOVA04"].contains(&&vault[..8]),
+            "{case}"
+        );
+        assert_eq!(secrets(&s), before, "{case}");
+        assert_eq!(s.keys.id_key(), &id_key, "{case}");
+        assert_eq!(s.uses_otp(), with_otp, "{case}");
+        let line = pc.lines(&id).vault.unwrap();
+        assert!(line.state.hardware() && line.state.flags.t, "{case}");
+        consistent(&pc, &s);
+        drop(s);
+        // The old key file opens nothing written now (I4).
+        let old_opens = |vault: &[u8]| {
+            let b = opened(&old_key, OLD, &keys, 1).bundle;
+            b.keys()
+                .iter()
+                .any(|dk| decode_data(&id, dk, b.id_key(), vault).is_ok())
+        };
+        assert!(old_opens(&old_vault), "{case}");
+        assert!(!old_opens(&vault), "{case}");
+        // The new pair asks for a key; the old password fails when it
+        // changed; either key opens it.
+        let (right, wrong) = if new_password { (NEW, OLD) } else { (OLD, NEW) };
+        later(&mut codes);
+        assert_eq!(
+            open(&pc, wrong, &mut codes, &keys, 1).err(),
+            Some(AUTH_ERROR),
+            "{case}"
+        );
+        pc.here();
+        let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
+        assert!(prepared.unlock_request(0).is_some(), "{case}: no key asked");
+        drop(prepared);
+        for number in [2, 1] {
+            let mut s = open(&pc, right, &mut codes, &keys, number)
+                .unwrap_or_else(|e| panic!("{case}: key {number}: {e}"));
+            assert!(notices(&mut s).is_empty(), "{case}");
+            assert_eq!(secrets(&s), before, "{case}");
+            assert_eq!(s.id, id, "{case}");
+        }
+        // Used with keys on: an entry added.
+        later(&mut codes);
+        let mut s = open(&pc, right, &mut codes, &keys, 1).unwrap();
+        s.put(None, entry("three")).unwrap();
+        let with_three = secrets(&s);
+        // Keys off: password-only again (GOYOKE03), every entry kept.
+        let r = reauth(&mut s, right, &mut codes, &keys, 2).unwrap();
+        assert_eq!(
+            s.rekey(r, Vec::new(), Change::KeysOff, Consent::default(), false),
+            Ok(Rekeyed::Done),
+            "{case}"
+        );
+        let off = header(&pc);
+        assert_eq!(
+            (off.magic, off.kind, off.epoch),
+            (Magic::Ke03, Kind::KeysOff, on.epoch + 1),
+            "{case}"
+        );
+        assert!(off.slots.is_empty() && off.tombstones.len() == 2, "{case}");
+        assert_eq!(secrets(&s), with_three, "{case}");
+        assert_eq!(s.keys.id_key(), &id_key, "{case}");
+        assert!(!pc.lines(&id).vault.unwrap().state.hardware(), "{case}");
+        let keyed = fs::read(pc.key()).unwrap();
+        drop(s);
+        // Opens with the password alone (no key asked), the OTP kept.
+        later(&mut codes);
+        pc.here();
+        let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
+        assert!(prepared.unlock_request(0).is_none(), "{case}");
+        drop(prepared);
+        let mut s = login(&pc, right, &mut codes).unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert!(notices(&mut s).is_empty(), "{case}");
+        assert_eq!(secrets(&s), with_three, "{case}");
+        assert_eq!(s.uses_otp(), with_otp, "{case}");
+        assert_eq!(s.keys.id_key(), &id_key, "{case}");
+        assert_eq!(fs::read(pc.key()).unwrap(), keyed, "{case}");
+        drop(s);
+        // The key file from before keys on opens nothing keys off wrote.
+        assert!(!old_opens(&fs::read(pc.vault()).unwrap()), "{case}");
+    }
+
     /// Plants in place of `s`'s key file (three keys) one at the next epoch
     /// whose pair record PR(2,3) is garbage: what a no-gate file another PC
     /// took could carry (spec §14.4-19). Same keys, password and S-wraps
@@ -3887,7 +4034,10 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum What {
         Password,
+        /// Keys on from a GOYOKE03 key file (a password change made it).
         KeysOn,
+        /// Keys on from a 0.8 pair (GOYOKE01/02 and GOYOVA01/02).
+        KeysOn08,
         AddKey,
         /// An added key paired with the Reauth's key alone.
         AddKeyAlone,
@@ -3911,7 +4061,7 @@ mod tests {
         fn new_password(self) -> bool {
             matches!(
                 self,
-                Self::Password | Self::KeysOn | Self::Remove | Self::RemoveTwo
+                Self::Password | Self::KeysOn | Self::KeysOn08 | Self::Remove | Self::RemoveTwo
             )
         }
         /// The change keeps the data key: no V_probe, no S1.
@@ -3953,7 +4103,7 @@ mod tests {
                 Vec::new(),
                 password(NEW),
             ),
-            What::KeysOn => {
+            What::KeysOn | What::KeysOn08 => {
                 let new_keys = vec![keys.register(&id, 1, false), keys.register(&id, 2, false)];
                 let (code, typed) = codes.next();
                 let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
@@ -4074,8 +4224,8 @@ mod tests {
     fn crash(what: What, point: &'static str, with_otp: bool, sync: bool) {
         let case = format!("{what:?} {point} otp={with_otp} sync={sync}");
         let pc = Pc::new();
-        let (mut s, mut codes, mut keys) = if what == What::KeysOn {
-            let (s, codes) = setup(&pc, true, with_otp, sync);
+        let (mut s, mut codes, mut keys) = if matches!(what, What::KeysOn | What::KeysOn08) {
+            let (s, codes) = setup(&pc, what == What::KeysOn, with_otp, sync);
             (s, codes, Keys::new())
         } else if what.keysync() {
             create_with(&pc, 3, with_otp, sync, true)
@@ -4088,7 +4238,9 @@ mod tests {
         }
         let before = secrets(&s);
         let old_key = fs::read(pc.key()).unwrap();
-        let had_anchor = !pc.anchor().is_empty();
+        // Keys on rewrites the anchor's lines before S0 (S45-1 #2): a 0.8
+        // pair's first anchor write is not its pending line's either.
+        let had_anchor = !pc.anchor().is_empty() || what == What::KeysOn08;
         let (r, extra, change) = planned(what, &mut s, &mut codes, &mut keys);
         let last = s.last;
         let gap = GAPS
@@ -4101,6 +4253,7 @@ mod tests {
         assert_eq!(result.map(|_| ()), Err(SIMULATED_CRASH), "{case}");
         assert_eq!(CRASH.with(|c| c.get()), None, "{case}: point not reached");
         assert_eq!(THEN.with(|t| t.take()), None, "{case}: gap not reached");
+        assert_eq!(pc.anchor().is_empty(), !had_anchor, "{case}");
         drop(s);
         let landed = LANDED.contains(&point) || matches!(point, "S2.gap" | "S3.gap");
         let (right, wrong) = if landed && what.new_password() {
@@ -4164,18 +4317,28 @@ mod tests {
         consistent(&pc, &s);
         assert!(pc.temps(&pc.key()).is_empty(), "{case}");
         assert!(pc.temps(&pc.vault()).is_empty(), "{case}");
-        let k = header(&pc);
+        // A 0.8 pair whose keys on never landed keeps its 0.8 key file,
+        // which has no header.
+        let k = KeyFile::read(&pc.key()).unwrap().header().cloned();
+        assert_eq!(k.is_none(), what == What::KeysOn08 && !landed, "{case}");
         assert_eq!(fs::read(pc.key()).unwrap() != old_key, landed, "{case}");
         let lines = pc.lines(&id);
         assert!(lines.pending.is_none(), "{case}");
-        let line = lines.vault.clone().expect("a confirmed line");
-        assert_eq!(line.state.key_state(), s.key_state(), "{case}");
-        assert_eq!(line.vkey, Some(k.current_key_id()), "{case}");
-        assert_eq!(line.state.hardware(), !k.slots.is_empty(), "{case}");
+        match &k {
+            Some(k) => {
+                let line = lines.vault.clone().expect("a confirmed line");
+                assert_eq!(line.state.key_state(), s.key_state(), "{case}");
+                assert_eq!(line.vkey, Some(k.current_key_id()), "{case}");
+                assert_eq!(line.state.hardware(), !k.slots.is_empty(), "{case}");
+            }
+            // Back to the 0.8 pair as it was: as in 0.8, no line.
+            None => assert!(lines.vault.is_none(), "{case}: a 0.8 session wrote a line"),
+        }
         assert!(anchor_doc(&pc).is_clean(), "{case}");
         // C-Q, C10, C12 and I10 (spec §5.6, §14.5): key-file sync's `ks`
         // and `kreq` after the recovery unlock and its first poll.
         if what.keysync() {
+            let k = k.as_ref().expect("a key file with keys");
             s.poll_sync();
             let dir = syncfile::sync_dir(&pc.vault()).unwrap();
             let req = fs::read(dir.join(syncfile::KEY_REQUEST)).ok();
@@ -4236,7 +4399,7 @@ mod tests {
         }
         drop(s);
         // I15: every live key that is not suspended opens the key file.
-        if !with_otp {
+        if !with_otp && let Some(k) = &k {
             for (j, slot) in k.slots.iter().enumerate() {
                 if (k.suspended >> j) & 1 == 0 {
                     let s = open(&pc, right, &mut codes, &keys, slot.number);
@@ -4265,6 +4428,7 @@ mod tests {
         for what in [
             What::Password,
             What::KeysOn,
+            What::KeysOn08,
             What::AddKey,
             What::AddKeyAlone,
             What::Remove,
@@ -5690,6 +5854,185 @@ mod tests {
                 assert!(pc.lines(&id).vault.unwrap().state.flags.t);
             }
             set_kdf_profile(KdfProfile::Real);
+        }
+        /// Spec §7.4, §7.15a (a vault made without keys, synced on two
+        /// PCs): A turns security keys on. B's next poll finds the server
+        /// copy under a key it does not hold and halts with the USB advice
+        /// (KeyChanged), its own edit kept on B; B takes A's key file by
+        /// USB ("새 열쇠 파일 받기") behind A's code (G1), then the halted
+        /// copy merges, B's edit goes up, and both PCs hold the same
+        /// entries and check code; B then opens only with a key. From a
+        /// 0.8 pair and from a GOYOKE03.
+        #[test]
+        fn a_synced_pc_without_keys_halts_and_takes_keys_on_by_usb() {
+            for kf2 in [false, true] {
+                synced_keys_on_by_usb(kf2);
+            }
+            set_kdf_profile(KdfProfile::Real);
+        }
+        fn synced_keys_on_by_usb(kf2: bool) {
+            use crate::vault::SyncNotice as Notice;
+            let case = format!("kf2={kf2}");
+            let polls = |s: &mut Session| -> Vec<Notice> {
+                (0..5)
+                    .filter_map(|_| s.poll_sync().and_then(|e| e.notice))
+                    .collect()
+            };
+            let deliver = |from: &Pc, to: &Pc, version: u64| {
+                let out = fs::read(sync_dir(from).join(syncfile::OUTGOING)).unwrap();
+                let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+                let incoming = syncfile::render_incoming(version, copy).unwrap();
+                syncfile::replace_file(&sync_dir(to).join(syncfile::INCOMING), &incoming).unwrap();
+            };
+            let a = Pc::new();
+            let (mut sa, mut codes) = setup(&a, kf2, false, true);
+            let id = sa.id;
+            let k_before = fs::read(a.key()).unwrap();
+            // B: copies of A's pair, with its own sync folder.
+            let b = Pc::new();
+            carry(&a, &b);
+            fs::create_dir(sync_dir(&b)).unwrap();
+            let now = otp::now().unwrap();
+            let status = syncfile::render_status(now, now, syncfile::SyncState::Ok);
+            syncfile::replace_file(&sync_dir(&b).join(syncfile::STATUS), &status).unwrap();
+            let mut sb = login(&b, OLD, &mut codes).unwrap();
+            assert!(!sb.tofu(), "{case}");
+            sb.enable_sync().unwrap();
+            polls(&mut sb);
+            drop(sb);
+
+            // A: keys on, then an edit, uploaded under the new data key.
+            a.here();
+            let mut keys = Keys::new();
+            let new_keys = vec![keys.register(&id, 1, false), keys.register(&id, 2, false)];
+            let (otp, typed) = codes.next();
+            let r = sa.reauth(OLD, Some((&otp, typed)), None).unwrap();
+            let on = Change::KeysOn {
+                pin: false,
+                keys: new_keys,
+                new_password: None,
+            };
+            // Its gate question (the server not seen yet) answered yes.
+            assert_eq!(
+                sa.rekey(r, Vec::new(), on, Consent::default(), true),
+                Ok(Rekeyed::Done),
+                "{case}"
+            );
+            sa.put(None, entry("from a")).unwrap();
+            let ka = fs::read(a.key()).unwrap();
+            deliver(&a, &b, 2);
+
+            // B: halted with the USB advice; its edit stays on B.
+            // The unlock found the copy: told once, by the unlock.
+            let mut sb = login(&b, OLD, &mut codes).unwrap();
+            let mut told: Vec<Notice> = sb.take_unlock_notice().into_iter().collect();
+            told.extend(polls(&mut sb));
+            assert!(sb.halted_head().is_some(), "{case}");
+            assert!(
+                told.contains(&Notice::KeyChanged { hardware: false }),
+                "{case}: {told:?}"
+            );
+            // A 0.8 PC keeps no record of its key file, so a copy with keys
+            // makes its unlock a bootstrap (round 2, finding 10): no edit
+            // before the code. A GOYOKE03 PC has its line: it edits on, and
+            // nothing goes up while halted.
+            assert_eq!(sb.tofu(), !kf2, "{case}");
+            let _ = fs::remove_file(sync_dir(&b).join(syncfile::OUTGOING));
+            if kf2 {
+                sb.put(None, entry("from b")).unwrap();
+            } else {
+                assert_eq!(
+                    sb.put(None, entry("from b")).err(),
+                    Some(TOFU_HELD),
+                    "{case}"
+                );
+            }
+            polls(&mut sb);
+            assert!(
+                !sync_dir(&b).join(syncfile::OUTGOING).exists(),
+                "{case}: uploaded while halted"
+            );
+            assert!(!secrets(&sb).contains(&"from a".to_owned()), "{case}");
+            // The old key file is no way into A's copy.
+            let old = file(&k_before).open(OLD, None).unwrap();
+            let out = fs::read(sync_dir(&a).join(syncfile::OUTGOING)).unwrap();
+            let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+            assert!(
+                old.bundle
+                    .keys()
+                    .iter()
+                    .all(|dk| decode_data(&id, dk, old.bundle.id_key(), copy).is_err()),
+                "{case}"
+            );
+
+            // "새 열쇠 파일 받기" with A's key file: G1, A's code.
+            let f = file(&ka);
+            let check = check(&sb, &ka).unwrap();
+            assert_eq!(
+                (check.class, check.keys.gate),
+                (AdoptClass::Successor, Some(GateKind::G1)),
+                "{case}"
+            );
+            let (otp, typed) = codes.next();
+            let r = sb.reauth(OLD, Some((&otp, typed)), None).unwrap();
+            let t = touch_other(&f, &keys, 2);
+            let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
+            let pass = GatePass::G1Passed {
+                code: code_of(&sa),
+                epoch: check.other.epoch,
+                tag: check.other.tag,
+            };
+            let plan = sb
+                .adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both)
+                .unwrap();
+            let acks = acks(plan.preview(), ForkOption::Both);
+            sb.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
+                .unwrap();
+            assert_eq!(header(&b).state(), header(&a).state(), "{case}");
+            assert_eq!(sb.key_state(), sa.key_state(), "{case}");
+            assert!(b.lines(&id).vault.unwrap().state.hardware(), "{case}");
+            assert!(!sb.tofu(), "{case}");
+            if !kf2 {
+                sb.put(None, entry("from b")).unwrap();
+            }
+
+            // The halt lifts: A's copy merges and B's state goes up.
+            deliver(&a, &b, 2);
+            let told = polls(&mut sb);
+            assert!(
+                !told
+                    .iter()
+                    .any(|n| matches!(n, Notice::KeyChanged { .. } | Notice::KeyFork)),
+                "{case}: {told:?}"
+            );
+            for title in ["one", "two", "from a", "from b"] {
+                assert!(secrets(&sb).contains(&title.to_owned()), "{case}: {title}");
+            }
+            assert!(sync_dir(&b).join(syncfile::OUTGOING).exists(), "{case}");
+            deliver(&b, &a, 3);
+            a.here();
+            polls(&mut sa);
+            let sorted = |s: &Session| {
+                let mut v = secrets(s);
+                v.sort();
+                v
+            };
+            assert_eq!(sorted(&sa), sorted(&sb), "{case}");
+            assert_eq!(sa.check_code(), sb.check_code(), "{case}");
+            drop(sa);
+            drop(sb);
+            // B's pair now needs a key; either opens it.
+            b.here();
+            let prepared = prepare(&b.vault(), &b.key()).unwrap();
+            assert!(prepared.unlock_request(0).is_some(), "{case}");
+            drop(prepared);
+            for number in [1, 2] {
+                let s = open(&b, OLD, &mut codes, &keys, number).unwrap();
+                assert!(secrets(&s).contains(&"from b".to_owned()), "{case}");
+            }
+        }
+        fn sync_dir(pc: &Pc) -> std::path::PathBuf {
+            syncfile::sync_dir(&pc.vault()).unwrap()
         }
         /// Spec §5.8 and §14.4-10: a file that descends from this PC's state
         /// but lacks a key this PC added (M) is a successor with a carry: a

@@ -1836,6 +1836,8 @@ impl Session {
             sup: confirmed
                 .as_ref()
                 .map_or(&[][..], |l| l.state.sup.as_slice()),
+            #[cfg(feature = "security-key")]
+            keyed: key.needs_security_key(),
         };
         let pending = sync::Pending::find(login, &source, &key_path, format, own, contents.view());
         let Contents {
