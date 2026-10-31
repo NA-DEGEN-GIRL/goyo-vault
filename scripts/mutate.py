@@ -186,8 +186,81 @@ E2E_THREE = E2E + 'three_pcs_change_keys_at_once'
 E2E_HOSTILE = E2E + 'a_hostile_server_gets_nothing_taken_without_its_gate'
 E2E_GATE = E2E + 'the_gate_over_the_server_channel'
 E2E_CYCLES = E2E + 'off_and_on_cycles_with_the_real_server'
+# Stage 11, auto-apply (trust the server) and the notice of a key change
+# made elsewhere under key-file sync (spec §2.30).
+AUTO_T = KS_T + 'auto_apply_takes_server_changes_with_no_gate_and_only_those'
+AUTO_REFUSES_T = KS_T + 'auto_apply_still_refuses_a_file_of_a_removed_key'
+AUTO_FORK_T = KS_T + 'auto_apply_never_joins_a_fork'
+NOTICE_T = KS_T + 'a_copy_under_another_pcs_new_key_points_to_the_server_key_file'
+AUTO_ANCHOR_T = ANCHOR_T + 'auto_round_trips_and_is_kept'
+AUTO_UI_T = CEREMONY_T + 'server_key_changes_apply_by_themselves_once_the_server_is_trusted'
 
 ROWS = [
+    # Auto-apply (trust the server) and the notice of a key change made
+    # elsewhere under key-file sync (spec §2.30; stage 11).
+    ('A auto-apply serves the server channel only', 11, 'feature', 'lib', KEYSYNC,
+     '        matches!(check.source, super::Source::Server { .. })\n            && !check.fork\n',
+     '        !check.fork\n',
+     [AUTO_T]),
+    ('A auto-apply needs the setting on', 11, 'feature', 'lib', KEYSYNC,
+     '            && self.auto_apply()\n            && self.ks01()\n',
+     '            && self.ks01()\n',
+     [AUTO_T]),
+    ('A auto-apply never joins a fork', 11, 'feature', 'lib', KEYSYNC,
+     '        matches!(check.source, super::Source::Server { .. })\n            && !check.fork\n',
+     '        matches!(check.source, super::Source::Server { .. })\n',
+     [AUTO_FORK_T]),
+    ('A the preview takes a trusted pass only where auto-apply serves', 11, 'feature', 'lib',
+     ADOPT,
+     '            (GatePass::Trusted { .. }, Some(_)) if self.trusts(check) => Ok(()),',
+     '            (GatePass::Trusted { .. }, Some(_)) => Ok(()),',
+     [AUTO_T, AUTO_FORK_T]),
+    ('A the public checks still run under auto-apply', 11, 'feature', 'lib', ADOPT,
+     '                let checked =\n                    gate::public_checks(&self.key_file, line, other, fork, chained, self.gated())\n                        .map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?;',
+     '                let checked =\n                    match gate::public_checks(&self.key_file, line, other, fork, chained, self.gated()) {\n                        Err(_) if self.auto_apply() => Checked::default(),\n                        r => r.map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?,\n                    };',
+     [AUTO_REFUSES_T]),
+    ('A a trusted take never turns G2 back on', 11, 'feature', 'lib', HWRS,
+     '        if self.trusted {\n            p.clears.two = false;\n        }\n',
+     '',
+     [AUTO_T]),
+    ('A a cleared gate keeps a G2 turned off without clears=2', 11, 'feature', 'lib', ANCHOR,
+     '            .filter(|g| !g.g2 && !p.clears.two)\n',
+     '            .filter(|_| false)\n',
+     [AUTO_T]),
+    ('A a pending gate under auto-apply is told as ready', 11, 'feature', 'lib', KEYSYNC,
+     '            if self.auto_apply()\n                && matches!(link.keys.top, Top::Key {',
+     '            if false\n                && matches!(link.keys.top, Top::Key {',
+     [AUTO_T]),
+    ('A the anchor writes the setting', 11, 'both', 'lib', ANCHOR,
+     '    if s.auto {\n        out.push_str(" auto=on");\n    }\n',
+     '',
+     [AUTO_ANCHOR_T]),
+    ('A every line this PC takes over keeps the setting', 11, 'both', 'lib', ANCHOR,
+     '            auto: old.is_some_and(|o| o.state.auto),\n            keyid: h.current_key_id(),',
+     '            auto: false,\n            keyid: h.current_key_id(),',
+     [AUTO_ANCHOR_T]),
+    ('A [받기…] and the login ask no gate under auto-apply (UI)', 11, 'feature', 'bin', UI_SK,
+     '        let trusted = server && s.trusts(&check);',
+     '        let trusted = false;',
+     [AUTO_UI_T]),
+    ('A the notice names what was applied (UI)', 11, 'feature', 'bin', UI_SK,
+     '            (true, _) if trusted => lines.push(applied.as_str()),',
+     '            (true, _) if trusted => lines.push(accepted.as_str()),',
+     [AUTO_UI_T]),
+    ('A turning auto-apply on asks first (UI)', 11, 'feature', 'bin', UI_SK,
+     '    if on && !ask(h, AUTO_ASK) {\n        return Ok(());\n    }\n',
+     '',
+     [AUTO_UI_T]),
+    ('A the security-key build is never told it cannot take a key file', 11, 'feature', 'lib',
+     SYNC,
+     '                let hardware = cfg!(not(feature = "security-key")) && flags & 1 != 0;',
+     '                let hardware = flags & 1 != 0;',
+     [NOTICE_T, SYNC_T + 'copies_are_judged_by_their_key_first']),
+    ('A a copy written under key-file sync points to the server key file', 11, 'feature',
+     'lib', SYNC,
+     '                let server = cfg!(feature = "security-key") && flags & 2 != 0;',
+     '                let server = false;',
+     [NOTICE_T, SYNC_T + 'copies_are_judged_by_their_key_first']),
     # Stage 4: the public checks, the gate and E5 (§14.11; forger tests of
     # the removed-key simulator, §14.10-5).
     ('P3 (a): a removed key listed live', 4, 'feature', 'lib', GATE,
@@ -517,9 +590,11 @@ ROWS = [
      '    pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n            || (self.uses_otp() && r.otp_step.is_none())\n        {',
      '    pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n        {',
      [ROTATE_T + 'the_hold_buttons_of_an_otp_vault_need_its_code']),
-    ('F15 hardware notice', 3, 'both', 'lib', SYNC,
-     '            Self::UnknownKey { hardware: true, .. } => SyncNotice::KeyChanged { hardware: true },\n            Self::UnknownKey { newer: true, .. } => SyncNotice::KeyChanged { hardware: false },',
-     '            Self::UnknownKey { newer: true, hardware } => SyncNotice::KeyChanged { hardware },',
+    # The security-key build takes a security-key file, so `hardware` is
+    # never set there (spec §2.30): the rule is the default build's alone.
+    ('F15 hardware notice', 3, 'default', 'lib', SYNC,
+     '            Self::UnknownKey { hardware: true, .. } => SyncNotice::KeyChanged { hardware: true },\n',
+     '',
      [SYNC_T + 'copies_are_judged_by_their_key_first']),
     ('F12 override by bytes', 3, 'both', 'lib', SYNC,
      '            Verdict::Halt(_, head) if link.override_head.as_ref() == Some(&head) => {',
@@ -592,8 +667,8 @@ ROWS = [
     # Stage 4's anchor grammar of S6R2 #13 (landed with stage 5a): `ks`
     # and `sup` carried to every line this PC writes.
     ('anchor ks kept by every write', 4, 'both', 'lib', ANCHOR,
-     '            ks: old.map_or(Ks::None, |o| o.state.ks),\n            keyid: h.current_key_id(),',
-     '            ks: Ks::None,\n            keyid: h.current_key_id(),',
+     '            ks: old.map_or(Ks::None, |o| o.state.ks),\n            auto: old.is_some_and(|o| o.state.auto),\n            keyid: h.current_key_id(),',
+     '            ks: Ks::None,\n            auto: old.is_some_and(|o| o.state.auto),\n            keyid: h.current_key_id(),',
      [ANCHOR_T + 'sup_and_ks_round_trip_and_are_kept']),
     # Stage 5 (§14.11, S45-3 #11, #13, #17): the request builders of
     # webauthn.rs, field by field, and the ceremony runner's rules.
@@ -749,8 +824,8 @@ ROWS = [
      '        let _ = &s;',
      [SITES]),
     ('S5 the adopt asks the gate before the touch', 5, 'feature', 'bin', UI_SK,
-     '        pass = match ask_gate(h, kind, &choices, opened_with, epoch, None) {\n            Some(GateAnswer::Pick(pick)) => GatePass::G2Passed { pick, epoch, tag },',
-     '        pass = match ask_gate(h, kind, &choices, opened_with, epoch, None) {\n            Some(GateAnswer::Pick(_)) => GatePass::none(&check),',
+     '            false => match ask_gate(h, kind, &choices, opened_with, epoch, None) {\n                Some(GateAnswer::Pick(pick)) => GatePass::G2Passed { pick, epoch, tag },',
+     '            false => match ask_gate(h, kind, &choices, opened_with, epoch, None) {\n                Some(GateAnswer::Pick(_)) => GatePass::none(&check),',
      [SITES]),
     ('S5 the fork option is asked before anything else', 5, 'feature', 'bin', UI_SK,
      '    let fork_options = check.fork && hardware && !removal;',

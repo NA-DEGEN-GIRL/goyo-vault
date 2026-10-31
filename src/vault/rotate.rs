@@ -39,7 +39,7 @@ mod adopt;
 #[cfg(feature = "security-key")]
 mod hw;
 #[cfg(feature = "security-key")]
-pub use adopt::{ForkOption, KeyGates};
+pub use adopt::{ForkOption, KeyChange, KeyGates};
 #[cfg(feature = "security-key")]
 pub use hw::{
     ANCHOR_FAILED, Exposure, KeyRow, KeysOverview, LossReport, NOT_PLANNED, OLDSLOT, REACH_CHANGED,

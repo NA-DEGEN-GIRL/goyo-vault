@@ -37,7 +37,7 @@ use anchor::{Decision, Refusal, Seen};
 pub use gate::{
     ANCHOR_OTP, ANCHOR_PINNED, ANCHOR_RELIST_KEYS, Checked, GATE_CODE_WRONG, GATE_G2FAIL,
     GATE_G2FAIL_DISK, GATE_HELD, GATE_NOT_PENDING, GateAnswer, GateChoice, GateKind, Gates,
-    TOFU_ADOPT, TOFU_HELD, parse_code,
+    NOT_TRUSTED, TOFU_ADOPT, TOFU_HELD, parse_code,
 };
 use keyfile::{
     Bundle, EPOCH_LIMIT, EPOCH_MAX, EPOCH_SILENT, KEY_FILE_LIMIT, KeyFile, KeyState, Magic,
@@ -46,9 +46,9 @@ use keyfile::{
 pub use keyfile::{KeyInfo, key_info};
 #[cfg(feature = "security-key")]
 pub use keysync::{
-    Deletion, FORGED_LINK, GATE_PENDING, KEYSYNC_ASKING, KEYSYNC_NOHELPER, KEYSYNC_NOTRANSPORT,
-    KEYSYNC_OFF_PENDING, KeyClass, KeySyncView, NO_CANDIDATE, NOT_A_SUCCESSOR, NOT_SUPERSEDABLE,
-    OffRequest, Rollout, SUPERSEDE_HEAD, Waiting,
+    AUTO_NOT_SYNCED, Deletion, FORGED_LINK, GATE_PENDING, KEYSYNC_ASKING, KEYSYNC_NOHELPER,
+    KEYSYNC_NOTRANSPORT, KEYSYNC_OFF_PENDING, KeyClass, KeySyncView, NO_CANDIDATE, NOT_A_SUCCESSOR,
+    NOT_SUPERSEDABLE, OffRequest, Rollout, SUPERSEDE_HEAD, Waiting,
 };
 pub use recover::Recovery;
 #[cfg(feature = "security-key")]
@@ -62,9 +62,9 @@ pub use rotate::{
 };
 #[cfg(feature = "security-key")]
 pub use rotate::{
-    ANCHOR_FAILED, Exposure, ForkOption, KeyGates, KeyRow, KeysOverview, LossReport, NOT_PLANNED,
-    OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo, RedoFlow,
-    UNION_FULL, UNREACHABLE,
+    ANCHOR_FAILED, Exposure, ForkOption, KeyChange, KeyGates, KeyRow, KeysOverview, LossReport,
+    NOT_PLANNED, OLDSLOT, REACH_CHANGED, REMOVE_UNDONE, REPAIR_AUTH, ReSeedKey, ReSeedPlan, Redo,
+    RedoFlow, UNION_FULL, UNREACHABLE,
 };
 #[cfg(feature = "security-key")]
 pub use serverkey::{

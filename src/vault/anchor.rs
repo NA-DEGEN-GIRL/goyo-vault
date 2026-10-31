@@ -252,6 +252,12 @@ pub(super) struct State {
     pub gated: u64,
     pub sup: Vec<Sup>,
     pub ks: Ks,
+    /// `auto=on`: this PC's user turned on "열쇠 변경 자동 적용 (이 서버를
+    /// 믿음)" for this vault (spec §2.30): a key file from the server that
+    /// would wait for its gate is taken as if the gate had passed. A local
+    /// preference: an absent field is off; only the security-key build sets
+    /// it, every build reads it and copies it to every line it writes.
+    pub auto: bool,
     /// The state's current key ID in full.
     pub keyid: [u8; 16],
 }
@@ -817,7 +823,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 let (epoch, tag) = m.split_once(':')?;
                 Some((epoch_num(epoch)?, unhex(tag)?))
             })?;
-            let (pbad, gated, sup, ks) = tail(&mut f, state.epoch)?;
+            let (pbad, gated, sup, ks, auto) = tail(&mut f, state.epoch)?;
             let keyid = unhex(f.get("keyid")?)?;
             let vkey = maybe(f.get("vkey")?, unhex)?;
             f.end()?;
@@ -826,6 +832,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 gated,
                 sup,
                 ks,
+                auto,
                 keyid,
                 ..state
             };
@@ -840,7 +847,7 @@ fn parse_line(line: &str) -> Option<Line> {
         }
         "pending" => {
             let state = state(&mut f)?;
-            let (pbad, gated, sup, ks) = tail(&mut f, state.epoch)?;
+            let (pbad, gated, sup, ks, auto) = tail(&mut f, state.epoch)?;
             let keyid = unhex(f.get("keyid")?)?;
             let kind = num(f.get("kind")?).filter(|k| (1..=10).contains(k))? as u8;
             let src = f.get("src")?;
@@ -882,6 +889,7 @@ fn parse_line(line: &str) -> Option<Line> {
                 gated,
                 sup,
                 ks,
+                auto,
                 keyid,
                 ..state
             };
@@ -1004,12 +1012,13 @@ fn state(f: &mut Fields) -> Option<State> {
         gated: epoch,
         sup: Vec::new(),
         ks: Ks::None,
+        auto: false,
         keyid: [0; 16],
     })
 }
-/// `pbad`, `gated` (a line without it reads as its epoch), `sup` and `ks`
-/// (a line without it reads as `-`).
-type Tail = (Vec<([u8; 4], [u8; 4])>, u64, Vec<Sup>, Ks);
+/// `pbad`, `gated` (a line without it reads as its epoch), `sup`, `ks` (a
+/// line without it reads as `-`) and `auto` (a line without it is off).
+type Tail = (Vec<([u8; 4], [u8; 4])>, u64, Vec<Sup>, Ks, bool);
 fn tail(f: &mut Fields, epoch: u64) -> Option<Tail> {
     let pbad = list(f.get("pbad")?, SLOTS_MAX * (SLOTS_MAX - 1), |p| {
         let (owner, target) = p.split_once('>')?;
@@ -1039,7 +1048,12 @@ fn tail(f: &mut Fields, epoch: u64) -> Option<Tail> {
             _ => return None,
         },
     };
-    Some((pbad, gated, sup, ks))
+    let auto = match f.maybe("auto")? {
+        None => false,
+        Some("on") => true,
+        Some(_) => return None,
+    };
+    Some((pbad, gated, sup, ks, auto))
 }
 fn render_state(out: &mut String, s: &State) {
     let flags: String = [(s.flags.b, 'b'), (s.flags.t, 't'), (s.flags.p, 'p')]
@@ -1106,7 +1120,11 @@ fn render_tail(out: &mut String, s: &State) {
         Ks::Off(l) => format!("off.{l}"),
         Ks::OffUnknown => "off.?".into(),
     };
-    out.push_str(&format!(" ks={ks} keyid={}", hex(&s.keyid)));
+    out.push_str(&format!(" ks={ks}"));
+    if s.auto {
+        out.push_str(" auto=on");
+    }
+    out.push_str(&format!(" keyid={}", hex(&s.keyid)));
 }
 fn render_vault(id: &[u8; 16], v: &VaultLine) -> String {
     let mut out = format!("vault {}", hex(id));
@@ -1680,7 +1698,16 @@ pub(super) fn compare_opened_legacy(
 #[cfg(feature = "security-key")]
 pub(super) fn apply_clears(lines: &mut Lines, p: &PendingLine) {
     if p.clears.g {
-        lines.gate = None;
+        // A take that trusted the server (spec §2.30: `g` without `2`)
+        // clears the gate but keeps a G2 turned off, in a `none` line.
+        lines.gate = lines
+            .gate
+            .take()
+            .filter(|g| !g.g2 && !p.clears.two)
+            .map(|g| GateLine {
+                state: GateState::None,
+                ..g
+            });
     }
     if let Some(g) = lines.gate.as_mut() {
         if p.clears.s {
@@ -1789,8 +1816,9 @@ pub(super) fn legacy_hist(state: KeyState, key_id: &[u8; 16]) -> Hist {
 /// The confirmed line of a KF2 key file `h` that this PC takes over `old`:
 /// its own state with `old`'s history before it, its removals with what
 /// `old` knew of them (new ones taken from this file), `old`'s `merged`,
-/// `sup`, `ks`, `vkey` and `consumed`. `gated` and `t` stay. With security keys
-/// also its slots, and `old`'s broken pair records between keys still live.
+/// `sup`, `ks`, `auto`, `vkey` and `consumed`. `gated` and `t` stay. With
+/// security keys also its slots, and `old`'s broken pair records between
+/// keys still live.
 pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
     let known = |c: &[u8; 16]| {
         old.and_then(|o| o.state.tombs.iter().find(|t| t.credhash == *c))
@@ -1866,6 +1894,7 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             gated: old.map_or(h.epoch, |o| o.state.gated),
             sup: old.map(|o| o.state.sup.clone()).unwrap_or_default(),
             ks: old.map_or(Ks::None, |o| o.state.ks),
+            auto: old.is_some_and(|o| o.state.auto),
             keyid: h.current_key_id(),
         },
         merged: old.map(|o| o.merged.clone()).unwrap_or_default(),
@@ -1945,6 +1974,7 @@ pub(super) fn legacy_line(
             gated: state.epoch,
             sup: old.map(|o| o.state.sup.clone()).unwrap_or_default(),
             ks: old.map_or(Ks::None, |o| o.state.ks),
+            auto: old.is_some_and(|o| o.state.auto),
             keyid: *key_id,
         },
         merged: old.map(|o| o.merged.clone()).unwrap_or_default(),
@@ -2232,6 +2262,7 @@ mod tests {
                 },
             ],
             ks: Ks::Off(7),
+            auto: false,
             keyid: [14; 16],
         }
     }
@@ -2251,6 +2282,7 @@ mod tests {
             gated: 0,
             sup: Vec::new(),
             ks: Ks::None,
+            auto: false,
             keyid: [0xff; 16],
         }
     }
@@ -3007,5 +3039,88 @@ mod tests {
         };
         let back = legacy_line(legacy, keyfile::Magic::Ke02, false, &[0; 16], Some(&l5));
         assert_eq!((&back.state.sup, back.state.ks), (&l5.state.sup, Ks::On(3)));
+    }
+
+    /// `auto` (spec §2.30), a local preference every build reads, writes
+    /// back and keeps: `auto=on` after `ks` in `vault` and `pending` lines,
+    /// no field when off (a line without it is off), any other value or
+    /// place malformed; and every line this PC takes over or writes
+    /// (`line_of`, `pending_of`, `legacy_line`, a promotion) carries it on,
+    /// through a whole anchor file and back.
+    #[test]
+    fn auto_round_trips_and_is_kept() {
+        let id = [0x5f; 16];
+        for auto in [false, true] {
+            let mut state = full_state();
+            state.auto = auto;
+            let vault = VaultLine {
+                state: state.clone(),
+                merged: Vec::new(),
+                vkey: None,
+            };
+            let text = render_vault(&id, &vault);
+            assert_eq!(text.contains(" ks=off.7 auto=on keyid="), auto, "{text}");
+            assert_eq!(text.contains(" ks=off.7 keyid="), !auto, "{text}");
+            assert_eq!(parsed(&text), Some(Line::Vault(id, Box::new(vault))));
+            let pending = PendingLine {
+                state,
+                ..full_pending()
+            };
+            let text = render_pending(&id, &pending);
+            assert_eq!(text.contains(" auto=on keyid="), auto, "{text}");
+            assert_eq!(parsed(&text), Some(Line::Pending(id, Box::new(pending))));
+        }
+        let mut state = full_state();
+        state.auto = true;
+        let line = VaultLine {
+            state,
+            merged: Vec::new(),
+            vkey: None,
+        };
+        let text = render_vault(&id, &line);
+        let keyid = format!(" keyid={}", "0e".repeat(16));
+        for bad in [
+            text.replace("auto=on", "auto=off"),
+            text.replace("auto=on", "auto="),
+            text.replace("auto=on", "auto=ON"),
+            text.replace("auto=on", "auto=1"),
+            text.replace(" auto=on", "")
+                .replace(&keyid, &format!("{keyid} auto=on")),
+            text.replace(" ks=off.7 auto=on", " auto=on ks=off.7"),
+        ] {
+            assert_ne!(bad, text);
+            assert_eq!(parsed(&bad), None, "{bad}");
+        }
+        // Through the file: rendered, read back and kept by a write that
+        // changes another vault's lines.
+        let t = Dir::new();
+        t.put(&id, &line);
+        let other = [0x60; 16];
+        update(&t.0, &other, LOCK_WAIT, &mut |lines| {
+            lines.vault = Some(VaultLine {
+                state: bare_state(),
+                merged: Vec::new(),
+                vkey: None,
+            });
+            true
+        })
+        .unwrap();
+        assert_eq!(t.doc().lines(&id).vault, Some(line));
+        // Kept by every line this PC writes over the old one.
+        let vid = [0x7a; 16];
+        let k5 = ke03(vid, &[dk(5), dk(0)], 5, &[], 5);
+        let mut l5 = line_of(&k5, None);
+        assert!(!l5.state.auto);
+        l5.state.auto = true;
+        let k6 = ke03(vid, &[dk(6), dk(5), dk(0)], 6, &[], 6);
+        assert!(line_of(&k6, Some(&l5)).state.auto);
+        let p = pending_of(&k6, Some(&l5), None, None);
+        assert!(p.state.auto && p.promoted(Some(&l5)).state.auto);
+        let legacy = KeyState {
+            epoch: 0,
+            tag: [0x0e; 16],
+        };
+        let back = legacy_line(legacy, keyfile::Magic::Ke02, false, &[0; 16], Some(&l5));
+        assert!(back.state.auto);
     }
 }

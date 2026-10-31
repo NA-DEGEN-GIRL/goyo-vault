@@ -181,6 +181,13 @@ pub enum SyncNotice {
         seq: u64,
         admin: bool,
     },
+    /// The server copy is under a key this PC does not hold, at a later
+    /// key-file state, written by a PC whose key file syncs through the
+    /// server: another PC changed the keys, and [받기…] or the next unlock
+    /// takes its key file (security-key build). Given once per halt, as
+    /// KeyChanged.
+    #[cfg(feature = "security-key")]
+    KeyChangedServer,
     /// KeyFork-SK of a fork that the kind-9 merge of two removals made
     /// from one state would join (spec v3 §7.4, §5.8): `auto`, at the next
     /// unlock with no question (KeyFork-SK-AUTO); otherwise with [받기]
@@ -214,6 +221,8 @@ impl SyncNotice {
             | Self::KeyFork
             | Self::OldKeyDamaged
             | Self::RollbackHeld => 1,
+            #[cfg(feature = "security-key")]
+            Self::KeyChangedServer => 1,
             Self::TooLarge | Self::NewerKeyFile | Self::OldKeyReplaced => 2,
             Self::NewerFormat | Self::KeyInFolder => 3,
             Self::MassDelete { .. } => 4,
@@ -228,6 +237,16 @@ impl SyncNotice {
             | Self::KeyBehind => 7,
             Self::Synced { .. } => 8,
             Self::SyncOn => 9,
+        }
+    }
+    /// KeyChanged (and KeyChangedServer) is told once per halt (spec v3
+    /// §7.4).
+    fn once_per_halt(&self) -> bool {
+        match self {
+            Self::KeyChanged { .. } => true,
+            #[cfg(feature = "security-key")]
+            Self::KeyChangedServer => true,
+            _ => false,
         }
     }
     /// Whether the key view causes this notice (spec v3 §7.4).
@@ -306,8 +325,15 @@ impl HaltedHead {
 enum Halt {
     /// Under a key this PC does not hold. `newer`: its header states a later
     /// epoch than this PC's key file; `hardware`: its writer's key file
-    /// needs a security key.
-    UnknownKey { newer: bool, hardware: bool },
+    /// needs a security key, which this build cannot open (never in the
+    /// security-key build); `server`: that key file syncs through the
+    /// server (key-file sync, header bit1; only the security-key build
+    /// takes it from there).
+    UnknownKey {
+        newer: bool,
+        hardware: bool,
+        server: bool,
+    },
     /// Under an older key of this PC's, and it does not open with it.
     OldKeyDamaged,
     /// Under the current key at a later epoch.
@@ -321,6 +347,14 @@ impl Halt {
             // This build cannot take a security-key file at any epoch, so a
             // fork's advice to take it would mislead.
             Self::UnknownKey { hardware: true, .. } => SyncNotice::KeyChanged { hardware: true },
+            // The new key file comes through the server: [받기…] or the next
+            // unlock takes it, not a USB adopt.
+            #[cfg(feature = "security-key")]
+            Self::UnknownKey {
+                newer: true,
+                server: true,
+                ..
+            } => SyncNotice::KeyChangedServer,
             Self::UnknownKey { newer: true, .. } => SyncNotice::KeyChanged { hardware: false },
             Self::UnknownKey { newer: false, .. } | Self::KeyFork => SyncNotice::KeyFork,
             Self::OldKeyDamaged => SyncNotice::OldKeyDamaged,
@@ -537,7 +571,7 @@ impl SyncLink {
     fn told(&mut self, notice: &Option<SyncNotice>) {
         match notice {
             Some(SyncNotice::Synced { .. }) => self.code_shown = true,
-            Some(SyncNotice::KeyChanged { .. }) => self.key_changed_told = true,
+            Some(n) if n.once_per_halt() => self.key_changed_told = true,
             Some(SyncNotice::RollbackHeld) => self.rollback_told = true,
             Some(n) if n.is_status() => self.issue = Some(n.clone()),
             #[cfg(feature = "security-key")]
@@ -734,13 +768,19 @@ impl Own<'_> {
                 return Verdict::OlderKey(0, true);
             }
             None => {
-                let (newer, hardware) = match header {
-                    Header::Keyed { state, flags, .. } => {
-                        (state.epoch > self.state.epoch, flags & 1 != 0)
-                    }
-                    Header::Legacy => (false, false),
+                let (newer, flags) = match header {
+                    Header::Keyed { state, flags, .. } => (state.epoch > self.state.epoch, flags),
+                    Header::Legacy => (false, 0),
                 };
-                return halt(Halt::UnknownKey { newer, hardware });
+                // The security-key build opens a security-key file: only the
+                // default build is told it cannot (KeyChanged{hardware}).
+                let hardware = cfg!(not(feature = "security-key")) && flags & 1 != 0;
+                let server = cfg!(feature = "security-key") && flags & 2 != 0;
+                return halt(Halt::UnknownKey {
+                    newer,
+                    hardware,
+                    server,
+                });
             }
         };
         // An older key: decrypted for the classification only, never merged.
@@ -1151,8 +1191,7 @@ impl Session {
             Verdict::Halt(halt, head) => {
                 link.verified = false;
                 link.halt = Some(Halting { halt, head });
-                let told =
-                    matches!(halt.notice(), SyncNotice::KeyChanged { .. }) && link.key_changed_told;
+                let told = halt.notice().once_per_halt() && link.key_changed_told;
                 if !told {
                     offer(notice, halt.notice());
                 }
@@ -3057,6 +3096,19 @@ mod tests {
             let random = [0x5c; 32];
             let unknown = |epoch, flags| keyed(&id, &random, state(epoch, [3; 16]), flags);
             let halt = Want::Halt;
+            // A copy whose writer's key file needs a security key: the
+            // default build cannot take that key file at any epoch (spec
+            // §2.18 #58); the security-key build judges it like any other,
+            // and one written under key-file sync (flags 3) at a later state
+            // is a change [받기…] or the next unlock takes (spec §2.30).
+            #[cfg(not(feature = "security-key"))]
+            let sk = |_newer: bool, _server: bool| halt(SyncNotice::KeyChanged { hardware: true });
+            #[cfg(feature = "security-key")]
+            let sk = |newer: bool, server: bool| match (newer, server) {
+                (true, true) => halt(SyncNotice::KeyChangedServer),
+                (true, false) => halt(SyncNotice::KeyChanged { hardware: false }),
+                (false, _) => halt(SyncNotice::KeyFork),
+            };
             // A GOYOVA03/04 header states an epoch of 1 at least.
             let at_own = if kf2 { own } else { state(1, own.tag) };
             let mut cases: Vec<(&str, Vec<u8>, Want)> = vec![
@@ -3133,7 +3185,12 @@ mod tests {
                 (
                     "unknown, security key",
                     copy(&random, unknown(own.epoch + 1, 1), Format::V2, false),
-                    halt(SyncNotice::KeyChanged { hardware: true }),
+                    sk(true, false),
+                ),
+                (
+                    "unknown, security key, key-file sync",
+                    copy(&random, unknown(own.epoch + 1, 3), Format::V2, false),
+                    sk(true, true),
                 ),
                 (
                     "newer format",
@@ -3186,18 +3243,24 @@ mod tests {
                         ),
                         halt(SyncNotice::KeyFork),
                     ),
-                    // A security-key copy at no later state: this build
-                    // cannot take its key file, so no fork advice either
-                    // (spec §2.18 #58).
+                    // A security-key copy at no later state: the default
+                    // build cannot take its key file, so no fork advice
+                    // either (spec §2.18 #58); the security-key build's is
+                    // a fork.
                     (
                         "unknown, security key, same epoch",
                         copy(&random, unknown(own.epoch, 1), Format::V2, false),
-                        halt(SyncNotice::KeyChanged { hardware: true }),
+                        sk(false, false),
                     ),
                     (
                         "unknown, security key, lower epoch",
                         copy(&random, unknown(own.epoch - 1, 1), Format::V2, false),
-                        halt(SyncNotice::KeyChanged { hardware: true }),
+                        sk(false, false),
+                    ),
+                    (
+                        "unknown, key-file sync, same epoch",
+                        copy(&random, unknown(own.epoch, 3), Format::V2, false),
+                        sk(false, true),
                     ),
                     // A lower epoch merges as a lagging copy (§14.6-13).
                     (

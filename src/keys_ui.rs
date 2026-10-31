@@ -53,6 +53,9 @@ pub const LOST_REDO: i32 = 188;
 pub const ANCHOR_FORGET: i32 = 189;
 pub const SUSPEND_TOUCH: i32 = 191;
 pub const KEYON_PWCHANGE: i32 = 192;
+/// The Keys screen's "열쇠 변경 자동 적용 (이 서버를 믿음)" toggle (spec
+/// §2.30; free: no control ID 195 in `main.rs`).
+pub const KEY_AUTO: i32 = 195;
 /// [뒤로] in the adopt preview of a fork (a Switch button of the guarded
 /// dialog; spec §9.2 adopt step 8; free: no constant or literal 193 in
 /// `main.rs`).
@@ -377,6 +380,25 @@ pub const TRY_OTHERKEY_FAILED: &str = "서버에서 받아 둔 열쇠 파일이 
 /// The first status line after the server's key file was taken at login
 /// (spec §7.15 step 9).
 pub const ACCEPTED_AT_LOGIN: &str = "다른 PC의 열쇠 변경을 받았습니다. 열쇠 확인 코드 {code}";
+/// "열쇠 변경 자동 적용 (이 서버를 믿음)" (spec §2.30): the Keys screen's
+/// toggle for a vault whose key file syncs, per PC and per vault.
+pub const AUTO_LABEL: &str = "열쇠 변경 자동 적용 (이 서버를 믿음)";
+/// S-AUTO-APPLY, asked once before it is turned on (danger, default No).
+pub const AUTO_ASK: &str = "열쇠 변경 자동 적용을 켜면 다른 PC에서 한 열쇠 변경(보안 키 제거, 보안 키 추가, 비밀번호 변경)이 서버로 왔을 때, 어느 키를 잃어버렸는지 고르거나 그 PC의 열쇠 확인 코드를 입력하지 않고 이 PC에 적용합니다. 새 열쇠 파일을 열 때의 보안 키 터치와 비밀번호, 위조를 막는 다른 확인은 그대로입니다.
+
+서버를 장악한 사람이 이 금고의 보안 키 하나와 그 PIN, 그리고 비밀번호까지 함께 갖고 있지 않는 한 안전합니다. 그런 사람이 생기면 그 사람은 이 PC가 자기가 아는 데이터 키로 바꾸게 만들 수 있습니다(그 뒤 저장하는 항목을 읽을 수 있게 됩니다).
+
+이 설정은 이 PC의 이 금고에만 적용되고, 끌 때는 묻지 않습니다. 켤까요?";
+/// The status after the toggle.
+pub const AUTO_ON_DONE: &str = "열쇠 변경 자동 적용을 켰습니다. 서버로 온 열쇠 변경은 [받기…]나 다음 잠금 해제 때 묻지 않고 적용합니다.";
+pub const AUTO_OFF_DONE: &str = "열쇠 변경 자동 적용을 껐습니다. 서버로 온 열쇠 변경은 다시 잃어버린 키를 고르거나 코드를 입력해야 받습니다.";
+/// The notice of a take that trusted the server (spec §2.30): what
+/// changed, from this PC's own state, and the key code.
+pub const AUTO_APPLIED: &str = "열쇠 파일 변경을 적용했습니다: {what}. 열쇠 확인 코드 {code}";
+pub const AUTO_REMOVED: &str = "보안 키 {list} 제거";
+pub const AUTO_ADDED: &str = "이 PC에서 처음 보는 보안 키 {list} 추가";
+pub const AUTO_PASSWORD: &str = "비밀번호 변경됨";
+pub const AUTO_OTHER: &str = "열쇠 설정 변경";
 /// S-NOACTIVEKEY.
 pub const NOACTIVEKEY: &str = "받을 열쇠 파일에서 이 PC의 보안 키가 모두 빠졌거나 일시 정지되어 받을 수 없습니다. 키를 잃어버렸다면 이 PC에서 '잃어버린 키 제거'를 직접 하세요. 아니면 다른 키와 '짝 맺기'를 한 뒤 받으세요.";
 pub const PREVIEW_SUSPEND: &str = "받으면 일시 정지될 키: 보안 키 {list}";
@@ -575,6 +597,26 @@ fn listed(numbers: &[u8]) -> String {
         .map(u8::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+/// The notice of a take that trusted the server (spec §2.30): keys removed
+/// (this PC's numbers), keys added (new to this PC, the file's numbers), a
+/// password change, else a change of other key settings; with the key
+/// code shown as `code`.
+pub(crate) fn auto_applied(change: &vault::KeyChange, code: &str) -> String {
+    let mut what: Vec<String> = Vec::new();
+    if !change.removed.is_empty() {
+        what.push(fill(AUTO_REMOVED, &[&listed(&change.removed)]));
+    }
+    if !change.added.is_empty() {
+        what.push(fill(AUTO_ADDED, &[&listed(&change.added)]));
+    }
+    if change.password {
+        what.push(tr(AUTO_PASSWORD).to_owned());
+    }
+    if change.other || what.is_empty() {
+        what.push(tr(AUTO_OTHER).to_owned());
+    }
+    fill(AUTO_APPLIED, &[&what.join(", "), &code])
 }
 /// A registration's day, YYYY-MM-DD, from its `<STAMP>`.
 fn day(stamp: &str) -> String {
@@ -801,7 +843,25 @@ impl App {
         halt: Option<(String, Option<(i32, &'static str)>)>,
     ) {
         let (small, body) = (self.font_of(|t| t.small()), self.font_of(|t| t.body()));
-        self.text(0, &state_line(keys), (40, 376, 796, 22), body, TONE_TEXT, 0);
+        // "열쇠 변경 자동 적용 (이 서버를 믿음)" for a key file that syncs
+        // through the server (spec §2.30), at the right of the state line.
+        let auto = keys
+            .and(ks_view(self.session.as_ref()))
+            .filter(|v| v.synced && v.on)
+            .map(|v| v.auto_apply);
+        let state_w = if auto.is_some() { 388 } else { 796 };
+        self.text(
+            0,
+            &state_line(keys),
+            (40, 376, state_w, 22),
+            body,
+            TONE_TEXT,
+            0,
+        );
+        if let Some(on) = auto {
+            let toggle = if on { theme::TOGGLE_ON } else { theme::TOGGLE };
+            self.button(KEY_AUTO, AUTO_LABEL, 436, 370, 400, 28, toggle);
+        }
         let otp = self
             .session
             .as_ref()
@@ -1545,7 +1605,7 @@ impl App {
                 KEY_ON | KEYON_PWCHANGE | KEY_ADD | KEY_PAIR | KEY_RESEED | KEY_OFF | KEY_LOST
                 | KEY_REMOVE | LOST_REDO | KEY_ACCEPT | KEY_LIST | PASS | CONFIRM | PEEK_PASS
                 | PEEK_CONFIRM | KEYSYNC_ON | KEYSYNC_OFF | KEY_REUPLOAD | GATE_DROP
-                | GATE_SUPERSEDE | KEY_ROLLOUT_DONE,
+                | GATE_SUPERSEDE | KEY_ROLLOUT_DONE | KEY_AUTO,
             ) => Some(true),
             (Screen::Vault, TOFU_OK | TOFU_NOPC | TOFU_LOCK | GATE_CODE) => {
                 Some(self.tofu_banner())
@@ -1574,6 +1634,7 @@ pub(crate) fn phased(a: &App, id: i32) -> bool {
                 | KEY_REUPLOAD
                 | GATE_DROP
                 | GATE_SUPERSEDE
+                | KEY_AUTO
         ),
         Screen::Pair | Screen::Adopt => matches!(id, 1 | SUBMIT),
         // A password change of a key file with security keys needs a touch.
@@ -1625,6 +1686,7 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         (_, KEYSYNC_OFF) => keysync_off_flow(h),
         (_, GATE_DROP) => gate_drop_flow(h),
         (_, GATE_SUPERSEDE) => supersede_flow(h),
+        (_, KEY_AUTO) => auto_apply_flow(h),
         _ => Err("현재 화면에서 허용되지 않는 작업입니다."),
     }
 }
@@ -4959,6 +5021,9 @@ fn server_entry(
     touch: &Touch,
 ) -> crypto::Result<()> {
     entry.start()?;
+    // "열쇠 변경 자동 적용" (spec §2.30): no gate is asked (`gate` is
+    // None), and the status names what was applied.
+    let trusted = entry.trusted();
     let gate = entry.gate();
     let epoch = gate.as_ref().map_or(0, |g| g.3);
     let mut answer = match gate {
@@ -4989,10 +5054,12 @@ fn server_entry(
                     a.opened(Screen::Login, Ok(s), None)?;
                     // The new password was typed at this login: the
                     // status says only what was taken (three lines).
-                    let accepted = fill(
-                        ACCEPTED_AT_LOGIN,
-                        &[&adopted.code.show(adopted.state.epoch)],
-                    );
+                    let shown = adopted.code.show(adopted.state.epoch);
+                    let accepted = if trusted {
+                        auto_applied(&adopted.change, &shown)
+                    } else {
+                        fill(ACCEPTED_AT_LOGIN, &[&shown])
+                    };
                     let mut lines = vec![accepted.as_str()];
                     if adopted.vault_pending {
                         lines.push(vault::VPENDING);
@@ -5115,6 +5182,9 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         if keys.is_some() || other.needs_security_key() {
             authenticator().map_err(FidoError::text)?;
         }
+        // "열쇠 변경 자동 적용" (spec §2.30): a server file that descends
+        // from this PC's is taken with no gate question and no preview.
+        let trusted = server && s.trusts(&check);
         // A result that turns key-file sync on here: the transport first,
         // before any gate question or touch (spec §7.15 step 1, S6-3 #10).
         // At login it asks nothing and says why (S-KEYSYNC-NOTRANSPORT).
@@ -5147,10 +5217,13 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         if login.is_none() {
             a.flow = Some(if server { KEY_ACCEPT } else { SUBMIT });
         }
-        Ok(Some((a.serial, other, check, typed, keys, gate, removal)))
+        Ok(Some((
+            a.serial, other, check, typed, keys, gate, removal, trusted,
+        )))
     });
     drain_pending(h);
-    let Some((serial, other, check, t, keys, (choices, opened_with), removal)) = p1? else {
+    let Some((serial, other, check, t, keys, (choices, opened_with), removal, trusted)) = p1?
+    else {
         return Ok(());
     };
     let at_login = login.is_some();
@@ -5178,10 +5251,13 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
     };
     let mut pass = GatePass::none(&check);
     if let Some(kind) = gate_of(option) {
-        pass = match ask_gate(h, kind, &choices, opened_with, epoch, None) {
-            Some(GateAnswer::Pick(pick)) => GatePass::G2Passed { pick, epoch, tag },
-            Some(GateAnswer::Code(code)) => GatePass::G1Passed { code, epoch, tag },
-            None => return Ok(()),
+        pass = match trusted {
+            true => GatePass::Trusted { epoch, tag },
+            false => match ask_gate(h, kind, &choices, opened_with, epoch, None) {
+                Some(GateAnswer::Pick(pick)) => GatePass::G2Passed { pick, epoch, tag },
+                Some(GateAnswer::Code(code)) => GatePass::G1Passed { code, epoch, tag },
+                None => return Ok(()),
+            },
         };
     }
     // C: the Reauth touch, with two salts where the files' seeds differ;
@@ -5419,7 +5495,7 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         if let Some(n) = hint {
             text = format!("{text}\r\n\r\n{}", fill(FORK_HINT, &[&n]));
         }
-        if quiet {
+        if quiet || trusted {
             break (plan, preview, names, false);
         }
         let check_box = preview
@@ -5598,7 +5674,11 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         let shown = adopted.code.show(adopted.state.epoch);
         let merged = fill(MERGED, &[&shown]);
         let accepted = fill(ACCEPTED_AT_LOGIN, &[&shown]);
+        // The notice of a take that trusted the server (spec §2.30).
+        let applied = auto_applied(&preview.change, &shown);
         match (at_login, removal) {
+            (true, _) if trusted => lines.push(applied.as_str()),
+            (false, _) if trusted => lines.extend([applied.as_str(), pass]),
             (true, true) => lines.push(merged.as_str()),
             (true, false) => lines.push(accepted.as_str()),
             (false, true) => lines.extend([merged.as_str(), pass]),
@@ -5772,12 +5852,23 @@ pub const N_KEYFORK_AUTO: &str = "두 PC에서 따로 한 보안 키 제거라�
 /// way for any other change and the forgery sentence.
 pub const N_KEYFORK_MERGE: &str = "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 두 PC에서 따로 보안 키를 제거한 것이라면 '열쇠 관리'의 [받기…]로 합칠 수 있습니다(다른 보안 키나 다른 비밀번호가 필요합니다). 다른 변경이라면 한 PC에서 '새 열쇠 파일 받기'로 받으세요. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.";
 
+/// KeyChangedServer (spec §2.30, Task 2 of the auto-apply round): a vault
+/// copy under another PC's newer key, written under key-file sync. The new
+/// key file comes through the server, so the default build's "this build
+/// cannot take it" and the USB advice of KeyChanged do not apply.
+pub const N_KEY_CHANGED_SERVER: &str = concat!(
+    "다른 PC에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. 새 열쇠 파일은 서버로 옵니다. '열쇠 관리'의 [받기…]로 받거나 다음 잠금 해제 때 받으세요.",
+    "\r\n",
+    "그런 변경을 한 PC가 없다면 서버 사본이 위조되었을 수 있습니다. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+);
+
 /// The status line of a key notice of key-file sync and whether it is a
 /// danger line (spec §7.4); None for the notices main.rs words.
 pub fn key_sync_line(notice: &vault::SyncNotice) -> Option<(Zeroizing<String>, bool)> {
     use vault::SyncNotice as N;
     Some(match notice {
         N::KeyFork => (line(N_KEYFORK_SK), true),
+        N::KeyChangedServer => (line(N_KEY_CHANGED_SERVER), true),
         N::KeyForkMerge { auto: true } => (line(N_KEYFORK_AUTO), true),
         N::KeyForkMerge { auto: false } => (line(N_KEYFORK_MERGE), true),
         N::KeyRollback => (line(N_KEY_ROLLBACK), true),
@@ -5809,8 +5900,13 @@ pub fn key_sync_text(v: &vault::KeySyncView) -> (String, Vec<(i32, &'static str)
     let mut buttons: Vec<(i32, &'static str)> = Vec::new();
     match v.waiting {
         Some(w) if matches!(w.class, vault::KeyClass::Successor { .. }) => {
+            // With auto-apply on, a gated change is taken with no question.
             text.push(fill(
-                if w.pending_gate { KS_GATE } else { KS_READY },
+                if w.pending_gate && !v.auto_apply {
+                    KS_GATE
+                } else {
+                    KS_READY
+                },
                 &[&w.epoch],
             ));
             buttons.push((KEY_ACCEPT, ACCEPT_BUTTON));
@@ -6076,6 +6172,36 @@ fn gate_drop_flow(h: Hwnd) -> crypto::Result<()> {
         a.sync_badge = s.badge();
         a.status = line(GATE_DROPPED);
         a.status_tone = TONE_DANGER;
+        a.build();
+        Ok(())
+    })
+    .map(|_| ())
+}
+/// "열쇠 변경 자동 적용 (이 서버를 믿음)" (`KEY_AUTO`, spec §2.30): on
+/// asks S-AUTO-APPLY once (danger, default No), off asks nothing; either is
+/// written to this PC's anchor for this vault, with no password: it changes
+/// no key file, only whether this PC asks the gate of a server change.
+fn auto_apply_flow(h: Hwnd) -> crypto::Result<()> {
+    let p1 = APP.with(|cell| -> crypto::Result<_> {
+        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
+        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
+        a.enter(KEY_AUTO)?;
+        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        let on = !s.auto_apply();
+        a.flow = Some(KEY_AUTO);
+        Ok((a.serial, on))
+    });
+    drain_pending(h);
+    let (serial, on) = p1?;
+    if on && !ask(h, AUTO_ASK) {
+        return Ok(());
+    }
+    phase(h, Screen::Keys, serial, |a| {
+        let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
+        s.set_auto_apply(on)?;
+        a.sync_badge = s.badge();
+        a.status = line(if on { AUTO_ON_DONE } else { AUTO_OFF_DONE });
+        a.status_tone = if on { TONE_DANGER } else { TONE_MUTED };
         a.build();
         Ok(())
     })

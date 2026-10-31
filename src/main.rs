@@ -6798,6 +6798,37 @@ mod tests {
                     app.build();
                     visit(&mut app, name);
                 }
+                // Key-file sync on, a gated change waiting and "열쇠 변경
+                // 자동 적용" on (spec §2.30): its toggle beside the state line.
+                keys_ui::KS_SHOWN.with(|k| {
+                    *k.borrow_mut() = Some(vault::KeySyncView {
+                        on: true,
+                        synced: true,
+                        helper: true,
+                        auto_apply: true,
+                        waiting: Some(vault::Waiting {
+                            epoch: (1 << 48) - 1,
+                            class: vault::KeyClass::Successor {
+                                carry: false,
+                                gate: Some(vault::GateKind::G1),
+                            },
+                            pending_gate: true,
+                            supersede: false,
+                        }),
+                        ..vault::KeySyncView::default()
+                    })
+                });
+                KEYS_VIEW.with(|v| {
+                    *v.borrow_mut() = Some(KeysView {
+                        code: Some("E65536 · DDDD-DDDD-DDDD-DDDD".to_owned()),
+                        hold: Hold::None,
+                        keys: keys.clone(),
+                    })
+                });
+                app.screen = Screen::Keys;
+                app.build();
+                visit(&mut app, "keys-hardware-auto");
+                keys_ui::KS_SHOWN.with(|k| *k.borrow_mut() = None);
                 app.toggles.pick = 0xff;
                 app.screen = Screen::Pair;
                 app.build();
@@ -7719,6 +7750,28 @@ mod tests {
             }
         }
     }
+    /// The security-key build's notice of a vault copy under another PC's
+    /// new key written under key-file sync (spec §2.30, the wrong-notice
+    /// fix): it points to [받기…] and the next unlock, never to this build
+    /// lacking security-key support or to a USB copy.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn a_key_change_through_the_server_is_not_told_as_unsupported() {
+        let _korean = KoreanAfter::hold();
+        let (text, tone) = sync_line(&SyncNotice::KeyChangedServer);
+        let text: &str = &text;
+        assert_eq!(tone, TONE_DANGER);
+        assert!(
+            text.contains("[받기…]") && text.contains("다음 잠금 해제"),
+            "{text}"
+        );
+        let unsupported = sync_line(&SyncNotice::KeyChanged { hardware: true }).0;
+        assert_ne!(text, unsupported.as_str());
+        assert!(
+            !text.contains("지원하지 않아") && !text.contains("USB"),
+            "{text}"
+        );
+    }
     /// Every sync notice, with values as long as they get.
     fn sync_notices() -> Vec<SyncNotice> {
         vec![
@@ -7785,6 +7838,8 @@ mod tests {
             SyncNotice::KeyForkMerge { auto: true },
             #[cfg(feature = "security-key")]
             SyncNotice::KeyForkMerge { auto: false },
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyChangedServer,
         ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
@@ -9834,6 +9889,7 @@ mod tests {
                     GATE_DROP,
                     GATE_SUPERSEDE,
                     KEY_ROLLOUT_DONE,
+                    KEY_AUTO,
                 ],
                 _ => Vec::new(),
             }
@@ -15286,6 +15342,146 @@ mod tests {
             let up = vault::keyfile::parse(&std::fs::read(&kb).unwrap()).unwrap();
             assert_eq!(up.magic, vault::keyfile::Magic::Ks01);
             assert_eq!(up.epoch, on.epoch + 1);
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// "열쇠 변경 자동 적용 (이 서버를 믿음)" in the window (spec §2.30):
+        /// off, B's login asks the gate of A's removal as before (put off
+        /// here). The Keys screen's toggle asks S-AUTO-APPLY once (a No
+        /// changes nothing) and is kept in B's anchor; [받기…] then takes
+        /// the removal with one touch and neither a gate nor a preview, its
+        /// status naming the removed key; A's added key is taken at B's next
+        /// login with the unlock's touch alone, its status naming the new
+        /// key. Turning it off asks nothing.
+        #[test]
+        fn server_key_changes_apply_by_themselves_once_the_server_is_trusted() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b, fake, devices, mut a, (_va, ka), (vb, kb), auth, guard, _clock) =
+                two_on_window("auto-apply", 3, true);
+            let h = guard.0;
+            let parsed = |p: &Path| vault::keyfile::parse(&std::fs::read(p).unwrap()).unwrap();
+            let id = parsed(&ka).vault_id;
+            // A removes key 3 (no loss).
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let change = vault::Change::Remove {
+                remove: vec![3],
+                new_password: None,
+                loss: None,
+                over: None,
+            };
+            assert_eq!(
+                a.rekey(r, Vec::new(), change, vault::Consent::default(), true),
+                Ok(vault::Rekeyed::Done)
+            );
+            key_view(&vb, 2, &std::fs::read(&ka).unwrap());
+            // Off: B's login asks the gate, which is put off.
+            let gates = std::rc::Rc::new(RefCell::new(0));
+            let counted = gates.clone();
+            every_input(move |_, _, kind| {
+                if matches!(kind, InputKind::Pick(_) | InputKind::Code(_)) {
+                    *counted.borrow_mut() += 1;
+                }
+                InputAnswer::Cancel(keys_ui::GATE_LATER)
+            });
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |_| false);
+            login_b(h, &dir_b, &auth, devices[1]);
+            stop_answers();
+            assert_eq!(*gates.borrow(), 1, "{}", status());
+            let before = std::fs::read(&kb).unwrap();
+            // The toggle: a No changes nothing, a Yes is kept.
+            with_app(|a| {
+                a.show(Screen::Keys);
+                a.build();
+                assert_ne!(a.handle(keys_ui::KEY_AUTO), 0, "offered");
+            });
+            every_answer(&asked, |_| false);
+            press(h, keys_ui::KEY_AUTO);
+            with_app(|a| assert!(!a.session.as_ref().unwrap().auto_apply()));
+            every_answer(&asked, |_| true);
+            press(h, keys_ui::KEY_AUTO);
+            stop_answers();
+            assert_eq!(*asked.borrow(), [keys_ui::AUTO_ASK, keys_ui::AUTO_ASK]);
+            asked.borrow_mut().clear();
+            with_app(|a| {
+                assert!(a.session.as_ref().unwrap().auto_apply());
+                assert_eq!(*a.status, keys_ui::AUTO_ON_DONE);
+            });
+            // [받기…]: one touch, no gate, no preview.
+            every_input(|n, text, _| panic!("asked {n}: {text}"));
+            every_answer(&asked, |_| false);
+            set(h, CURRENT_PASS, PASS2);
+            auth.plan(&[Some(devices[1])]);
+            let seen = fake.seen().len();
+            press(h, keys_ui::KEY_ACCEPT);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            // The backup, then S-PRUNE after a removal; no gate, no preview.
+            assert_eq!(
+                *asked.borrow(),
+                [BACKUP_QUESTION, keys_ui::PRUNE_ASK],
+                "{}",
+                status()
+            );
+            asked.borrow_mut().clear();
+            let removed = vault::KeyChange {
+                removed: vec![3],
+                ..vault::KeyChange::default()
+            };
+            let notice = keys_ui::auto_applied(&removed, "");
+            assert!(status().starts_with(notice.trim_end()), "{}", status());
+            assert_ne!(std::fs::read(&kb).unwrap(), before);
+            assert_eq!(parsed(&kb).state(), parsed(&ka).state());
+            with_app(|a| a.lock("synthetic lock", true));
+            // A adds key 4; B's next login takes it with the unlock's touch.
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let d4 = fake.plug(Device::with_pin());
+            fake.touch(Some(d4));
+            let key4 = register(&*fake, &id, 4, 0, true, Vec::new()).unwrap();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::AddKey(key4),
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            key_view(&vb, 3, &std::fs::read(&ka).unwrap());
+            every_input(|n, text, _| panic!("asked {n}: {text}"));
+            every_answer(&asked, |_| false);
+            let seen = fake.seen().len();
+            login_b(h, &dir_b, &auth, devices[1]);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            assert_eq!(*asked.borrow(), [BACKUP_QUESTION], "{}", status());
+            asked.borrow_mut().clear();
+            let added = vault::KeyChange {
+                added: vec![4],
+                ..vault::KeyChange::default()
+            };
+            let notice = keys_ui::auto_applied(&added, "");
+            assert!(status().contains(notice.trim_end()), "{}", status());
+            assert_eq!(parsed(&kb).state(), parsed(&ka).state());
+            // Off asks nothing.
+            with_app(|a| {
+                a.show(Screen::Keys);
+                a.build();
+            });
+            every_answer(&asked, |text| panic!("asked: {text}"));
+            press(h, keys_ui::KEY_AUTO);
+            stop_answers();
+            with_app(|a| {
+                assert!(!a.session.as_ref().unwrap().auto_apply());
+                assert_eq!(*a.status, keys_ui::AUTO_OFF_DONE);
+            });
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);

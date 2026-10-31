@@ -62,6 +62,9 @@ pub const NO_CANDIDATE: &str = "서버에 받을 열쇠 파일이 없습니다."
 /// is not under the candidate's own state halts sync; the head override
 /// lifts it first.
 pub const SUPERSEDE_HEAD: &str = "서버의 최신 금고 사본(수정 {epoch}, 열쇠 {key})이 다시 올리려는 열쇠 파일과 맞지 않아 아무것도 하지 않았습니다. 그 사본을 쓴 PC를 더 쓸 수 없는 것이 확실할 때만 먼저 '서버 사본을 이 PC 상태로 덮어쓰기…'를 하고 다시 하세요.";
+/// "열쇠 변경 자동 적용 (이 서버를 믿음)" (spec §2.30) is only for a key
+/// file that syncs through the server, on a PC that confirmed it.
+pub const AUTO_NOT_SYNCED: &str = "열쇠 변경 자동 적용은 열쇠 파일 동기화를 쓰는 금고에서, 이 PC가 열쇠 파일을 확인한 뒤에만 켤 수 있습니다.";
 /// The server's file is no longer a change the supersede serves.
 pub const NOT_SUPERSEDABLE: &str = "서버의 열쇠 파일은 이제 이 PC 상태로 다시 올려 대신할 수 있는 변경이 아닙니다. '열쇠 관리'를 다시 확인하세요.";
 /// A server file that this flow cannot take (a fork, a refused file).
@@ -169,6 +172,9 @@ pub struct KeySyncView {
     pub stale_gate: Option<u64>,
     /// The rollout reminder is on: [모든 PC 확인 완료] (§7.18).
     pub rollout: bool,
+    /// "열쇠 변경 자동 적용 (이 서버를 믿음)" is on for this vault on this
+    /// PC (spec §2.30).
+    pub auto_apply: bool,
 }
 
 /// The key side of a sync link (spec §7.10-§7.12): what this session last
@@ -971,7 +977,19 @@ impl Session {
                 _ => {}
             }
         }
-        if self.pending_gate().is_some() {
+        if let Some(g) = self.pending_gate() {
+            // With "열쇠 변경 자동 적용" on, the server's change waits for
+            // [받기…] or the next unlock, which take it with no question
+            // (spec §2.30): told as a change that needs no gate.
+            if self.auto_apply()
+                && matches!(link.keys.top, Top::Key {
+                    state,
+                    class: KeyClass::Successor { .. },
+                    ..
+                } if (state.epoch, state.tag) == (g.epoch, g.tag))
+            {
+                return Some(SyncNotice::KeyFileReady { epoch: g.epoch });
+            }
             return Some(SyncNotice::GatePending);
         }
         if let Some(seq) = link.keys.dropped.filter(|_| !link.keys.deleted_told) {
@@ -1021,6 +1039,7 @@ impl Session {
             on: self.ks01(),
             synced: self.format == super::Format::V2,
             rollout: self.rollout().is_some(),
+            auto_apply: self.auto_apply(),
             ..KeySyncView::default()
         };
         let Some(link) = self.sync.as_ref() else {
@@ -1494,6 +1513,53 @@ impl Session {
             }
             _ => false,
         })
+    }
+    /// "열쇠 변경 자동 적용 (이 서버를 믿음)" (spec §2.30): this PC's
+    /// preference for this vault, the confirmed line's `auto`.
+    pub fn auto_apply(&self) -> bool {
+        self.anchor
+            .lines
+            .vault
+            .as_ref()
+            .is_some_and(|v| v.state.auto)
+    }
+    /// Turns it on or off in this PC's anchor, in the confirmed line and in
+    /// a pending one, which becomes the confirmed line when it lands. On
+    /// only for a GOYOKS01 key file this PC confirmed (AUTO_NOT_SYNCED);
+    /// off always. The UI asks S-AUTO-APPLY before an on, and nothing
+    /// before an off.
+    pub fn set_auto_apply(&mut self, on: bool) -> Result<()> {
+        if on && (!self.ks01() || self.unconfirmed() || self.restored) {
+            return Err(AUTO_NOT_SYNCED);
+        }
+        self.anchor_strict(&mut |lines| {
+            let Some(v) = lines.vault.as_mut() else {
+                return false;
+            };
+            v.state.auto = on;
+            if let Some(p) = lines.pending.as_mut() {
+                p.state.auto = on;
+            }
+            true
+        })?;
+        if self.auto_apply() != on {
+            return Err(AUTO_NOT_SYNCED);
+        }
+        Ok(())
+    }
+    /// A server key file that would wait for its gate is taken as if the
+    /// gate had passed (spec §2.30): only with `auto` on, only from the
+    /// server channel (never a USB file), only for a file that descends
+    /// from this PC's (no fork), only on a GOYOKS01 key file this PC
+    /// confirmed (never a bootstrap or a Restore). Every public check has
+    /// run before this is asked, and runs again at the write.
+    pub fn trusts(&self, check: &super::AdoptCheck) -> bool {
+        matches!(check.source, super::Source::Server { .. })
+            && !check.fork
+            && self.auto_apply()
+            && self.ks01()
+            && !self.unconfirmed()
+            && !self.restored
     }
 }
 /// What S-ROLLOUT says (spec §7.18), by the gate the change this PC made

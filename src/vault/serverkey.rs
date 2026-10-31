@@ -18,7 +18,7 @@ use super::{
     AnchorClass, Given, KeyClass, Prepared, Session,
     gate::{self, GateAnswer, GateChoice, GateKind},
     keyfile::{
-        Bundle, Code, EPOCH_SILENT, EPOCH_WINDOW, KeyFile, KeyHeader, KeyState, Kind, Touch,
+        Bundle, Code, EPOCH_SILENT, EPOCH_WINDOW, KeyFile, KeyHeader, KeyState, Kind, Magic, Touch,
         is_sync_key_file, key_id,
     },
     rotate::{Acks, AdoptClass, Adopted, Consent, ForkOption, GatePass, Source, UnionPassword},
@@ -276,8 +276,12 @@ impl ServerEntry {
     /// yes or S-TRY-OTHERKEY's ceremony and before the open: the kind, the
     /// keys S-LOSTPICK offers (this PC's confirmed ones only) with the key
     /// the unlock touched, and the snapshot's epoch (public). None needs
-    /// none.
+    /// none, and so does a snapshot taken under "열쇠 변경 자동 적용" (spec
+    /// §2.30), which `login_via_server` judges once it is open.
     pub fn gate(&self) -> Option<(GateKind, Vec<GateChoice>, Option<u8>, u64)> {
+        if self.trusted() {
+            return None;
+        }
         let (file, kind) = self.prepared.successor_gate()?;
         let choices = self
             .prepared
@@ -286,6 +290,12 @@ impl ServerEntry {
             .map(|l| gate::choices(&l.state.slots))
             .unwrap_or_default();
         Some((kind?, choices, self.touched, file.header()?.epoch))
+    }
+    /// This PC turned on "열쇠 변경 자동 적용" for the vault, on its
+    /// GOYOKS01 key file (spec §2.30): the gate is not asked.
+    pub fn trusted(&self) -> bool {
+        self.prepared.key.magic() == Some(Magic::Ks01)
+            && self.prepared.seen.confirmed().is_some_and(|l| l.state.auto)
     }
     /// S-TRY-OTHERKEY's ceremony: the keys only the snapshot lists, with
     /// its seeds.
@@ -744,6 +754,8 @@ impl Session {
             (None, _) => GatePass::none(&check),
             (Some(_), Some(GateAnswer::Pick(pick))) => GatePass::G2Passed { pick, epoch, tag },
             (Some(_), Some(GateAnswer::Code(code))) => GatePass::G1Passed { code, epoch, tag },
+            // Auto-apply (spec §2.30), judged by the preview.
+            (Some(_), None) if entry.trusted() => GatePass::Trusted { epoch, tag },
             (Some(_), None) => return Err(gate::GATE_NOT_PENDING),
         };
         let plan = s.adopt_preview_with(&r, &file, opened, &check, pass, ForkOption::Both)?;

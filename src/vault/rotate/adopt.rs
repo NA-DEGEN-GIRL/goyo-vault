@@ -87,6 +87,13 @@ pub enum GatePass {
         epoch: u64,
         tag: [u8; 16],
     },
+    /// "열쇠 변경 자동 적용 (이 서버를 믿음)" (spec §2.30): no question was
+    /// asked; the preview takes it only where `Session::trusts` holds.
+    #[cfg(feature = "security-key")]
+    Trusted {
+        epoch: u64,
+        tag: [u8; 16],
+    },
 }
 impl GatePass {
     /// The pass of a file that needs no gate.
@@ -104,7 +111,9 @@ impl GatePass {
                 tag: *tag,
             },
             #[cfg(feature = "security-key")]
-            Self::G2Passed { epoch, tag, .. } | Self::G1Passed { epoch, tag, .. } => KeyState {
+            Self::G2Passed { epoch, tag, .. }
+            | Self::G1Passed { epoch, tag, .. }
+            | Self::Trusted { epoch, tag } => KeyState {
                 epoch: *epoch,
                 tag: *tag,
             },
@@ -258,6 +267,23 @@ pub struct Preview {
     /// its `ks` asks the server to delete its key file (S6R2 #22).
     #[cfg(feature = "security-key")]
     pub keysync_off: Option<bool>,
+    /// What the change makes of this PC's keys and password (the notice of
+    /// an auto-applied take, spec §2.30), known once the gate passed.
+    #[cfg(feature = "security-key")]
+    pub change: KeyChange,
+}
+/// What a change makes of this PC's keys and password, as the notice of a
+/// take that trusted the server names it (spec §2.30), from this PC's own
+/// state where it can: this PC's numbers of the keys the file removes, the
+/// file's numbers of the keys new to this PC, whether its password differs
+/// from this PC's, and any other change of keys or settings.
+#[cfg(feature = "security-key")]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct KeyChange {
+    pub removed: Vec<u8>,
+    pub added: Vec<u8>,
+    pub password: bool,
+    pub other: bool,
 }
 /// An adopt checked, opened and previewed, for `adopt` to write. Bound to
 /// its session and screen like the Reauth (spec §5.3).
@@ -309,6 +335,12 @@ pub struct Adopted {
     pub dropped_uv: Vec<u8>,
     #[cfg(feature = "security-key")]
     pub suspended: Vec<u8>,
+    /// The take trusted the server in place of its gate (spec §2.30), and
+    /// what it changed, for the notice.
+    #[cfg(feature = "security-key")]
+    pub trusted: bool,
+    #[cfg(feature = "security-key")]
+    pub change: KeyChange,
 }
 
 /// What a key file states before it opens, for the checks of an adopt: its
@@ -745,6 +777,8 @@ impl Session {
             keysync_on: false,
             #[cfg(feature = "security-key")]
             keysync_off: None,
+            #[cfg(feature = "security-key")]
+            change: self.key_change(check, other),
         };
         // A union with security keys, planned now with the touches so far:
         // what it renumbers, drops and would suspend.
@@ -850,7 +884,8 @@ impl Session {
                 plan.preview.keysync_off.and(self.take_ks(&plan.check))
             };
             let (merged, clear_gate) = self.take_marks(&plan.check);
-            (ks, merged, clear_gate)
+            let trusted = matches!(plan.gate, GatePass::Trusted { .. });
+            (ks, merged, clear_gate, trusted)
         };
         if !self.key_on_disk()? {
             return Err(KEY_CHANGED);
@@ -876,6 +911,8 @@ impl Session {
         let same = plan.equal || keep_own;
         #[cfg(feature = "security-key")]
         let mut report = (Vec::new(), Vec::new(), Vec::new());
+        #[cfg(feature = "security-key")]
+        let (plan_gate, plan_change) = (plan.gate.clone(), plan.preview.change.clone());
         let rekeyed = match plan.check.class {
             #[cfg(feature = "security-key")]
             AdoptClass::Successor if other.needs_security_key() => {
@@ -886,6 +923,7 @@ impl Session {
                     built.landing.ks,
                     built.landing.merged,
                     built.landing.clear_gate,
+                    built.landing.trusted,
                 ) = landing;
                 self.land(
                     built,
@@ -923,6 +961,7 @@ impl Session {
                     union.landing.ks,
                     union.landing.merged,
                     union.landing.clear_gate,
+                    union.landing.trusted,
                 ) = landing;
                 report = (
                     union.renumbered.clone(),
@@ -948,9 +987,17 @@ impl Session {
                 };
                 let pw = (!same).then_some(anchor::Pw::Other);
                 let epoch = plan.check.epoch;
+                let (trusted, change) = (
+                    matches!(plan_gate, GatePass::Trusted { .. }),
+                    plan.preview.change.clone(),
+                );
                 return self
                     .write_union(r, union, keys, &password, pw_id, epoch, &consent, pw)
-                    .map(|rekeyed| self.adopted(rekeyed, same, report));
+                    .map(|rekeyed| Adopted {
+                        trusted,
+                        change,
+                        ..self.adopted(rekeyed, same, report)
+                    });
             }
             AdoptClass::Union => {
                 #[cfg(feature = "security-key")]
@@ -976,18 +1023,28 @@ impl Session {
         };
         drop(r);
         // A successor taken with its own code ends a bootstrap (spec §7.17):
-        // its S0 entry wrote `t` for it. A gate passed allows G2 again.
+        // its S0 entry wrote `t` for it. A gate passed allows G2 again; a
+        // take that trusted the server asked no gate (spec §2.30).
         #[cfg(feature = "security-key")]
         {
             (self.tofu, self.held_unconfirmed) = (false, false);
-            self.g2_spent.set(false);
+            if !matches!(plan_gate, GatePass::Trusted { .. }) {
+                self.g2_spent.set(false);
+            }
         }
-        Ok(self.adopted(
+        #[allow(unused_mut)]
+        let mut adopted = self.adopted(
             rekeyed,
             same,
             #[cfg(feature = "security-key")]
             report,
-        ))
+        );
+        #[cfg(feature = "security-key")]
+        {
+            adopted.trusted = matches!(plan_gate, GatePass::Trusted { .. });
+            adopted.change = plan_change;
+        }
+        Ok(adopted)
     }
     /// What an adopt wrote, for the status (spec §5.8).
     fn adopted(
@@ -1014,6 +1071,29 @@ impl Session {
             dropped_uv,
             #[cfg(feature = "security-key")]
             suspended,
+            #[cfg(feature = "security-key")]
+            trusted: false,
+            #[cfg(feature = "security-key")]
+            change: KeyChange::default(),
+        }
+    }
+    /// What `other` changes of this PC's keys and password (spec §2.30):
+    /// R by this PC's numbers, Δ by the file's, the password by `pw_id`,
+    /// and T_new, a policy or a slot change as "other".
+    #[cfg(feature = "security-key")]
+    fn key_change(&self, check: &AdoptCheck, other: &KeyFile) -> KeyChange {
+        let (Some(own), Some(theirs)) = (self.key_file.header(), other.header()) else {
+            return KeyChange::default();
+        };
+        let g = &check.keys.checked.gates;
+        let number = |h: &KeyHeader, c: &[u8; 16]| {
+            h.slots.iter().find(|s| s.credhash == *c).map(|s| s.number)
+        };
+        KeyChange {
+            removed: g.removed.iter().filter_map(|c| number(own, c)).collect(),
+            added: g.added.iter().filter_map(|c| number(theirs, c)).collect(),
+            password: !ct_eq(&own.pw_id, &theirs.pw_id),
+            other: !g.unknown.is_empty() || g.policy || g.slot,
         }
     }
     /// The successor re-seal (spec §5.8): the other file's `[0, W)` byte for
@@ -1351,6 +1431,12 @@ impl Session {
                     Err(gate::GATE_CODE_WRONG)
                 }
             }
+            // Auto-apply (spec §2.30): the server channel only, a file that
+            // descends from this PC's, never in TOFU; everything above (the
+            // public checks again, the open, rule D) and below (E5, the
+            // write's checks) still holds.
+            (GatePass::Trusted { .. }, Some(_)) if self.trusts(check) => Ok(()),
+            (GatePass::Trusted { .. }, Some(_)) => Err(gate::NOT_TRUSTED),
             _ => Err(ADOPT_STALE),
         }
     }
@@ -1610,6 +1696,14 @@ mod tests {
                 dropped_uv: Vec::new(),
                 #[cfg(feature = "security-key")]
                 suspended: Vec::new(),
+                // A password change, asked no gate (spec §2.30).
+                #[cfg(feature = "security-key")]
+                trusted: false,
+                #[cfg(feature = "security-key")]
+                change: KeyChange {
+                    password: true,
+                    ..KeyChange::default()
+                },
             }
         );
         // The same state, and so the same key code; this PC's seal block.

@@ -361,6 +361,10 @@ pub(in crate::vault) struct Landing {
     /// `clears=s`: a supersede marks its candidate's gate line superseded
     /// (spec §7.15a).
     pub(super) supersede: bool,
+    /// The take trusted the server instead of asking its gate (spec
+    /// §2.30): no `clears=2`, so a G2 turned off stays off (a write the
+    /// server made this PC do never turns it back on, §7.15a).
+    pub(super) trusted: bool,
     /// `sup`: the candidate's data-key IDs this PC lacks, each with the
     /// candidate's state, so a vault head under that state is pushed over
     /// at every unlock (spec §5.10, §7.1).
@@ -391,6 +395,9 @@ impl Landing {
         }
         p.clears.g |= self.clear_gate;
         p.clears.s |= self.supersede;
+        if self.trusted {
+            p.clears.two = false;
+        }
         if self.merged.is_some() {
             p.merged = self.merged;
         }
@@ -2443,6 +2450,7 @@ impl Session {
                 ks: plan.landing.ks,
                 clear_gate: plan.landing.clear_gate,
                 merged: plan.landing.merged,
+                trusted: plan.landing.trusted,
                 ..Landing::default()
             };
             let rekeyed = self.land(built, anchor::Src::Adopt, pw);

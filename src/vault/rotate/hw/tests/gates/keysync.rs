@@ -10,7 +10,7 @@ use crate::{
         render_record_header,
     },
     vault::{
-        SyncNotice,
+        AUTO_NOT_SYNCED, KeyChange, NOT_TRUSTED, SyncNotice,
         anchor::{GateState, Ks},
         keyfile::EPOCH_SILENT,
         keysync::{
@@ -1811,9 +1811,10 @@ fn a_change_whose_pc_is_gone_is_superseded() {
     let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
     let told = polls(&mut sb);
     assert!(
-        !told
-            .iter()
-            .any(|n| matches!(n, SyncNotice::KeyChanged { .. } | SyncNotice::KeyFork)),
+        !told.iter().any(|n| matches!(
+            n,
+            SyncNotice::KeyChanged { .. } | SyncNotice::KeyChangedServer | SyncNotice::KeyFork
+        )),
         "{told:?}"
     );
     assert!(dir(&b).join(OUTGOING).exists());
@@ -2097,5 +2098,274 @@ fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
             .any(|n| matches!(n, SyncNotice::KeyForkMerge { .. })),
         "{told:?}"
     );
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// The take of auto-apply (spec §2.30): no gate question, the gate passed
+/// as trusted.
+fn trusted(c: &AdoptCheck, _: &Session) -> GatePass {
+    GatePass::Trusted {
+        epoch: c.other.epoch,
+        tag: c.other.tag,
+    }
+}
+/// One helper pass for `pc`, then polls of `s` until nothing changes.
+fn fetch(pc: &Pc, s: &mut Session, server: &mut KeyServer, id: &[u8; 16]) -> Vec<SyncNotice> {
+    pc.here();
+    server.pass(pc, id);
+    polls(s)
+}
+
+/// Spec §2.30 ("열쇠 변경 자동 적용 (이 서버를 믿음)"): off, A's removal
+/// waits for its gate on B as before and a take that trusts the server is
+/// refused with nothing written. On (stored in B's anchor and read again
+/// by the next session), never for a USB file, the removal and then A's
+/// added key come from the server with no gate answer, each told by what
+/// it changed (this PC's number of the removed key, the file's of the new
+/// one), the review of the removal for a loss still due, G2 not turned
+/// back on, and the public checks still holding: an older file from the
+/// server is not taken. Off asks nothing; a bootstrap cannot turn it on.
+#[test]
+fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let shared = fs::read(a.key()).unwrap();
+    a.here();
+    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    fetch(&a, &mut sa, &mut server, &id);
+    let told = fetch(&b, &mut sb, &mut server, &id);
+    assert!(told.contains(&SyncNotice::GatePending), "{told:?}");
+    // Off: the gate as today.
+    assert!(!sb.auto_apply() && !b.lines(&id).vault.unwrap().state.auto);
+    let (f, seq) = sb.server_key_file().unwrap();
+    let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
+    assert!(!sb.trusts(&check));
+    assert_eq!(check.keys.gate, Some(GateKind::G2));
+    let before = fs::read(b.key()).unwrap();
+    let taken = take_server(&mut sb, &mut codes, &keys, 2, trusted);
+    assert_eq!(taken.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    // A wrong pick turns G2 off for B (as before); the trusted take below
+    // never turns it back on.
+    let picked = take_server(&mut sb, &mut codes, &keys, 2, pick(&[1]));
+    assert_eq!(picked.err(), Some(GATE_G2FAIL));
+    assert!(!b.lines(&id).gate.unwrap().g2);
+    // On: in the anchor, and a server change is taken with no answer.
+    sb.set_auto_apply(true).unwrap();
+    assert!(sb.auto_apply() && b.lines(&id).vault.unwrap().state.auto);
+    assert!(sb.key_sync_view().unwrap().auto_apply);
+    let removal = fs::read(a.key()).unwrap();
+    // Never a USB file.
+    let usb = take(
+        &mut sb,
+        &mut codes,
+        &keys,
+        (OLD, 2),
+        &removal,
+        ForkOption::Both,
+        trusted,
+        Consent::default(),
+    );
+    assert_eq!(usb.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    let (f, seq) = sb.server_key_file().unwrap();
+    assert!(sb.trusts(&sb.adopt_check(&f, Source::Server { seq }).unwrap()));
+    let adopted = take_server(&mut sb, &mut codes, &keys, 2, trusted).unwrap();
+    assert!(adopted.trusted);
+    assert_eq!(
+        adopted.change,
+        KeyChange {
+            removed: vec![3],
+            ..KeyChange::default()
+        }
+    );
+    assert_eq!(header(&b).state(), header(&a).state());
+    assert!(sb.review_due().is_some(), "the review of a loss stays due");
+    assert!(b.lines(&id).review.is_some_and(|r| r.due));
+    // G2 stays off: the gate is cleared into a line that holds nothing.
+    let line = b.lines(&id).gate.unwrap();
+    assert_eq!((line.state, line.g2), (GateState::None, false));
+    fetch(&b, &mut sb, &mut server, &id);
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    // A adds key 4 with key 1: G1 before, none asked now.
+    a.here();
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    fetch(&a, &mut sa, &mut server, &id);
+    let told = fetch(&b, &mut sb, &mut server, &id);
+    assert!(
+        told.iter()
+            .any(|n| matches!(n, SyncNotice::KeyFileReady { .. })),
+        "{told:?}"
+    );
+    let (f, seq) = sb.server_key_file().unwrap();
+    let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
+    assert_eq!(check.keys.gate, Some(GateKind::G1));
+    let adopted = take_server(&mut sb, &mut codes, &keys, 2, trusted).unwrap();
+    assert_eq!(
+        adopted.change,
+        KeyChange {
+            added: vec![4],
+            ..KeyChange::default()
+        }
+    );
+    assert_eq!(header(&b).state(), header(&a).state());
+    // An older file from the server (the shared state before the removal)
+    // is still refused.
+    let generation = server.records.last().unwrap().1;
+    let floor = parse(&shared).unwrap().epoch;
+    server
+        .records
+        .push((RecordKind::Key, generation, floor, shared.clone()));
+    fetch(&b, &mut sb, &mut server, &id);
+    let after = fs::read(b.key()).unwrap();
+    assert!(!matches!(
+        sb.server_class(),
+        Some(KeyClass::Successor { .. } | KeyClass::KeyFork)
+    ));
+    let (f, seq) = sb.server_key_file().unwrap();
+    assert!(sb.adopt_check(&f, Source::Server { seq }).is_err());
+    assert!(take_server(&mut sb, &mut codes, &keys, 2, trusted).is_err());
+    assert_eq!(fs::read(b.key()).unwrap(), after);
+    // Read again by the next session; off asks nothing and writes it.
+    drop(sb);
+    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    assert!(sb.auto_apply());
+    sb.set_auto_apply(false).unwrap();
+    assert!(!sb.auto_apply() && !b.lines(&id).vault.unwrap().state.auto);
+    drop(sb);
+    // A bootstrap (a new PC with B's files) cannot turn it on.
+    let c = Pc::new();
+    carry(&b, &c);
+    let mut sc = open(&c, OLD, &mut codes, &keys, 2).unwrap();
+    assert!(sc.tofu());
+    assert_eq!(sc.set_auto_apply(true).err(), Some(AUTO_NOT_SYNCED));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §2.30: with auto-apply on, a server file that fails a public check
+/// is still refused before any touch: one authored by a key this PC's user
+/// removed (P4; a fork of the state before that removal, which the trust
+/// never serves either).
+#[test]
+fn auto_apply_still_refuses_a_file_of_a_removed_key() {
+    let (_a, _sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let shared = fs::read(b.key()).unwrap();
+    b.here();
+    sb.set_auto_apply(true).unwrap();
+    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    fetch(&b, &mut sb, &mut server, &id);
+    assert_eq!(sb.server_class(), Some(KeyClass::Equal));
+    let mine = fs::read(b.key()).unwrap();
+    // Key 3's holder, with the password, writes on the state before.
+    let forged = Forger {
+        keys: &keys,
+        base: shared,
+        x: 3,
+    }
+    .forge(|_| {});
+    let generation = server.records.last().unwrap().1;
+    let floor = parse(&forged).unwrap().epoch;
+    server
+        .records
+        .push((RecordKind::Key, generation, floor, forged));
+    let told = fetch(&b, &mut sb, &mut server, &id);
+    assert!(
+        told.contains(&SyncNotice::KeyFileRefused(REMOVED_AUTHORIZER)),
+        "{told:?}"
+    );
+    let (derived, seen) = (derive_count(), keys.fake.seen().len());
+    let taken = take_server(&mut sb, &mut codes, &keys, 1, trusted);
+    assert_eq!(taken.err(), Some(ADOPT_REFUSED));
+    assert_eq!(
+        refusal_values(ADOPT_REFUSED),
+        Some(vec![REMOVED_AUTHORIZER.to_owned()])
+    );
+    assert_eq!((derive_count(), keys.fake.seen().len()), (derived, seen));
+    assert_eq!(fs::read(b.key()).unwrap(), mine);
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §2.30 (the wrong notice, task 2 of that round): on a security-key
+/// build, a vault copy under another PC's new key, written under key-file
+/// sync (A removed a key), halts B with KeyChangedServer, the change that
+/// [받기…] or the next unlock takes; never the default build's "this build
+/// cannot take that key file" (KeyChanged{hardware: true}) or the USB
+/// advice of KeyChanged. Told once per halt.
+#[test]
+fn a_copy_under_another_pcs_new_key_points_to_the_server_key_file() {
+    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    a.here();
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, remove(&[3], None, None)),
+        Ok(Rekeyed::Done)
+    );
+    fetch(&a, &mut sa, &mut server, &id);
+    a.here();
+    assert!(uploads(&a, &mut sa, "after the removal"));
+    let out = fs::read(dir(&a).join(OUTGOING)).unwrap();
+    let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
+    // goyo-sync on B brought the vault copy before the key file.
+    b.here();
+    let incoming = syncfile::render_incoming(50, copy).unwrap();
+    syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
+    let told = polls(&mut sb);
+    assert!(told.contains(&SyncNotice::KeyChangedServer), "{told:?}");
+    let wrong = |told: &[SyncNotice]| {
+        told.iter()
+            .any(|n| matches!(n, SyncNotice::KeyChanged { .. }))
+    };
+    assert!(!wrong(&told), "{told:?}");
+    assert!(!polls(&mut sb).contains(&SyncNotice::KeyChangedServer));
+    set_kdf_profile(KdfProfile::Real);
+}
+
+/// Spec §2.30: auto-apply never joins a fork. A adds key 4 while B
+/// removes key 3 from the same state; B's removal meets A's record
+/// (KeyFork), and the union of the two needs A's code (G1): with auto-apply
+/// on, a take that trusts the server is refused and nothing is written.
+#[test]
+fn auto_apply_never_joins_a_fork() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    b.here();
+    sb.set_auto_apply(true).unwrap();
+    a.here();
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    fetch(&a, &mut sa, &mut server, &id);
+    b.here();
+    assert_eq!(
+        rekey(&mut sb, &mut codes, &keys, 2, remove(&[3], None, None)),
+        Ok(Rekeyed::Done)
+    );
+    fetch(&b, &mut sb, &mut server, &id);
+    assert_eq!(sb.server_class(), Some(KeyClass::KeyFork));
+    let (f, seq) = sb.server_key_file().unwrap();
+    let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
+    assert!(check.fork && check.keys.gate.is_some(), "{check:?}");
+    assert!(!sb.trusts(&check));
+    let mine = fs::read(b.key()).unwrap();
+    let taken = take_server(&mut sb, &mut codes, &keys, 2, trusted);
+    assert_eq!(taken.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), mine);
     set_kdf_profile(KdfProfile::Real);
 }

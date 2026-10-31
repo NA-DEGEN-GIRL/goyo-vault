@@ -3149,4 +3149,64 @@ If the server answers this way for a vault that used key-file sync, the server s
         "서버의 ~/.ssh/authorized_keys에서 이 PC 전용 키의 줄을 다음 한 줄로 바꾸세요. 공개 키 자리에는 그 키의 .pub 파일 내용을 넣습니다.\n\n{}\n\n이 줄은 이 PC의 전용 키로는 goyo-sync 동기화만 하게 묶습니다(셸·전달 금지). --key-sync=에 적힌 금고만 열쇠 파일을 서버와 주고받을 수 있습니다.\n{}\n\n이 창에서 Ctrl+C를 누르면 창의 글 전체가 복사되니, authorized_keys에는 restrict,command=로 시작하는 그 한 줄만 남기세요.",
         "In ~/.ssh/authorized_keys on the server, replace the line of this PC's dedicated key with the line below. In place of the public key put the content of that key's .pub file.\n\n{}\n\nThis line lets this PC's dedicated key do goyo-sync's sync only (no shell, no forwarding). Only the vaults after --key-sync= can exchange key files with the server.\n{}\n\nCtrl+C in this window copies all of its text, so keep only the one line that starts with restrict,command= in authorized_keys.",
     ),
+    (
+        "열쇠 변경 자동 적용은 열쇠 파일 동기화를 쓰는 금고에서, 이 PC가 열쇠 파일을 확인한 뒤에만 켤 수 있습니다.",
+        "Auto-apply of key changes can be turned on only for a vault that uses key-file sync, after this PC confirmed its key file.",
+    ),
+    (
+        "열쇠 변경 자동 적용이 꺼져 있거나 이 열쇠 파일에는 쓸 수 없어 받지 않았습니다. 처음부터 다시 하세요.",
+        "Not taken: auto-apply of key changes is off or does not apply to this key file. Start again.",
+    ),
+    (
+        "열쇠 변경 자동 적용 (이 서버를 믿음)",
+        "Auto-apply key changes (trust this server)",
+    ),
+    (
+        "열쇠 변경 자동 적용을 켜면 다른 PC에서 한 열쇠 변경(보안 키 제거, 보안 키 추가, 비밀번호 변경)이 서버로 왔을 때, 어느 키를 잃어버렸는지 고르거나 그 PC의 열쇠 확인 코드를 입력하지 않고 이 PC에 적용합니다. 새 열쇠 파일을 열 때의 보안 키 터치와 비밀번호, 위조를 막는 다른 확인은 그대로입니다.
+
+서버를 장악한 사람이 이 금고의 보안 키 하나와 그 PIN, 그리고 비밀번호까지 함께 갖고 있지 않는 한 안전합니다. 그런 사람이 생기면 그 사람은 이 PC가 자기가 아는 데이터 키로 바꾸게 만들 수 있습니다(그 뒤 저장하는 항목을 읽을 수 있게 됩니다).
+
+이 설정은 이 PC의 이 금고에만 적용되고, 끌 때는 묻지 않습니다. 켤까요?",
+        "With auto-apply on, a key change made on another PC (a security key removed, a security key added, a password change) that arrives from the server is applied on this PC without asking which key was lost or for that PC's key check code. The security key touch and the password needed to open the new key file, and the other checks against forgery, stay.
+
+This is safe as long as whoever takes over the server does not also hold one of this vault's security keys with its PIN and your password. If someone ever did, that person could make this PC switch to a data key they know (and read what is saved after that).
+
+This applies to this vault on this PC only, and turning it off asks nothing. Turn it on?",
+    ),
+    (
+        "열쇠 변경 자동 적용을 켰습니다. 서버로 온 열쇠 변경은 [받기…]나 다음 잠금 해제 때 묻지 않고 적용합니다.",
+        "Auto-apply of key changes is on. A key change from the server is applied with no question at [Get…] or at the next unlock.",
+    ),
+    (
+        "열쇠 변경 자동 적용을 껐습니다. 서버로 온 열쇠 변경은 다시 잃어버린 키를 고르거나 코드를 입력해야 받습니다.",
+        "Auto-apply of key changes is off. A key change from the server again needs the lost keys picked or the code typed.",
+    ),
+    (
+        "열쇠 파일 변경을 적용했습니다: {what}. 열쇠 확인 코드 {code}",
+        "Applied the key file change: {what}. Key check code {code}",
+    ),
+    (
+        "보안 키 {list} 제거",
+        "security key {list} removed",
+    ),
+    (
+        "이 PC에서 처음 보는 보안 키 {list} 추가",
+        "security key {list} new to this PC added",
+    ),
+    (
+        "비밀번호 변경됨",
+        "password changed",
+    ),
+    (
+        "열쇠 설정 변경",
+        "key settings changed",
+    ),
+    (
+        "다른 PC에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. 새 열쇠 파일은 서버로 옵니다. '열쇠 관리'의 [받기…]로 받거나 다음 잠금 해제 때 받으세요.",
+        "Another PC changed this vault's keys, so sync stopped. The new key file comes through the server: take it with [Get…] in 'Key management' or at the next unlock.",
+    ),
+    (
+        "그런 변경을 한 PC가 없다면 서버 사본이 위조되었을 수 있습니다. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+        "If no PC made such a change, the server copy may be forged. Until then, this PC's changes are saved on this PC only.",
+    ),
 ];

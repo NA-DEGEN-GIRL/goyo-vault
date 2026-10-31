@@ -62,6 +62,10 @@ pub const GATE_HELD: &str = "이 PC의 열쇠 파일이 바뀌었습니다. 잃�
 /// A gate answer for a key file other than the one this session waits for.
 pub const GATE_NOT_PENDING: &str =
     "확인할 열쇠 파일이 없거나 그 사이에 바뀌었습니다. 처음부터 다시 하세요.";
+/// A take that trusted the server (spec §2.30) where auto-apply does not
+/// serve: the setting is off, the file came by USB, it is a fork, or this
+/// PC has not confirmed its key file.
+pub const NOT_TRUSTED: &str = "열쇠 변경 자동 적용이 꺼져 있거나 이 열쇠 파일에는 쓸 수 없어 받지 않았습니다. 처음부터 다시 하세요.";
 
 /// Which gate a change needs (spec §7.15a).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
