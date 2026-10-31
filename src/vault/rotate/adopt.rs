@@ -866,6 +866,13 @@ impl Session {
         {
             return Err(ADOPT_STALE);
         }
+        // A take that trusted the server (spec §2.30) is judged again at
+        // the write, like the checks: the setting turned off, or the
+        // server's view moved on, since the preview writes nothing.
+        #[cfg(feature = "security-key")]
+        if matches!(plan.gate, GatePass::Trusted { .. }) && !self.trusts(&plan.check) {
+            return Err(gate::NOT_TRUSTED);
+        }
         // Key-file sync turned on here only with S-KEYSYNC-ON's yes, a
         // touch that stated its transport, and no off of this PC pending;
         // the `ks` and `merged` this write records (spec §7.16).

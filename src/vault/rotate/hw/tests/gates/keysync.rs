@@ -2369,3 +2369,87 @@ fn auto_apply_never_joins_a_fork() {
     assert_eq!(fs::read(b.key()).unwrap(), mine);
     set_kdf_profile(KdfProfile::Real);
 }
+
+/// Spec §2.30, review: the trust is bound to the server channel itself,
+/// not to the source a caller names, and is judged again at the write.
+/// With auto-apply on and A's removal waiting on the server, a later file
+/// of A's that never reached the server (its key addition, a successor
+/// that needs the code) checked under the server's record number is not
+/// trusted, and a take that trusts the server with it writes nothing; a
+/// take of the server's own file previewed under the setting writes
+/// nothing once the setting was turned off before the write; with the
+/// setting on again the same take lands.
+#[test]
+fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    b.here();
+    sb.set_auto_apply(true).unwrap();
+    a.here();
+    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    fetch(&a, &mut sa, &mut server, &id);
+    // A adds key 4 on top; goyo-sync on A does not run, so the server
+    // keeps the removal.
+    a.here();
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    let unsent = fs::read(a.key()).unwrap();
+    fetch(&b, &mut sb, &mut server, &id);
+    let before = fs::read(b.key()).unwrap();
+    let (served, seq) = sb.server_key_file().unwrap();
+    assert_ne!(served.bytes(), unsent.as_slice());
+    // The unsent file, named as the server's: a gated successor, never
+    // trusted.
+    let f = file(&unsent);
+    let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
+    assert_eq!(check.class, AdoptClass::Successor);
+    assert!(!check.fork && check.keys.gate.is_some(), "{check:?}");
+    assert!(!sb.trusts(&check));
+    let r = reauth(&mut sb, OLD, &mut codes, &keys, 2).unwrap();
+    let t = touch_other(&f, &keys, 2);
+    let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
+    let pass = trusted(&check, &sb);
+    let planned = sb.adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both);
+    assert_eq!(planned.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    drop(r);
+    // The server's own file, previewed under the setting; turned off
+    // before the write: nothing is written.
+    let check = sb.adopt_check(&served, Source::Server { seq }).unwrap();
+    assert!(sb.trusts(&check));
+    let plan = |sb: &mut Session, codes: &mut Codes| {
+        let r = reauth(sb, OLD, codes, &keys, 2).unwrap();
+        let t = touch_other(&served, &keys, 2);
+        let opened = sb.adopt_open_with(&r, &served, None, Some(&t)).unwrap();
+        let pass = trusted(&check, sb);
+        let plan = sb
+            .adopt_preview_with(&r, &served, opened, &check, pass, ForkOption::Both)
+            .unwrap();
+        (r, plan)
+    };
+    let (r, planned) = plan(&mut sb, &mut codes);
+    let acked = acks(planned.preview(), ForkOption::Both);
+    sb.set_auto_apply(false).unwrap();
+    let written = sb.adopt(r, planned, Vec::new(), acked, Consent::default(), false);
+    assert_eq!(written.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    // On again: the same take lands.
+    sb.set_auto_apply(true).unwrap();
+    let (r, planned) = plan(&mut sb, &mut codes);
+    let acked = acks(planned.preview(), ForkOption::Both);
+    let adopted = sb
+        .adopt(r, planned, Vec::new(), acked, Consent::default(), false)
+        .unwrap();
+    assert!(adopted.trusted);
+    assert_eq!(header(&b).state(), served.header().unwrap().state());
+    set_kdf_profile(KdfProfile::Real);
+}

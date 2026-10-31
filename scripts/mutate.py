@@ -194,27 +194,42 @@ AUTO_FORK_T = KS_T + 'auto_apply_never_joins_a_fork'
 NOTICE_T = KS_T + 'a_copy_under_another_pcs_new_key_points_to_the_server_key_file'
 AUTO_ANCHOR_T = ANCHOR_T + 'auto_round_trips_and_is_kept'
 AUTO_UI_T = CEREMONY_T + 'server_key_changes_apply_by_themselves_once_the_server_is_trusted'
+AUTO_BOUND_T = KS_T + 'auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write'
 
 ROWS = [
     # Auto-apply (trust the server) and the notice of a key change made
     # elsewhere under key-file sync (spec §2.30; stage 11).
     ('A auto-apply serves the server channel only', 11, 'feature', 'lib', KEYSYNC,
-     '        matches!(check.source, super::Source::Server { .. })\n            && !check.fork\n',
-     '        !check.fork\n',
+     '            super::Source::File(_) => false,\n',
+     '            super::Source::File(_) => true,\n',
      [AUTO_T]),
+    # Review of stage 11: the trust is the server's file of record in the
+    # session's key view, in the checked state, not the source a caller
+    # names; and the write judges it again.
+    ('A auto-apply trusts the file the server holds, in the checked state', 11, 'feature',
+     'lib', KEYSYNC,
+     '                n == *seq && f.header().is_some_and(|h| h.state() == check.other)\n',
+     '                n == *seq && f.header().is_some()\n',
+     [AUTO_BOUND_T]),
+    ('A the write judges a trusted take again', 11, 'feature', 'lib', ADOPT,
+     '        if matches!(plan.gate, GatePass::Trusted { .. }) && !self.trusts(&plan.check) {\n            return Err(gate::NOT_TRUSTED);\n        }\n',
+     '',
+     [AUTO_BOUND_T]),
     ('A auto-apply needs the setting on', 11, 'feature', 'lib', KEYSYNC,
      '            && self.auto_apply()\n            && self.ks01()\n',
      '            && self.ks01()\n',
      [AUTO_T]),
     ('A auto-apply never joins a fork', 11, 'feature', 'lib', KEYSYNC,
-     '        matches!(check.source, super::Source::Server { .. })\n            && !check.fork\n',
-     '        matches!(check.source, super::Source::Server { .. })\n',
+     '        served\n            && !check.fork\n',
+     '        served\n',
      [AUTO_FORK_T]),
     ('A the preview takes a trusted pass only where auto-apply serves', 11, 'feature', 'lib',
      ADOPT,
      '            (GatePass::Trusted { .. }, Some(_)) if self.trusts(check) => Ok(()),',
      '            (GatePass::Trusted { .. }, Some(_)) => Ok(()),',
-     [AUTO_T, AUTO_FORK_T]),
+     # The write judges the trust again, so only a test that asks the
+     # preview itself catches this one alone.
+     [AUTO_T, AUTO_FORK_T, AUTO_BOUND_T]),
     ('A the public checks still run under auto-apply', 11, 'feature', 'lib', ADOPT,
      '                let checked =\n                    gate::public_checks(&self.key_file, line, other, fork, chained, self.gated())\n                        .map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?;',
      '                let checked =\n                    match gate::public_checks(&self.key_file, line, other, fork, chained, self.gated()) {\n                        Err(_) if self.auto_apply() => Checked::default(),\n                        r => r.map_err(|reason| refuse(ADOPT_REFUSED, vec![reason.to_owned()]))?,\n                    };',

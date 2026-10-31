@@ -1553,8 +1553,20 @@ impl Session {
     /// from this PC's (no fork), only on a GOYOKS01 key file this PC
     /// confirmed (never a bootstrap or a Restore). Every public check has
     /// run before this is asked, and runs again at the write.
+    ///
+    /// The server channel is this session's key view, not the source a
+    /// caller names: the check must be of the server's file of record
+    /// `seq` that the view holds now, in exactly the checked state. A file
+    /// from anywhere else (or a view that moved on since) is not trusted,
+    /// whatever `Source` it was checked under.
     pub fn trusts(&self, check: &super::AdoptCheck) -> bool {
-        matches!(check.source, super::Source::Server { .. })
+        let served = match &check.source {
+            super::Source::Server { seq } => self.server_key_file().is_some_and(|(f, n)| {
+                n == *seq && f.header().is_some_and(|h| h.state() == check.other)
+            }),
+            super::Source::File(_) => false,
+        };
+        served
             && !check.fork
             && self.auto_apply()
             && self.ks01()
