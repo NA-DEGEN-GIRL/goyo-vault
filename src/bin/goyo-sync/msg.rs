@@ -126,8 +126,8 @@ messages! {
         "The server does not have that version.";
     FetchWriteFailed = "파일을 저장할 수 없습니다: {}",
         "Cannot save the file: {}";
-    FetchSaved = "버전 {}({}바이트)을 {}에 저장했습니다. 고요 금고의 '백업에서 복원'으로 여세요.",
-        "Saved version {} ({} bytes) to {}. Open it with Restore in Goyo Vault.";
+    FetchSaved = "버전 {}({}바이트)을 {}에 저장했습니다. 고요 금고의 '백업 파일로 되살리기'로 여세요.",
+        "Saved version {} ({} bytes) to {}. Open it with 'Restore from a backup file' in Goyo Vault.";
     AutostartOn = "로그인하면 goyo-sync가 시작되도록 등록했습니다.",
         "goyo-sync now starts when you sign in.";
     AutostartOff = "자동 시작을 껐고, 실행 중인 도우미에 중지 신호를 보냈습니다.",

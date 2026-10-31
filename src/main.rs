@@ -204,7 +204,7 @@ const PILL_RIGHT: i32 = LANG_SWITCH.0 - 108;
 const SYNC_TICKS: u32 = 4;
 /// Create with the OTP off: the painted card that recommends it.
 const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
-/// Divider above the "새 금고 만들기 · 백업에서 복원" links on Login.
+/// Divider above the "새 금고 만들기 · 백업 파일로 되살리기" links on Login.
 const LOGIN_LINKS: (i32, i32, i32, i32) = (AX, 500, AW, 1);
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
@@ -286,7 +286,7 @@ struct App {
     closing: bool,
     auth_dirty: bool,
     input_failed: bool,
-    /// Login was opened from Welcome ("다른 위치에 있는 금고 열기"), so it
+    /// Login was opened from Welcome ("금고 파일 열기"), so it
     /// offers a way back instead of being the home screen.
     from_welcome: bool,
     /// OTP secret shown on OtpBackup after the password check.
@@ -1409,7 +1409,7 @@ impl App {
         );
         self.button(
             RESTORE,
-            "백업에서 복원",
+            "백업 파일로 되살리기",
             AX + 100,
             358,
             AW - 200,
@@ -1418,10 +1418,10 @@ impl App {
         );
         self.button(
             OPEN,
-            "다른 위치에 있는 금고 열기",
-            AX + 100,
+            "금고 파일 열기 (다른 폴더 · 서버에서 가져온 금고)",
+            AX,
             410,
-            AW - 200,
+            AW,
             32,
             theme::LINK,
         );
@@ -1443,7 +1443,7 @@ impl App {
         let title = self.font_of(|t| t.title());
         let heading = match mode {
             Screen::Create => "새 금고 만들기",
-            Screen::Restore => "백업에서 복원",
+            Screen::Restore => "백업 파일로 되살리기",
             _ => "금고 열기",
         };
         self.text(0, heading, (AX, 82, AW - 100, 34), title, TONE_TEXT, 0);
@@ -1601,7 +1601,7 @@ impl App {
                 );
                 self.button(
                     RESTORE,
-                    "백업에서 복원",
+                    "백업 파일로 되살리기",
                     mid + 8,
                     ly + 14,
                     148,
@@ -2681,6 +2681,14 @@ impl App {
             Screen::Login | Screen::Restore
                 if !self.key_path.is_file() && key_candidate(source, &self.key_path).is_none() =>
             {
+                // A vault from the server with no key file here opens on
+                // its own screen, which Restore points at (spec §2.29).
+                #[cfg(feature = "security-key")]
+                if self.screen == Screen::Restore
+                    && keys_ui::restore_fetched(&self.backup_path, &self.key_path)
+                {
+                    return Err(keys_ui::RESTORE_FETCHED_KEY);
+                }
                 return Err(if leftover_temp(&self.key_path) {
                     LEFTOVER_TEMP
                 } else {
@@ -9803,6 +9811,7 @@ mod tests {
             use keys_ui::*;
             match screen {
                 Screen::Create => vec![SK_TOGGLE],
+                Screen::Restore => vec![RESTORE_FETCHED],
                 Screen::Keys => vec![
                     KEY_ON,
                     KEY_ADD,
@@ -15281,19 +15290,26 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);
         }
-        /// A new PC from the server (spec §7.17, §2.29; §14.10 walkthrough
-        /// 4): the vault file goyo-sync brought into a folder with the
-        /// server's key file opens on "서버에서 가져온 금고"; the password
-        /// and the touch write nothing and show the TOFU banner with the
-        /// code field framed and focused; a wrong code is said in a dialog
-        /// and kept in the field; A's code, then the save step next to the
-        /// vault (a cancel and a failed file dialog write nothing), writes
-        /// the key file and the vault file in place.
-        #[test]
-        fn a_new_pc_restores_from_the_server_key_file() {
-            let _korean = KoreanAfter::hold();
-            crypto::set_kdf_profile(crypto::KdfProfile::Test);
-            let (dir_a, dir_c) = (test_dir("fetched-a"), test_dir("fetched-c"));
+        /// PC A and PC C of the tests of a new PC from the server: A's vault
+        /// syncs with key-file sync on; C's folder is as goyo-sync's "이 PC로
+        /// 가져오기" leaves it, vault.goyo next to its sync folder with the
+        /// server's key file in its view, no key file, and C's own anchor,
+        /// empty and in use.
+        struct FetchedPcs {
+            dir_a: PathBuf,
+            dir_c: PathBuf,
+            pass: &'static str,
+            clock: Arc<AtomicU64>,
+            fake: Arc<Fake>,
+            devices: Vec<usize>,
+            ka: PathBuf,
+            anchor_c: PathBuf,
+            vc: PathBuf,
+            key: PathBuf,
+            code: String,
+        }
+        fn fetched_pcs(tag: &str) -> FetchedPcs {
+            let (dir_a, dir_c) = (test_dir(&format!("{tag}-a")), test_dir(&format!("{tag}-c")));
             let pass = "synthetic fetched key password";
             let clock = Arc::new(AtomicU64::new(1_000_000));
             let fake = Arc::new(Fake::new(Some(clock.clone())));
@@ -15342,6 +15358,45 @@ mod tests {
             std::fs::copy(&va, &vc).unwrap();
             server.helper(&vc);
             key_view(&vc, 1, &std::fs::read(&ka).unwrap());
+            FetchedPcs {
+                dir_a,
+                dir_c,
+                pass,
+                clock,
+                fake,
+                devices,
+                ka,
+                anchor_c,
+                vc,
+                key,
+                code,
+            }
+        }
+        /// A new PC from the server (spec §7.17, §2.29; §14.10 walkthrough
+        /// 4): the vault file goyo-sync brought into a folder with the
+        /// server's key file opens on "서버에서 가져온 금고"; the password
+        /// and the touch write nothing and show the TOFU banner with the
+        /// code field framed and focused; a wrong code is said in a dialog
+        /// and kept in the field; A's code, then the save step next to the
+        /// vault (a cancel and a failed file dialog write nothing), writes
+        /// the key file and the vault file in place.
+        #[test]
+        fn a_new_pc_restores_from_the_server_key_file() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let FetchedPcs {
+                dir_a,
+                dir_c,
+                pass,
+                clock,
+                fake,
+                devices,
+                ka,
+                anchor_c,
+                vc,
+                key,
+                code,
+            } = fetched_pcs("fetched");
             let fetched = std::fs::read(&vc).unwrap();
             let auth = Scripted::new(fake.clone());
             let h = window("GoyoCeremonyFetched", &vc, &key, auth.clone(), &clock);
@@ -15360,6 +15415,42 @@ mod tests {
             press(h, SUBMIT);
             assert_eq!(status(), keys_ui::RESTORE_KEY_VIEW);
             assert!(!dir_c.join("restored.goyo").exists());
+            // Restore says what the file is and offers its screen, with the
+            // key view as its key file and with no key file at all; SUBMIT
+            // names that button there, never the key-file advice by USB.
+            let visible = |id: i32| {
+                with_app(|a| unsafe { GetWindowLongPtrW(a.handle(id), -16) & 0x1000_0000 != 0 })
+            };
+            let note = || with_app(|a| caption(a.handle(keys_ui::LOGIN_NOTE)));
+            assert!(visible(keys_ui::RESTORE_FETCHED));
+            assert_eq!(note(), keys_ui::RESTORE_IS_FETCHED);
+            let gone = dir_c.join("gone.goyokey");
+            set(h, KPATH, &gone.to_string_lossy());
+            with_app(|a| a.command(KPATH, 0x300)).unwrap();
+            assert!(visible(keys_ui::RESTORE_FETCHED));
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            assert_eq!(status(), keys_ui::RESTORE_FETCHED_KEY);
+            assert!(!dir_c.join("restored.goyo").exists());
+            // A backup that is no vault from the server keeps the usual
+            // note, and no such button.
+            set(h, VPATH, &dir_a.join("vault.goyo").to_string_lossy());
+            with_app(|a| a.command(VPATH, 0x300)).unwrap();
+            assert!(!visible(keys_ui::RESTORE_FETCHED));
+            assert_eq!(note(), RESTORE_NOTE);
+            set(h, VPATH, &vc.to_string_lossy());
+            with_app(|a| a.command(VPATH, 0x300)).unwrap();
+            assert!(visible(keys_ui::RESTORE_FETCHED));
+            // The button opens "서버에서 가져온 금고" with that file, and
+            // writes nothing.
+            press(h, keys_ui::RESTORE_FETCHED);
+            with_app(|a| {
+                assert!(a.screen == Screen::Fetched);
+                assert_eq!(a.vault_path, vc);
+                assert_eq!(a.key_path, key);
+                assert_eq!(*a.status, keys_ui::FETCHED_PICKED);
+            });
+            assert!(!key.exists() && !dir_c.join("restored.goyo").exists());
             with_app(|a| a.key_path = key.clone());
             // The app opens on "서버에서 가져온 금고", which has no key path.
             with_app(|a| {
@@ -15487,6 +15578,70 @@ mod tests {
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_c);
+        }
+        /// A vault from the server syncs as soon as its key file is saved
+        /// (spec §7.17): the polls while the banner stands link nothing and
+        /// say nothing of the key view in the sync folder, and the save
+        /// links the session as an unlock of the saved pair would, so an
+        /// entry added right after it goes up with no lock and no second
+        /// unlock.
+        #[test]
+        fn a_vault_from_the_server_syncs_once_its_key_file_is_saved() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let pcs = fetched_pcs("fetched-sync");
+            let auth = Scripted::new(pcs.fake.clone());
+            let h = window(
+                "GoyoCeremonyFetchedSync",
+                &pcs.vc,
+                &pcs.key,
+                auth.clone(),
+                &pcs.clock,
+            );
+            let guard = Window(h);
+            with_app(|a| {
+                a.show(a.home());
+                a.build();
+                assert!(a.screen == Screen::Fetched);
+            });
+            auth.plan(&[Some(pcs.devices[1])]);
+            set(h, PASS, pcs.pass);
+            press(h, SUBMIT);
+            let outgoing = syncfile::sync_dir(&pcs.vc)
+                .unwrap()
+                .join(syncfile::OUTGOING);
+            with_app(|a| {
+                let said = a.status.clone();
+                assert!(a.session.as_ref().unwrap().fetched_unsaved(), "{}", *said);
+                a.poll_sync();
+                a.poll_sync();
+                assert_eq!(*a.status, *said);
+                assert_eq!(a.session.as_ref().unwrap().badge(), None);
+            });
+            assert!(!outgoing.exists());
+            set(h, keys_ui::GATE_CODE, &pcs.code);
+            every_input(|_, _, _| InputAnswer::Accept { checked: false });
+            press(h, keys_ui::TOFU_OK);
+            with_app(|a| {
+                let s = a.session.as_mut().unwrap();
+                assert!(!s.fetched_unsaved(), "{}", *a.status);
+                assert!(s.badge().is_some(), "{}", *a.status);
+                assert_eq!(a.sync_badge, s.badge());
+                // Linked as an unlock links: the first copy is offered at
+                // the next poll that finds no server copy either, or by
+                // the first edit.
+                assert!(!outgoing.exists());
+                assert_eq!(*a.status, fill(keys_ui::FETCHED_SAVED, &[&shown(&pcs.key)]));
+                s.put(None, sync_entry("added right after the save", "secret"))
+                    .unwrap();
+            });
+            assert!(pcs.key.exists());
+            let up = std::fs::read(&outgoing).expect("uploaded without a second unlock");
+            let (_, blob) = syncfile::parse_outgoing(&up).unwrap();
+            assert!(syncfile::is_sync_vault(blob));
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&pcs.dir_a);
+            let _ = std::fs::remove_dir_all(&pcs.dir_c);
         }
     }
 }

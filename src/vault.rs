@@ -161,7 +161,7 @@ pub const KEY_NOT_IN_KEY_FILE_NEWER: &str = concat!(
 );
 /// An older-key vault file under another key than the one this PC last used
 /// (spec §5.1 step 6): refused before any key derivation.
-pub const OLDER_REFUSED: &str = "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '복원'으로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.";
+pub const OLDER_REFUSED: &str = "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '백업 파일로 되살리기'로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.";
 /// An older-key vault file whose counters an honest vault never reaches
 /// (spec §5.2 step 5): nothing is written.
 pub const VAULT_COUNTERS: &str = "이 금고 파일은 예전 열쇠로 저장되어 있고 저장 횟수 기록이 비정상적으로 커서 열지 않았습니다. 손상되었거나 예전 열쇠 사본을 가진 누군가가 만든 파일일 수 있습니다. 비밀번호가 틀린 것이 아닙니다. 다른 백업이나 서버 기록을 확인하세요.";

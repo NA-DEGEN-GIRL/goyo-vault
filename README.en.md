@@ -82,7 +82,7 @@ From 0.8.0, **a vault with sync turned on, and its backups, open only in 0.8.0 o
 From 0.9.0, **a vault whose key was changed (its password changed, or another PC's new key file received), and its later backups, open only in 0.9.0 or later.** A vault whose key was never changed keeps the 0.8 format and still opens in 0.8. For a synced vault, first update the server script and every PC to 0.9.0, then change the key.
 
 > [!NOTE]
-> ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault from another location**.
+> ZIPs before 0.2.0 extracted to a versioned folder such as `GoyoVault-0.1.0`. If you created a vault there, move the vault and key files into the new `GoyoVault` folder, or open them with **Open a vault file (other folder or brought from the server)**.
 
 ## How to use it
 
@@ -93,8 +93,8 @@ From 0.9.0, **a vault whose key was changed (its password changed, or another PC
 With no vault saved yet, you see this screen ("No vault saved yet").
 
 - **Create a new vault** if this is your first time.
-- **Restore from backup** to bring a vault back from a backup file made with 'Back up vault'. A vault used on another PC opens with **Open a vault from another location** once its vault file and key file are copied by USB, or, with sync, comes with goyo-sync's **Bring to this PC…**.
-- **Open a vault from another location** for a vault on a USB drive or in another folder.
+- **Restore from a backup file** to bring a vault back from a backup file made with 'Back up vault'. A vault used on another PC opens with **Open a vault file (other folder or brought from the server)** once its vault file and key file are copied by USB, or, with sync, comes with goyo-sync's **Bring to this PC…**.
+- **Open a vault file (other folder or brought from the server)** for a vault on a USB drive or in another folder.
 
 Switch between **Dark** and **Light** in the top-right corner.
 
@@ -175,9 +175,9 @@ Use the buttons at the bottom of the vault screen.
 
 [Backups: what you must do yourself](#backups-what-you-must-do-yourself) lists what to back up and when.
 
-![Restore from backup](docs/images/en/restore.png)
+![Restore from a backup file](docs/images/en/restore.png)
 
-To restore, press **Restore from backup** on the first-start or open screen. Choose the **Vault backup file (.goyo)** (a file made with 'Back up vault') and **the key file used when that backup was made**, set the **New location for the restored vault**, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file. A vault goyo-sync brought from the server is not restored but opened as it is: put its key file next to it by USB, or, in the security-key build with the server's key file, the **Vault brought from the server** screen appears ([SECURITY_KEY.en.md](docs/SECURITY_KEY.en.md), 'A new PC'); the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
+To restore, press **Restore from a backup file** on the first-start or open screen. Choose the **Vault backup file (.goyo)** (a file made with 'Back up vault') and **the key file used when that backup was made**, set the **New location for the restored vault**, enter your password (and the OTP if the vault uses one), and the vault is restored to a new file. A vault goyo-sync brought from the server is not restored but opened as it is: put its key file next to it by USB, or, in the security-key build with the server's key file, the **Vault brought from the server** screen appears ([SECURITY_KEY.en.md](docs/SECURITY_KEY.en.md), 'A new PC'); the backup itself is not changed. On a new PC the first restore goes to `vault.goyo` by default, and the restored vault is remembered as the last one opened, so the next start offers it directly.
 
 ### 7. Key management: change the password, receive a new key file
 
@@ -207,7 +207,7 @@ To restore, press **Restore from backup** on the first-start or open screen. Cho
 
 **Old copies.** Changing the key (a password change; turning security keys on or off, or removing one) does not change copies made before (vault backups, pre-merge copies, the server's last 200 versions): they keep opening with the key file and password (and the keys registered) of their time. A key change protects what you save afterwards. The current key file also holds the 63 most recent data keys and the first one, so old backups still restore. The OTP secret does not change, so an old key copy still reveals it. If you change the key because it may have leaked, also change the secrets kept in the vault (the real passwords and keys).
 
-Bring an old backup back with 'Restore from backup' to a new file. A vault file saved under an old key that is simply put in place is not opened unless it is under the key this PC used last (this stops someone with an old key copy from swapping it in). An old key file put in place makes this PC warn about an older key file and stop sync and key changes. Someone with an old key file and its password who builds a new key file from it is refused too, unless that file continues the key file this PC wrote last. A vault restored with the key file of that time uses another key file than the one this PC saw, so that vault changes no key and uploads nothing; use it to look up entries. A vault restored with the current key file does not change the key or receive a new key file either: the original vault file uses the same key file, so a change would leave it under an older key, to be opened only through Restore. To keep using the restored file, lock and open it by logging in. All of this assumes this PC has a key record for the vault ([This PC's key record](#this-pcs-key-record)).
+Bring an old backup back with 'Restore from a backup file' to a new file. A vault file saved under an old key that is simply put in place is not opened unless it is under the key this PC used last (this stops someone with an old key copy from swapping it in). An old key file put in place makes this PC warn about an older key file and stop sync and key changes. Someone with an old key file and its password who builds a new key file from it is refused too, unless that file continues the key file this PC wrote last. A vault restored with the key file of that time uses another key file than the one this PC saw, so that vault changes no key and uploads nothing; use it to look up entries. A vault restored with the current key file does not change the key or receive a new key file either: the original vault file uses the same key file, so a change would leave it under an older key, to be opened only through Restore. To keep using the restored file, lock and open it by logging in. All of this assumes this PC has a key record for the vault ([This PC's key record](#this-pcs-key-record)).
 
 ### 8. OTP backup (in case you lose your phone)
 
@@ -234,7 +234,7 @@ The app **saves to the vault file immediately** whenever you add, change or dele
 |**Key backup** (`.goyokey`)|**Once** right after creating the vault, and **every time the key changes** (a password change, a received key file; the app asks right after)|**Back up key** in **Key management** or at the bottom of the vault screen|
 |**OTP backup** (vaults with the OTP only)|**Once** right after creating the vault|**OTP backup**: enroll a spare phone or write the setup key on paper. Turning on the authenticator app's own backup also works.|
 |**Password**|Once, when you create the vault|Memorize it or write it down somewhere safe. **The app has no recovery of any kind.**|
-|**Restore drill**|Every few months|**Restore from backup** to a new file; the original is not changed.|
+|**Restore drill**|Every few months|**Restore from a backup file** to a new file; the original is not changed.|
 
 **No need to back up:** `goyo-vault.theme` (theme), `goyo-vault.lang` (language), `goyo-vault.autolock` (auto-lock) and `goyo-vault.paths` (last locations opened) next to the executable hold no secrets and are not needed to open a vault. `.goyolock` is only the app's in-use marker. `%LOCALAPPDATA%\GoyoVault\goyo-vault.keys` (this PC's key record) holds no secret either and belongs to this PC alone.
 
@@ -257,7 +257,7 @@ To use one vault on several PCs, the included `goyo-sync.exe` exchanges **only t
 - When two PCs edit the same entry, both versions are kept. Delete the one you do not need.
 - **Deletions spread to the other PCs.** After a mistake, get entries back from the server history (the last 200 versions) or a `pre-merge-*.goyo` copy in the sync folder.
 - The server cannot read the vault, but it learns the vault ID, its size, when the contents changed and your IP address. The helper connects about once a minute, so it also learns when each PC is on. OTP-only unlocks are not uploaded, and even when the server takes no upload, a waiting upload is not made again at each unlock, so the server normally does not learn when you open the vault. The exception: when changes are still waiting to go up and a new copy arrives from the server, they go up again after the merge (at the next unlock if the app was closed), so it learns that moment.
-- While sync is on, never drop another file in place of `vault.goyo` by hand. Open other copies with Restore from backup.
+- While sync is on, never drop another file in place of `vault.goyo` by hand. Open other copies with Restore from a backup file.
 - A password change on one PC encrypts the vault again with a new data key, so the other PCs stop syncing until they take that PC's new key file by USB with 'Key management › Receive a new key file'. Do not copy it over their key files. Halts, diverged key files and overwriting a server copy are covered in 'After a key change' in [docs/SYNC.en.md](docs/SYNC.en.md).
 - "Synced" means "checked with the key to match the copy the server last sent or acknowledged". It neither proves that the server really stored it nor that the server keeps it safe. The same check code (`XXXX-XXXX-XXXX-XXXX`, covering the entries' text too) on two PCs means the same contents.
 

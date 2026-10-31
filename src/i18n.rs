@@ -238,8 +238,8 @@ pub const EN: &[(&str, &str)] = &[
         "The OTP screen closed because you switched apps.",
     ),
     (
-        "다른 위치에 있는 금고 열기",
-        "Open a vault from another location",
+        "금고 파일 열기 (다른 폴더 · 서버에서 가져온 금고)",
+        "Open a vault file (other folder or brought from the server)",
     ),
     (
         "다른 프로그램의 메모리 접근 차단 설정에 실패했습니다.",
@@ -333,7 +333,7 @@ pub const EN: &[(&str, &str)] = &[
         "'금고 백업'으로 만든 파일을 새 금고 파일로 되살립니다. 백업을 만들 때 쓰던 열쇠 파일(또는 '열쇠 백업')과 그때의 비밀번호가 필요합니다.",
         "Brings a file made with 'Back up vault' back as a new vault file. It needs the key file used when the backup was made (or a 'Back up key' copy) and the password of that time.",
     ),
-    ("백업에서 복원", "Restore from backup"),
+    ("백업 파일로 되살리기", "Restore from a backup file"),
     ("복사", "Copy"),
     ("복사 실패", "Copy failed"),
     (
@@ -427,8 +427,8 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("새 금고 만들기", "Create a new vault"),
     (
-        "새 금고 만들기 · 백업에서 복원",
-        "Create a new vault · Restore from backup",
+        "새 금고 만들기 · 백업 파일로 되살리기",
+        "Create a new vault · Restore from a backup file",
     ),
     ("새 금고 파일", "New vault file"),
     (
@@ -1041,8 +1041,8 @@ pub const EN: &[(&str, &str)] = &[
         "open Goyo Vault: it goes straight to this vault.",
     ),
     (
-        "고요 금고의 '다른 위치에 있는 금고 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요.",
-        "in Goyo Vault, choose this file with 'Open a vault from another location' (or 'Browse' on the login screen).",
+        "고요 금고의 '금고 파일 열기'(또는 로그인 화면의 '찾기')로 이 파일을 고르세요.",
+        "in Goyo Vault, choose this file with 'Open a vault file' (or 'Browse' on the login screen).",
     ),
     (
         "전용 SSH 키 파일을 다른 계정도 읽을 수 있어 ssh가 그 키를 쓰지 않았습니다. 내 계정만 읽게 고친 뒤 '연결 확인'을 누르세요.",
@@ -1449,8 +1449,8 @@ pub const EN: &[(&str, &str)] = &[
         "The key backup could not be read back and checked. Back up again to another drive.",
     ),
     (
-        "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '복원'으로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.",
-        "This vault file is saved under an older key, not the key this PC used last, so it was not opened. Someone with an old copy of the key may have swapped the vault file. To bring back an old backup, restore it to a new file with 'Restore from backup'. If nothing like that happened, compare this vault file with a recent backup or the server history.",
+        "이 금고 파일은 이 PC가 마지막으로 쓴 열쇠가 아닌 예전 열쇠로 저장되어 있어 열지 않았습니다. 예전 열쇠 사본을 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 예전 백업을 되살리려는 것이라면 '백업 파일로 되살리기'로 새 파일에 복원하세요. 그런 일이 없었다면 이 금고 파일을 최근 백업이나 서버 기록과 비교하세요.",
+        "This vault file is saved under an older key, not the key this PC used last, so it was not opened. Someone with an old copy of the key may have swapped the vault file. To bring back an old backup, restore it to a new file with 'Restore from a backup file'. If nothing like that happened, compare this vault file with a recent backup or the server history.",
     ),
     (
         "이 금고 파일은 예전 열쇠로 저장되어 있고 저장 횟수 기록이 비정상적으로 커서 열지 않았습니다. 손상되었거나 예전 열쇠 사본을 가진 누군가가 만든 파일일 수 있습니다. 비밀번호가 틀린 것이 아닙니다. 다른 백업이나 서버 기록을 확인하세요.",
@@ -1606,8 +1606,8 @@ pub const EN: &[(&str, &str)] = &[
         "If another PC really changed it, open the vault with this PC's original key file (a key backup), then take this file with 'Receive a new key file': the two files are joined. If no PC made such a change, do not take it, and check your backups.",
     ),
     (
-        "금고 파일도 이 열쇠 파일의 열쇠로 저장되어 있어 이 PC의 원래 열쇠 파일로는 열리지 않습니다. 이 PC의 금고 백업이 있으면 원래 열쇠 파일과 그 백업으로 연 뒤 '새 열쇠 파일 받기'로 이 열쇠 파일을 받고, 이 금고 파일은 그 뒤 '복원'으로 새 파일에 되살려 항목을 확인하세요.",
-        "The vault file is saved under this key file's key too, so this PC's original key file cannot open it. If you have a vault backup of this PC, open it with the original key file, take this key file with 'Receive a new key file', and afterwards restore this vault file to a new file with 'Restore from backup' to check its entries.",
+        "금고 파일도 이 열쇠 파일의 열쇠로 저장되어 있어 이 PC의 원래 열쇠 파일로는 열리지 않습니다. 이 PC의 금고 백업이 있으면 원래 열쇠 파일과 그 백업으로 연 뒤 '새 열쇠 파일 받기'로 이 열쇠 파일을 받고, 이 금고 파일은 그 뒤 '백업 파일로 되살리기'로 새 파일에 되살려 항목을 확인하세요.",
+        "The vault file is saved under this key file's key too, so this PC's original key file cannot open it. If you have a vault backup of this PC, open it with the original key file, take this key file with 'Receive a new key file', and afterwards restore this vault file to a new file with 'Restore from a backup file' to check its entries.",
     ),
     (
         "이 금고 파일의 항목만 확인하려면 지금 이 열쇠 파일로 '복원'하세요(복원한 금고에서는 열쇠를 바꾸거나 올리지 않습니다).",
@@ -1871,7 +1871,7 @@ pub const EN_SK: &[(&str, &str)] = &[
     ("서버에서 받은 이 열쇠 파일은 이 PC가 이미 확인했습니다. 남은 일은 이 PC에 저장하는 것뿐입니다. '저장하기'를 누르세요.", "This PC already confirmed this key file from the server. All that is left is saving it on this PC: press 'Save'."),
     ("저장하기", "Save"),
     ("서버에서 가져온 열쇠 파일 확인", "Confirm the key file from the server"),
-    ("열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화는 지금 잠갔다가 다시 열면 시작됩니다.", "Saved the key file to {path}. You can now edit and save entries, and from now on the vault opens with this key file. Lock now and open it again to start syncing with the server on this PC."),
+    ("열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화도 지금 시작했습니다.", "Saved the key file to {path}. You can now edit and save entries, and from now on the vault opens with this key file. Syncing with the server has started on this PC too."),
     ("열쇠 파일을 금고 옆에 저장합니다:\n{path}\n\n이 PC에서 금고를 열 때마다 이 열쇠 파일이 필요합니다. 다른 곳(USB 등)에 두려면 '다른 곳에 저장…'을 누르세요.", "The key file is saved next to the vault:\n{path}\n\nOpening the vault on this PC always needs this key file. To keep it elsewhere (on a USB drive, for example), press 'Save elsewhere…'."),
     ("코드가 맞습니다. 이 열쇠 파일은 진짜입니다.", "The code matches: this key file is genuine."),
     ("코드 없이 이 서버를 믿기로 했습니다. 이 열쇠 파일이 진짜인지는 확인하지 않았습니다.", "You chose to trust this server without a code. Whether this key file is genuine was not checked."),
@@ -1885,7 +1885,10 @@ pub const EN_SK: &[(&str, &str)] = &[
     ("저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '코드 없이 받기…'를 다시 누르고 '여기에 저장'을 고르세요.", "The dialog to choose where to save could not open. Nothing was saved. Press 'Accept without a code…' again and choose 'Save here'."),
     ("저장할 곳을 고르는 창을 열지 못했습니다. 아무것도 저장하지 않았습니다. '저장하기'를 다시 누르고 '여기에 저장'을 고르세요.", "The dialog to choose where to save could not open. Nothing was saved. Press 'Save' again and choose 'Save here'."),
     ("먼저 위의 확인을 끝내세요(다른 PC의 열쇠 확인 코드 입력, 또는 '저장하기'). 그 전에는 백업하거나 열쇠를 관리하지 않습니다.", "Finish the step above first (another PC's key check code, or 'Save'). Until then, nothing is backed up and the keys are not managed."),
-    ("동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일을 '다른 위치에 있는 금고 열기'로 고르면 '서버에서 가져온 금고' 화면이 안내합니다.", "That file in the sync folder is the key file received from the server (not confirmed yet), so it is not used here. Choose that vault file with 'Open a vault from another location', and the 'Vault brought from the server' screen guides you."),
+    ("동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일은 아래의 '서버에서 가져온 금고로 열기'(또는 시작 화면의 '금고 파일 열기')로 여세요.", "That file in the sync folder is the key file received from the server (not confirmed yet), so it is not used here. Open that vault file with 'Open as a vault from the server' below (or 'Open a vault file' on the start screen)."),
+    ("이 파일은 서버에서 가져온 금고입니다. 이 PC에 아직 열쇠 파일이 없으니 백업처럼 되살리지 말고 아래 버튼으로 여세요.", "This file is a vault brought from the server. This PC has no key file for it yet, so do not restore it like a backup: open it with the button below."),
+    ("서버에서 가져온 금고로 열기", "Open as a vault from the server"),
+    ("이 파일은 서버에서 가져온 금고입니다. 아래의 '서버에서 가져온 금고로 열기'를 누르세요.", "This file is a vault brought from the server. Press 'Open as a vault from the server' below."),
     ("이 열쇠 파일은 서버로 동기화됩니다. 다른 PC에서 비밀번호나 열쇠를 바꾸면 아래 열쇠 파일 줄에 [받기…]가 나타납니다. USB로 가져온 열쇠 파일을 이 PC의 열쇠 파일 위에 덮어쓰지 마세요.", "This key file syncs through the server. When another PC changes the password or the keys, [Get…] appears on the key file line below. Do not copy a key file from a USB drive over this PC's key file."),
     (
         "열쇠 파일을 저장할 곳을 고르세요 (동기화 폴더 밖)",

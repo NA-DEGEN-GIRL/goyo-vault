@@ -1451,10 +1451,41 @@ impl Session {
         }
         self.flush_outgoing();
     }
+    /// After `tofu_save` saved the key file of a vault brought from the
+    /// server (spec §7.17): the session links to the vault's sync folder as
+    /// an unlock of the saved pair would (`Pending::find`, `settle`), so
+    /// the first outgoing copy is offered and the edits that follow upload
+    /// without a lock and a second unlock. Its notice, if any, is left for
+    /// `take_unlock_notice`.
+    #[cfg(feature = "security-key")]
+    pub(super) fn link_saved(&mut self) {
+        if self.sync.is_some() || self.format != Format::V2 {
+            return;
+        }
+        // Nothing linked while the key file was the key view in the sync
+        // folder (`connect`); the saved one is never in it (tofu_save).
+        self.sync_refused = false;
+        let pending = Pending::find(
+            true,
+            &self.path,
+            &self.key_path,
+            self.format,
+            self.own(),
+            self.data(),
+        );
+        self.settle(pending);
+        self.flush_outgoing();
+    }
     /// Links a v2 session to a sync folder the helper made since. Gives the
-    /// KeyInFolder notice once if the key file is inside it.
+    /// KeyInFolder notice once if the key file is inside it. Not while the
+    /// key file is the server's, unsaved, in the sync folder's key view
+    /// (spec §7.17): `link_saved` links once it is saved.
     fn connect(&mut self) -> Option<SyncNotice> {
         if self.sync.is_some() || self.sync_refused || self.format != Format::V2 {
+            return None;
+        }
+        #[cfg(feature = "security-key")]
+        if self.fetched {
             return None;
         }
         match SyncLink::attach(&self.path, &self.key_path) {

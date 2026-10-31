@@ -62,8 +62,12 @@ pub const GATE_CODE: i32 = 216;
 pub const LOSS_DATE: i32 = 217;
 pub const REVIEW_LIST: i32 = 219;
 /// The login screen's note (S-LOGIN-NOTE or S-LOGIN-PWONLY), rewritten
-/// when the key path changes (free: no control ID 221 in `main.rs`).
+/// when the key path changes (free: no control ID 221 in `main.rs`); on
+/// Restore the note in the same place (RESTORE_NOTE or RESTORE_IS_FETCHED).
 pub const LOGIN_NOTE: i32 = 221;
+/// Restore's [서버에서 가져온 금고로 열기] for a vault from the server
+/// (spec §2.29; free: no control ID 194 in `main.rs`).
+pub const RESTORE_FETCHED: i32 = 194;
 /// `Screen::Pair`'s checklist (KEY_PICK, 218 in §9.1): one toggle per key,
 /// from this ID on (spec §2.26).
 pub const KEY_PICK_ITEM: i32 = 230;
@@ -428,7 +432,7 @@ pub const SAVE_STEP_LABEL: &str = "저장하기";
 /// The banner's title for a key file from the server.
 pub const FETCHED_TOFU_TITLE: &str = "서버에서 가져온 열쇠 파일 확인";
 /// After the save step, with the key file's path.
-pub const FETCHED_SAVED: &str = "열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화는 지금 잠갔다가 다시 열면 시작됩니다.";
+pub const FETCHED_SAVED: &str = "열쇠 파일을 {path}에 저장했습니다. 이제 항목을 고치고 저장할 수 있고, 다음부터는 이 열쇠 파일로 엽니다. 이 PC의 서버 동기화도 지금 시작했습니다.";
 /// The save step's question (spec §2.29): next to the vault by default,
 /// after a lead that says how this key file came to be trusted.
 pub const FETCHED_SAVE_ASK: &str = "열쇠 파일을 금고 옆에 저장합니다:\n{path}\n\n이 PC에서 금고를 열 때마다 이 열쇠 파일이 필요합니다. 다른 곳(USB 등)에 두려면 '다른 곳에 저장…'을 누르세요.";
@@ -460,7 +464,15 @@ pub const SAVE_DIALOG_FAILED_KNOWN: &str = "저장할 곳을 고르는 창을 �
 pub const TOFU_FIRST: &str = "먼저 위의 확인을 끝내세요(다른 PC의 열쇠 확인 코드 입력, 또는 '저장하기'). 그 전에는 백업하거나 열쇠를 관리하지 않습니다.";
 /// Restore with the key view of a sync folder typed or picked as its key
 /// file: that file is the Fetched screen's alone.
-pub const RESTORE_KEY_VIEW: &str = "동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일을 '다른 위치에 있는 금고 열기'로 고르면 '서버에서 가져온 금고' 화면이 안내합니다.";
+pub const RESTORE_KEY_VIEW: &str = "동기화 폴더 안의 그 파일은 서버에서 받은 열쇠 파일(확인 전)이라 여기서는 쓰지 않습니다. 그 금고 파일은 아래의 '서버에서 가져온 금고로 열기'(또는 시작 화면의 '금고 파일 열기')로 여세요.";
+/// Restore with a vault goyo-sync brought from the server and no key file
+/// of its own on this PC (the case "서버에서 가져온 금고" opens): the line
+/// in place of RESTORE_NOTE, its button, and SUBMIT's refusal in place of
+/// the key-file advice.
+pub const RESTORE_IS_FETCHED: &str = "이 파일은 서버에서 가져온 금고입니다. 이 PC에 아직 열쇠 파일이 없으니 백업처럼 되살리지 말고 아래 버튼으로 여세요.";
+pub const RESTORE_FETCHED_LABEL: &str = "서버에서 가져온 금고로 열기";
+pub const RESTORE_FETCHED_KEY: &str =
+    "이 파일은 서버에서 가져온 금고입니다. 아래의 '서버에서 가져온 금고로 열기'를 누르세요.";
 /// "서버에서 가져온 금고" (`Screen::Fetched`, spec §2.29).
 pub const FETCHED_TITLE: &str = "서버에서 가져온 금고";
 pub const FETCHED_INTRO: &str = "goyo-sync가 서버에서 이 금고와 그 열쇠 파일을 가져왔습니다. 열쇠 파일은 아직 이 PC에 저장되지 않았고, 다른 PC의 코드로 확인하기 전에는 믿지 않습니다.\n{step}\n② 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력합니다.\n③ 열쇠 파일을 금고 옆에 {name}(으)로 저장합니다.";
@@ -1041,8 +1053,15 @@ impl App {
     /// default note's place: S-LOGIN-NOTE (with the PIN line) or
     /// S-LOGIN-PWONLY for the chosen key file, else the default note; and
     /// [이 금고의 기록 지우고 다시 확인…] in its place after an anchor
-    /// refusal of exactly these files. False on any other screen.
+    /// refusal of exactly these files. On Restore the default note, or for
+    /// a vault from the server with no key file of its own here
+    /// RESTORE_IS_FETCHED and [서버에서 가져온 금고로 열기] under it. False
+    /// on any other screen.
     pub(crate) fn build_login_extra(&mut self, y: i32) -> bool {
+        if self.screen == Screen::Restore {
+            self.build_restore_extra(y);
+            return true;
+        }
         if self.screen != Screen::Login {
             return false;
         }
@@ -1069,6 +1088,66 @@ impl App {
         let offered = self.forget_for.as_ref() == Some(&paths);
         self.show_forget(offered);
         true
+    }
+    /// Restore's note at `y` and the button that takes a vault from the
+    /// server to its own screen (see restore_extra).
+    fn build_restore_extra(&mut self, y: i32) {
+        let small = self.font_of(|t| t.small());
+        self.text(
+            LOGIN_NOTE,
+            RESTORE_NOTE,
+            (AX, y, AW, 40),
+            small,
+            TONE_MUTED,
+            0,
+        );
+        self.button(
+            RESTORE_FETCHED,
+            RESTORE_FETCHED_LABEL,
+            AX,
+            y + 44,
+            AW,
+            36,
+            theme::SECONDARY,
+        );
+        let (backup, key) = (self.backup_path.clone(), self.key_path.clone());
+        self.restore_extra(&backup, &key);
+    }
+    /// Restore's note and button for the paths in the fields: a vault from
+    /// the server with no key file of its own here (restore_fetched) says
+    /// so and offers its screen in place of the default note.
+    fn restore_extra(&mut self, backup: &Path, key: &Path) {
+        let fetched = restore_fetched(backup, key);
+        let (text, tone) = if fetched {
+            (RESTORE_IS_FETCHED, TONE_TEXT)
+        } else {
+            (RESTORE_NOTE, TONE_MUTED)
+        };
+        let h = self.handle(LOGIN_NOTE);
+        unsafe {
+            SetWindowLongPtrW(h, -21, tone);
+            SetWindowTextW(h, wide(tr(text)).as_ptr());
+            InvalidateRect(h, null(), 1);
+            ShowWindow(self.handle(RESTORE_FETCHED), if fetched { 5 } else { 0 });
+        }
+    }
+    /// [서버에서 가져온 금고로 열기] on Restore: the backup picked opens on
+    /// "서버에서 가져온 금고" as the vault file, with nothing written.
+    fn restore_to_fetched(&mut self) -> crypto::Result<()> {
+        self.paths()?;
+        let (backup, key) = (self.backup_path.clone(), self.key_path.clone());
+        // No longer that case (the files changed since): the button goes.
+        if !restore_fetched(&backup, &key) {
+            self.restore_extra(&backup, &key);
+            return Ok(());
+        }
+        self.vault_path = self.backup_path.clone();
+        self.key_path = self.vault_path.with_extension("goyokey");
+        self.from_welcome = false;
+        self.show(Screen::Fetched);
+        self.status = line(FETCHED_PICKED);
+        self.build();
+        Ok(())
     }
     /// The forget button or the note, never both.
     fn show_forget(&mut self, offered: bool) {
@@ -1104,7 +1183,12 @@ impl App {
     }
     /// A path field changed on the login screen: the note follows the key
     /// file, and the forget is offered only for the files refused.
+    /// On Restore, the note and the button for a vault from the server.
     pub(crate) fn refresh_login_extra(&mut self, vault: &Path, key: &Path) {
+        if self.screen == Screen::Restore && self.handle(LOGIN_NOTE) != 0 {
+            self.restore_extra(vault, key);
+            return;
+        }
         if self.screen != Screen::Login || self.handle(LOGIN_NOTE) == 0 {
             return;
         }
@@ -1145,7 +1229,7 @@ impl App {
         let vault = self.vault_path.clone();
         let own = vault.with_extension("goyokey");
         let usable = self.key_path.is_file() || key_candidate(&vault, &self.key_path).is_some();
-        let fetched = fetched_pending(&vault, &own) && !(usable && vault::known_here(&vault));
+        let fetched = picked_fetched(&vault, &self.key_path);
         if fetched != (self.screen == Screen::Fetched) {
             if !usable {
                 self.key_path = own;
@@ -1299,7 +1383,7 @@ impl App {
         );
         self.button(
             RESTORE,
-            "백업에서 복원",
+            "백업 파일로 되살리기",
             mid + 8,
             ly + 14,
             148,
@@ -1388,6 +1472,7 @@ impl App {
             REVIEW_LATER => self.review_later(),
             BACK if self.screen == Screen::Review => self.review_later(),
             TOFU_LOCK => self.lock("수동으로 잠갔습니다.", true),
+            RESTORE_FETCHED => self.restore_to_fetched()?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -1450,6 +1535,7 @@ impl App {
                     .is_some_and(|s| s.gate_pending() && !s.tofu()),
             ),
             (Screen::Create, SK_TOGGLE) => Some(true),
+            (Screen::Restore, RESTORE_FETCHED) => Some(true),
             (Screen::Fetched, _) => Some(matches!(
                 id,
                 SUBMIT | BROWSE_V | VPATH | PASS | PEEK_PASS | OTP | OPEN | RESTORE
@@ -2305,6 +2391,22 @@ pub(crate) fn fetched_pending(vault: &Path, key: &Path) -> bool {
                 && !key.exists()
                 && key_candidate(vault, key).is_none()))
         && vault::fetched_key(vault).is_some()
+}
+/// A vault picked on the login (or Fetched's 찾기) opens on "서버에서
+/// 가져온 금고" (spec §2.29): fetched_pending for its own key file, unless
+/// the key file in the field is usable and this PC opened the vault before.
+pub(crate) fn picked_fetched(vault: &Path, key: &Path) -> bool {
+    let usable = key.is_file() || key_candidate(vault, key).is_some();
+    fetched_pending(vault, &vault.with_extension("goyokey"))
+        && !(usable && vault::known_here(vault))
+}
+/// The backup picked on Restore is a vault goyo-sync brought from the
+/// server with no key file of its own here: the case that opens "서버에서
+/// 가져온 금고" (picked_fetched, or the key view in the key field), which
+/// Restore points at in place of the key-file advice.
+pub(crate) fn restore_fetched(backup: &Path, key: &Path) -> bool {
+    (vault::is_fetched_key(backup, key) && fetched_pending(backup, key))
+        || picked_fetched(backup, key)
 }
 /// SUBMIT on `Screen::Fetched` (spec §2.29, §7.17): the vault file is the
 /// Restore's source and, in place, its destination; the key file is the
@@ -3284,8 +3386,15 @@ fn tofu_steps(h: Hwnd, id: i32) -> crypto::Result<()> {
             save_paths(&s.path, &path);
             a.key_path = path.clone();
             a.sync_badge = s.badge();
+            // What linking the sync folder found, as an unlock says it.
+            let saved = fill(FETCHED_SAVED, &[&shown(&path)]);
+            let (status, tone) = match s.take_unlock_notice().as_ref().map(sync_line) {
+                Some((text, tone)) => (joined(&[&saved, &text]), tone),
+                None => (Zeroizing::new(saved), TONE_MUTED),
+            };
             a.show(Screen::Vault);
-            a.status = Zeroizing::new(fill(FETCHED_SAVED, &[&shown(&path)]));
+            a.status = status;
+            a.status_tone = tone;
             a.build();
             Ok(())
         })

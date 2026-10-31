@@ -201,9 +201,9 @@ Status-line messages:
    - **From the server:** **Bring to this PC…** lists the server's vaults. The tag (for example `3FA2-C1D0`) matches the one in the OTP app entry `Goyo Vault (3FA2-C1D0)`; on the first PC this list marks that vault as 'Same vault as vault.goyo on this PC', so you can read the tag there too. The security-key build also shows, per vault, 'key file: on the server / not on the server (by USB) / not checked with this PC's line' (for the first four vaults only, as each takes one more ssh login). A new PC has no key-file sync vault in its list yet, so it shows 'not checked with this PC's line': bring the vault first, then 'Forced command line…' puts it in the line. Pick the vault, press **Bring it here…** and choose the **folder**. The name is `vault.goyo` by default (in Goyo Vault's own folder Goyo Vault opens it at once); if a file or sync folder (`vault.goyo.sync`) of that name is already there, nothing is overwritten and you are asked for another folder. The newest server version is saved there and **added to the sync list** (an unsaved change). A message then says what to do next.
    - **By USB:** copy the first PC's `vault.goyo` by USB too, put it in a folder of this PC and add it with **Add…**. This needs no trust in the server.
 5. Put the key file next to that vault under the same name (`vault.goyokey`, step 2). In the security-key build, when the vault uses key-file sync, 'Bring to this PC' brings the server's key file into the sync folder too, so no USB is needed: Goyo Vault's **Vault brought from the server** screen asks for the password, the security key and another PC's key check code, then saves the key file next to the vault ('A new PC' in [SECURITY_KEY.en.md](SECURITY_KEY.en.md)).
-6. Press **Save and start**, and open that vault in Goyo Vault (if it is not `vault.goyo` in Goyo Vault's folder, choose it with **Open a vault from another location**, or **Browse** on the login screen). It is already in the sync format, so it links without a dialog. This first copy trusts the server, so after opening it **compare 'Synced · check code …' on the status line at the bottom with the first PC's**. When both show the same code, you are done (it is not the security-key build's 'key check code').
+6. Press **Save and start**, and open that vault in Goyo Vault (if it is not `vault.goyo` in Goyo Vault's folder, choose it with **Open a vault file (other folder or brought from the server)**, or **Browse** on the login screen). It is already in the sync format, so it links without a dialog. This first copy trusts the server, so after opening it **compare 'Synced · check code …' on the status line at the bottom with the first PC's**. When both show the same code, you are done (it is not the security-key build's 'key check code').
 
-**Restore from backup** brings back a backup file made with 'Vault backup'. It is not the way to bring another PC's vault to this PC.
+**Restore from a backup file** brings back a backup file made with 'Vault backup'. It is not the way to bring another PC's vault to this PC.
 
 ## 7. Edits and deletions on several PCs
 
@@ -216,7 +216,7 @@ Status-line messages:
 - When merges remove many of this PC's entries, the state before merging is first kept as an encrypted copy, `vault.goyo.sync\pre-merge-<time>.goyo`, and you are told in red. Removed entries are added up over the merges while the vault is open (from unlock to lock). Once there are 5 or more since the last copy, or 2 or more that are at least 20% of the entries before that merge, the copy is made, and it holds the state before the first of those losses. Entries deleted on another PC, entries edited on another PC (this PC's old text disappears) and entries pushed off their ID by other text under the same ID (even if moved to another ID and kept) all count.
 - The newest 3 pre-merge copies stay however old; beyond those, only copies younger than 30 days stay, and at most the newest 20 in all. Copies that do not stay are deleted when a new copy is made.
 - If you close the vault app before this PC's changes are uploaded and another PC uploads first in the meantime, this PC's changes are merged and uploaded at its next unlock, because merging needs the key. They are in the vault file, so nothing is lost.
-- While sync is on, never drop another file in place of `vault.goyo` by hand. Use **Restore from backup** to work with another copy, and do not edit files inside `vault.goyo.sync`.
+- While sync is on, never drop another file in place of `vault.goyo` by hand. Use **Restore from a backup file** to work with another copy, and do not edit files inside `vault.goyo.sync`.
 
 ## After a key change (0.9.0)
 
@@ -264,11 +264,11 @@ The server keeps **the newest 200 versions** of each vault as ciphertext. Each u
 
 The target folder must already exist; the file is never overwritten.
 
-1. Open the file with **Restore from backup**, restoring to a **new name** (for example `vault-v41.goyo`). Your current key file and password open it. After key changes, versions saved within the last 62 key changes (and versions from before the first change, always) still open with the current key file; older ones open with the key copy and password of their time.
+1. Open the file with **Restore from a backup file**, restoring to a **new name** (for example `vault-v41.goyo`). Your current key file and password open it. After key changes, versions saved within the last 62 key changes (and versions from before the first change, always) still open with the current key file; older ones open with the key copy and password of their time.
 2. Find the entries you need and enter them again in your current vault.
 3. Do not sync the restored copy. It has the same vault ID, so adding it to the list makes it a copy of the same server vault, and the server's deletion records delete those entries again. No merge brings a deletion back.
 
-Open `vault.goyo.sync\pre-merge-*.goyo` the same way (Restore from backup, new name).
+Open `vault.goyo.sync\pre-merge-*.goyo` the same way (Restore from a backup file, new name).
 
 ## 9. Turning sync off and uninstalling
 
@@ -362,7 +362,7 @@ Everything the settings window does can also be done from the command line. `goy
 |`--once`|One sync pass over every vault, with the results printed.|
 |`--check`|Read-only: settings, `ssh.exe`, the connection, and per vault the sync folder, vault ID and server version.|
 |`--list`|The server's vaults: tag (`3FA2-C1D0`), 32-digit vault ID, newest version, size, time stored (UTC).|
-|`--fetch <vault ID> <head or N> <new-file.goyo>`|Saves one server version to a new file; an existing file is never overwritten. Open it with **Restore from backup** in Goyo Vault.|
+|`--fetch <vault ID> <head or N> <new-file.goyo>`|Saves one server version to a new file; an existing file is never overwritten. Open it with **Restore from a backup file** in Goyo Vault.|
 |`--autostart on` / `off`|Starts the helper at sign-in, or stops doing so (the `GoyoSync` Run value in the current user's registry, `"<goyo-sync.exe>" --background`). `off` also stops a running helper. After moving the folder, run `on` again or save in the settings window.|
 |`--stop`|Stops the running helper.|
 |`--self-check`|Checks the process protections and that the settings window can be built (used by the release checks).|

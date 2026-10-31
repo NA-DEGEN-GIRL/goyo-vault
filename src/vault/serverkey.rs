@@ -449,7 +449,8 @@ impl Session {
     /// written and read back (a crash after that write: the file that
     /// entry names, taken as it is when it holds exactly these bytes), the
     /// restored vault file, and the entry promoted with `t` and `gated`. A
-    /// state this PC confirmed writes only the two files. Ends TOFU.
+    /// state this PC confirmed writes only the two files. Ends TOFU, and
+    /// starts vault sync as an unlock of the saved pair would.
     pub fn tofu_save(&mut self, code: Option<&Code>, path: &Path) -> Result<()> {
         if !self.fetched {
             return Err(gate::GATE_NOT_PENDING);
@@ -558,6 +559,8 @@ impl Session {
                 true
             })?;
         }
+        // Vault sync starts now, as at an unlock of the saved pair.
+        self.link_saved();
         Ok(())
     }
 }
