@@ -64,6 +64,8 @@ pub const DARK: Palette = Palette {
     accent_pressed: rgb(34, 197, 94),
 };
 
+/// How many faces Theme::grid_font offers.
+pub const GRID_FONTS: usize = 6;
 // Owner-drawn button variants, stored in the button's GWLP_USERDATA.
 pub const PRIMARY: isize = 1;
 pub const SECONDARY: isize = 2;
@@ -102,6 +104,9 @@ pub struct Theme {
     /// English (Malgun Gothic draws a backslash as ₩). Hangul in English
     /// mode, such as entry names, falls back through Windows font linking.
     faces: [[isize; 4]; 2],
+    /// Smaller faces of the same families (12, 11, 10 and 9 px), which a
+    /// mnemonic's numbered grid steps down to when its words do not fit.
+    grid: [[isize; 4]; 2],
     pub code: isize,
     /// Segoe Fluent Icons glyphs (Windows 11 system font).
     pub icon: isize,
@@ -141,6 +146,8 @@ impl Theme {
                     font(22.0, 700, face),
                 ]
             }),
+            grid: ["맑은 고딕", "Segoe UI"]
+                .map(|face| [12.0, 11.0, 10.0, 9.0].map(|size| font(size, 400, face))),
             code: font(22.0, 400, "Consolas"),
             icon: font(28.0, 400, "Segoe Fluent Icons"),
             glyph: font(16.0, 400, "Segoe Fluent Icons"),
@@ -163,6 +170,15 @@ impl Theme {
     pub fn title(&self) -> isize {
         self.face(3)
     }
+    /// The faces a mnemonic's numbered grid tries, largest first: body,
+    /// small, then 12, 11, 10 and 9 px (GRID_FONTS of them).
+    pub fn grid_font(&self, i: usize) -> isize {
+        match i {
+            0 => self.body(),
+            1 => self.small(),
+            _ => self.grid[crate::i18n::english() as usize][(i - 2).min(3)],
+        }
+    }
     pub fn px(&self, n: i32) -> i32 {
         (n as f32 * self.scale) as i32
     }
@@ -173,12 +189,13 @@ impl Theme {
 impl Drop for Theme {
     fn drop(&mut self) {
         unsafe {
-            for h in self.faces.into_iter().flatten().chain([
-                self.code,
-                self.icon,
-                self.glyph,
-                self.background.get(),
-            ]) {
+            for h in self
+                .faces
+                .into_iter()
+                .flatten()
+                .chain(self.grid.into_iter().flatten())
+                .chain([self.code, self.icon, self.glyph, self.background.get()])
+            {
                 DeleteObject(h);
             }
         }

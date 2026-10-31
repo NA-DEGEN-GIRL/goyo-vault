@@ -1093,6 +1093,47 @@ impl Session {
         let file = KeyFile::from_bytes(&link.dir.join(KEY_VIEW), record.payload.to_vec()).ok()?;
         Some((file, record.number))
     }
+    /// The epoch of the server's key file that this PC, whose own key file
+    /// has no security keys, takes with '서버의 새 열쇠 파일 받기…' on its
+    /// Keys screen: another PC turned keys on, then key-file sync (a PC
+    /// without keys judges no server file, §7.14, so `adopt_check` judges
+    /// it then). A file with security keys at a later epoch than this PC's
+    /// key file; None on a PC with keys, or for an older file (this PC's
+    /// own from before its keys off).
+    pub fn pwonly_server_file(&self) -> Option<u64> {
+        if self.key_file.needs_security_key() {
+            return None;
+        }
+        let (file, _) = self.server_key_file()?;
+        let epoch = file.header().filter(|_| file.needs_security_key())?.epoch;
+        (epoch > self.key_state.epoch).then_some(epoch)
+    }
+    /// '코드 없이 이 서버를 믿고 받기…': a PC without security keys takes
+    /// the server's key file without the other PC's code (G1). Only the
+    /// server channel (never a USB file), the file of the record `seq`
+    /// that this session's key view holds now in exactly the checked
+    /// state, with security keys, a successor of this PC's (no fork), on a
+    /// key file with no keys that this PC confirmed (never a bootstrap or
+    /// a Restore). Every public check has run before this is asked, and
+    /// runs again at the write, which judges this again.
+    pub fn trusts_without_code(&self, check: &super::AdoptCheck) -> bool {
+        // A USB file never.
+        let super::Source::Server { seq } = &check.source else {
+            return false;
+        };
+        let served = self.server_key_file().is_some_and(|(f, n)| {
+            n == *seq
+                && f.needs_security_key()
+                && f.header().is_some_and(|h| h.state() == check.other)
+        });
+        let pwonly = !self.key_file.needs_security_key();
+        served
+            && pwonly
+            && check.class == super::AdoptClass::Successor
+            && !check.fork
+            && !self.unconfirmed()
+            && !self.restored
+    }
     /// The class of the server's file now (spec §7.14).
     pub fn server_class(&self) -> Option<KeyClass> {
         match self.key_top() {

@@ -2143,8 +2143,36 @@ pub const EN_SK: &[(&str, &str)] = &[
         "If you also use this vault on other PCs: on each of them, bring this PC's new key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.",
     ),
     (
-        "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.",
-        "This vault syncs. The other PCs stop syncing until they take this PC's new key file. On each of them, bring this key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.",
+        "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.",
+        "This vault syncs. The other PCs stop syncing until they take this PC's new key file. On each of them, bring this key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.\nIf you also turn key-file sync on at this PC, those PCs can take it with 'Receive the new key file from the server…' in 'Key management' instead of by USB.",
+    ),
+    (
+        "서버의 새 열쇠 파일 받기…",
+        "Receive the new key file from the server…",
+    ),
+    (
+        "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호(와 OTP)를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).",
+        "The server holds a new key file (revision {e}) from another PC that turned security keys on. Take it to sync with that PC again.\r\nEnter your current password (and OTP), press 'Receive the new key file from the server…', enter that PC's key check code and touch one security key registered in the new key file. If you cannot see that PC's code, you can choose 'Trust this server and take it without a code…'. If no PC turned security keys on, do not take it (the server copy may be forged).",
+    ),
+    (
+        "코드 없이 이 서버를 믿고 받기…",
+        "Trust this server and take it without a code…",
+    ),
+    (
+        "다른 PC의 열쇠 확인 코드 없이는 이 열쇠 파일을 정말 그 PC에서 만들었는지 확인할 방법이 없습니다.\n서버를 장악하고 이 금고의 비밀번호를 아는 사람이 자기 보안 키로 만든 열쇠 파일일 수 있고, 그렇다면 그 사람은 앞으로 이 PC에서 저장하는 내용을 읽을 수 있습니다. 그 PC의 코드를 볼 수 없을 때만 하세요. 코드 없이 서버의 열쇠 파일을 받을까요?",
+        "Without the other PC's key check code there is no way to check that this key file really was made on that PC.\nSomeone who took over the server and knows this vault's password could have made it with their own security key, and could then read what this PC saves from now on. Do this only if you cannot see that PC's code. Take the server's key file without a code?",
+    ),
+    (
+        "코드 없이 이 서버를 믿고 받았습니다. 이 열쇠 파일이 진짜인지는 확인하지 않았습니다. 그 PC를 다시 쓸 수 있으면 두 PC의 열쇠 확인 코드가 같은지 비교하세요.",
+        "Taken without a code, trusting this server. Whether this key file is genuine was not checked. When you can use that PC again, compare the two PCs' key check codes.",
+    ),
+    (
+        "다른 PC에서 이 금고에 보안 키를 켜 동기화를 멈췄습니다. 새 열쇠 파일은 서버로 옵니다. '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받으세요(그 PC의 열쇠 확인 코드와 새 열쇠 파일의 보안 키 하나가 필요합니다).",
+        "Another PC turned security keys on for this vault, so sync stopped. The new key file comes through the server: take it with 'Receive the new key file from the server…' in 'Key management' (you need that PC's key check code and one security key of the new key file).",
+    ),
+    (
+        "그런 PC가 없다면 서버 사본이 위조되었을 수 있습니다. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+        "If no PC did, the server copy may be forged. Until then, this PC's changes are saved on this PC only.",
     ),
     (
         "보안 키를 켰습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다.",
@@ -2269,8 +2297,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "This key file opens without a security key, but this vault shows signs of security keys. Enter the other PC's key check code only if security keys really were turned off there.",
     ),
     (
-        "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리 › 새 열쇠 파일 받기'로 그 PC의 새 열쇠 파일을 받으세요.",
-        "This PC has not confirmed this key file yet. Until then, no entry is edited and nothing is uploaded. This vault shows signs of security keys, but this key file has the old (0.8) format, which no key check code can confirm.\r\nOnly if security keys were turned on on another PC and this is the key file this PC has been using: press 'Trust this key file without a code…' below, then take that PC's new key file with 'Key management › Receive a new key file'.",
+        "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리'에서 그 PC의 새 열쇠 파일을 받으세요(서버에 있으면 '서버의 새 열쇠 파일 받기…', 없으면 USB로 '새 열쇠 파일 받기').",
+        "This PC has not confirmed this key file yet. Until then, no entry is edited and nothing is uploaded. This vault shows signs of security keys, but this key file has the old (0.8) format, which no key check code can confirm.\r\nOnly if security keys were turned on on another PC and this is the key file this PC has been using: press 'Trust this key file without a code…' below, then take that PC's new key file in 'Key management' ('Receive the new key file from the server…' when the server holds it, else by USB with 'Receive a new key file').",
     ),
     (
         "다른 PC의 코드가 다른 수정 번호(E…)로 시작하면, 이 열쇠 파일을 복사한 뒤 그 PC에서 열쇠를 다시 바꾼 것입니다. 그 PC의 지금 열쇠 파일을 다시 복사해 와서 여세요.",

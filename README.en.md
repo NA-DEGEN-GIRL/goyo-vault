@@ -137,7 +137,7 @@ Press **+ New entry**, fill in name, type, secret and note, then press **Save en
 
 Pick an entry in the list to see it on the right.
 
-- **Show 15 s** reveals the secret and the note for 15 seconds. Press it again to hide them at once.
+- **Show 15 s** reveals the secret and the note for 15 seconds. Press it again to hide them at once. An entry of the kind **Mnemonic** shows its words numbered, 8 to a row (12 words as 8+4, 24 words in three rows). The stored text stays as it is; long words get a smaller font, and more than 24 words go on to further pages.
 - **Copy:** turn on **Allow copy**, then press **Copy**. The permission turns itself off after 30 seconds or after one copy.
 - A copied value is **wiped from the clipboard after 15 seconds** and is kept out of Win+V clipboard history and cloud clipboard sync.
 - Remaining times are shown on screen.

@@ -188,6 +188,13 @@ pub enum SyncNotice {
     /// KeyChanged.
     #[cfg(feature = "security-key")]
     KeyChangedServer,
+    /// The same on a PC whose key file has no security keys (another PC
+    /// turned keys on, then key-file sync): it has neither [받기…] nor an
+    /// unlock touch, and takes the server's key file with '서버의 새 열쇠
+    /// 파일 받기…' on its Keys screen (security-key build). Given once per
+    /// halt, as KeyChanged.
+    #[cfg(feature = "security-key")]
+    KeyChangedServerPwOnly,
     /// KeyFork-SK of a fork that the kind-9 merge of two removals made
     /// from one state would join (spec v3 §7.4, §5.8): `auto`, at the next
     /// unlock with no question (KeyFork-SK-AUTO); otherwise with [받기]
@@ -222,7 +229,7 @@ impl SyncNotice {
             | Self::OldKeyDamaged
             | Self::RollbackHeld => 1,
             #[cfg(feature = "security-key")]
-            Self::KeyChangedServer => 1,
+            Self::KeyChangedServer | Self::KeyChangedServerPwOnly => 1,
             Self::TooLarge | Self::NewerKeyFile | Self::OldKeyReplaced => 2,
             Self::NewerFormat | Self::KeyInFolder => 3,
             Self::MassDelete { .. } => 4,
@@ -239,13 +246,13 @@ impl SyncNotice {
             Self::SyncOn => 9,
         }
     }
-    /// KeyChanged (and KeyChangedServer) is told once per halt (spec v3
-    /// §7.4).
+    /// KeyChanged (and KeyChangedServer, KeyChangedServerPwOnly) is told
+    /// once per halt (spec v3 §7.4).
     fn once_per_halt(&self) -> bool {
         match self {
             Self::KeyChanged { .. } => true,
             #[cfg(feature = "security-key")]
-            Self::KeyChangedServer => true,
+            Self::KeyChangedServer | Self::KeyChangedServerPwOnly => true,
             _ => false,
         }
     }
@@ -333,6 +340,9 @@ enum Halt {
         newer: bool,
         hardware: bool,
         server: bool,
+        /// This PC's key file has security keys (security-key build).
+        #[cfg(feature = "security-key")]
+        keyed: bool,
     },
     /// Under an older key of this PC's, and it does not open with it.
     OldKeyDamaged,
@@ -348,13 +358,22 @@ impl Halt {
             // fork's advice to take it would mislead.
             Self::UnknownKey { hardware: true, .. } => SyncNotice::KeyChanged { hardware: true },
             // The new key file comes through the server: [받기…] or the next
-            // unlock takes it, not a USB adopt.
+            // unlock takes it, not a USB adopt; on a PC without keys,
+            // '서버의 새 열쇠 파일 받기…' on the Keys screen.
             #[cfg(feature = "security-key")]
             Self::UnknownKey {
                 newer: true,
                 server: true,
+                keyed: true,
                 ..
             } => SyncNotice::KeyChangedServer,
+            #[cfg(feature = "security-key")]
+            Self::UnknownKey {
+                newer: true,
+                server: true,
+                keyed: false,
+                ..
+            } => SyncNotice::KeyChangedServerPwOnly,
             Self::UnknownKey { newer: true, .. } => SyncNotice::KeyChanged { hardware: false },
             Self::UnknownKey { newer: false, .. } | Self::KeyFork => SyncNotice::KeyFork,
             Self::OldKeyDamaged => SyncNotice::OldKeyDamaged,
@@ -702,7 +721,8 @@ pub(super) struct Own<'a> {
     pub sup: &'a [super::anchor::Sup],
     /// This PC's key file has security keys: only then does the Keys
     /// screen offer [받기…] for the server's key file, and the unlock take
-    /// it with its touch (security-key build).
+    /// it with its touch; a PC without keys takes it with '서버의 새 열쇠
+    /// 파일 받기…' (security-key build).
     #[cfg(feature = "security-key")]
     pub keyed: bool,
 }
@@ -781,17 +801,19 @@ impl Own<'_> {
                 // default build is told it cannot (KeyChanged{hardware}).
                 let hardware = cfg!(not(feature = "security-key")) && flags & 1 != 0;
                 // A key file that came through the server is taken from
-                // there by a PC with keys; a password-only PC (one that
-                // never turned keys on) has neither [받기…] nor an unlock
-                // touch, so it gets the USB advice of KeyChanged.
+                // there: by a PC with keys with [받기…] or its next unlock,
+                // by a password-only PC (one that never turned keys on)
+                // with '서버의 새 열쇠 파일 받기…' (no unlock touch).
                 #[cfg(feature = "security-key")]
-                let server = flags & 2 != 0 && self.keyed;
+                let server = flags & 2 != 0;
                 #[cfg(not(feature = "security-key"))]
                 let server = false;
                 return halt(Halt::UnknownKey {
                     newer,
                     hardware,
                     server,
+                    #[cfg(feature = "security-key")]
+                    keyed: self.keyed,
                 });
             }
         };
@@ -3116,13 +3138,14 @@ mod tests {
             // One written under key-file sync (flags 3) at a later state is
             // a change [받기…] or the next unlock takes on a PC with keys
             // (spec §2.30, keysync.rs); this PC's key file has none, so it
-            // has neither and gets the USB advice all the same.
+            // takes it with '서버의 새 열쇠 파일 받기…' (KeyChangedServerPwOnly).
             #[cfg(not(feature = "security-key"))]
             let sk = |_newer: bool, _server: bool| halt(SyncNotice::KeyChanged { hardware: true });
             #[cfg(feature = "security-key")]
-            let sk = |newer: bool, _server: bool| match newer {
-                true => halt(SyncNotice::KeyChanged { hardware: false }),
-                false => halt(SyncNotice::KeyFork),
+            let sk = |newer: bool, server: bool| match (newer, server) {
+                (true, true) => halt(SyncNotice::KeyChangedServerPwOnly),
+                (true, false) => halt(SyncNotice::KeyChanged { hardware: false }),
+                (false, _) => halt(SyncNotice::KeyFork),
             };
             // A GOYOVA03/04 header states an epoch of 1 at least.
             let at_own = if kf2 { own } else { state(1, own.tag) };

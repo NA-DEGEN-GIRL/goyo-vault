@@ -56,6 +56,12 @@ pub const KEYON_PWCHANGE: i32 = 192;
 /// The Keys screen's "열쇠 변경 자동 적용 (이 서버를 믿음)" toggle (spec
 /// §2.30; free: no control ID 195 in `main.rs`).
 pub const KEY_AUTO: i32 = 195;
+/// The Keys screen's [서버의 새 열쇠 파일 받기…] on a PC without security
+/// keys (free: no control ID 196 in `main.rs`).
+pub const KEY_SERVER_TAKE: i32 = 196;
+/// [코드 없이 이 서버를 믿고 받기…] in S-GATE-CODE on that path (a Switch
+/// button of the guarded dialog; free: no control ID 197 in `main.rs`).
+pub const GATE_NOCODE: i32 = 197;
 /// [뒤로] in the adopt preview of a fork (a Switch button of the guarded
 /// dialog; spec §9.2 adopt step 8; free: no constant or literal 193 in
 /// `main.rs`).
@@ -181,7 +187,17 @@ pub const KEYSON_PLAN: &str = "보안 키를 켜면 앞으로 이 금고를 열 
 /// S-KEYSON-OTHERS: after keys on, what every other PC of the vault does.
 pub const KEYSON_OTHERS: &str = "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.";
 /// The same for a vault that syncs: those PCs halt until then.
-pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.";
+pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.";
+/// The Keys screen of a PC without security keys whose vault's server
+/// holds another PC's key file with keys (keys on, then key-file sync):
+/// [서버의 새 열쇠 파일 받기…] and what it asks (S-PWONLY-SERVER).
+pub const SERVER_TAKE_BUTTON: &str = "서버의 새 열쇠 파일 받기…";
+pub const SERVER_TAKE_HOLD: &str = "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호(와 OTP)를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).";
+/// [코드 없이 이 서버를 믿고 받기…] and S-NOCODE-SERVER, danger, default
+/// no; the status line after such a take.
+pub const NOCODE_SERVER_LABEL: &str = "코드 없이 이 서버를 믿고 받기…";
+pub const NOCODE_SERVER_ASK: &str = "다른 PC의 열쇠 확인 코드 없이는 이 열쇠 파일을 정말 그 PC에서 만들었는지 확인할 방법이 없습니다.\n서버를 장악하고 이 금고의 비밀번호를 아는 사람이 자기 보안 키로 만든 열쇠 파일일 수 있고, 그렇다면 그 사람은 앞으로 이 PC에서 저장하는 내용을 읽을 수 있습니다. 그 PC의 코드를 볼 수 없을 때만 하세요. 코드 없이 서버의 열쇠 파일을 받을까요?";
+pub const ADOPT_NOCODE: &str = "코드 없이 이 서버를 믿고 받았습니다. 이 열쇠 파일이 진짜인지는 확인하지 않았습니다. 그 PC를 다시 쓸 수 있으면 두 PC의 열쇠 확인 코드가 같은지 비교하세요.";
 /// The same with one key, which has no other key to pair with.
 pub const KEYS_ON_DONE_ONE: &str = "보안 키를 켰습니다. 보안 키 1개가 등록되었습니다.";
 /// S-CODE-SK (spec §9.3), in the one-time dialog after a key change: the
@@ -437,7 +453,7 @@ pub const TOFU: &str = "이 PC는 이 열쇠 파일(수정 {e})을 아직 확인
 /// S-TOFU-LEGACY: S-TOFU and S-TOFU-PWONLY for a 0.8 key file, which has
 /// no key check code to type: most likely another PC turned security keys
 /// on, and this PC takes that key file once it trusts its own.
-pub const TOFU_LEGACY: &str = "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리 › 새 열쇠 파일 받기'로 그 PC의 새 열쇠 파일을 받으세요.";
+pub const TOFU_LEGACY: &str = "이 PC는 이 열쇠 파일을 아직 확인하지 않았습니다. 확인하기 전에는 항목을 고치거나 서버에 올리지 않습니다. 이 금고에는 보안 키를 쓴 흔적이 있는데, 이 열쇠 파일은 예전(0.8) 형식이라 열쇠 확인 코드로 확인할 수 없습니다.\r\n다른 PC에서 보안 키를 켰고 이 파일이 이 PC에서 쓰던 열쇠 파일이 맞을 때만 아래 '코드 없이 이 열쇠 파일 믿기…'를 누르고, 그다음 '열쇠 관리'에서 그 PC의 새 열쇠 파일을 받으세요(서버에 있으면 '서버의 새 열쇠 파일 받기…', 없으면 USB로 '새 열쇠 파일 받기').";
 /// S-TOFU-PWONLY.
 pub const TOFU_PWONLY: &str = "이 열쇠 파일은 보안 키 없이 열리지만, 이 금고에는 보안 키를 쓴 흔적이 있습니다. 다른 PC에서 보안 키를 끈 것이 맞을 때만, 그 PC의 열쇠 확인 코드를 입력하세요.";
 /// S-TOFU-OTHEREPOCH, after the mismatch.
@@ -1641,7 +1657,7 @@ impl App {
                 KEY_ON | KEYON_PWCHANGE | KEY_ADD | KEY_PAIR | KEY_RESEED | KEY_OFF | KEY_LOST
                 | KEY_REMOVE | LOST_REDO | KEY_ACCEPT | KEY_LIST | PASS | CONFIRM | PEEK_PASS
                 | PEEK_CONFIRM | KEYSYNC_ON | KEYSYNC_OFF | KEY_REUPLOAD | GATE_DROP
-                | GATE_SUPERSEDE | KEY_ROLLOUT_DONE | KEY_AUTO,
+                | GATE_SUPERSEDE | KEY_ROLLOUT_DONE | KEY_AUTO | KEY_SERVER_TAKE,
             ) => Some(true),
             (Screen::Vault, TOFU_OK | TOFU_NOPC | TOFU_LOCK | GATE_CODE) => {
                 Some(self.tofu_banner())
@@ -1671,6 +1687,7 @@ pub(crate) fn phased(a: &App, id: i32) -> bool {
                 | GATE_DROP
                 | GATE_SUPERSEDE
                 | KEY_AUTO
+                | KEY_SERVER_TAKE
         ),
         Screen::Pair | Screen::Adopt => matches!(id, 1 | SUBMIT),
         // A password change of a key file with security keys needs a touch.
@@ -1718,6 +1735,9 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         // else the server's key file (spec §7.15).
         (_, KEY_ACCEPT) if gate_login() => accept_flow(h),
         (_, KEY_ACCEPT) => adopt_from(h, Taking::Server),
+        // A PC without keys: the server's key file with keys (keys on and
+        // key-file sync at another PC), through the same flow.
+        (_, KEY_SERVER_TAKE) => adopt_from(h, Taking::Server),
         (_, KEYSYNC_ON | KEY_REUPLOAD) => keysync_on_flow(h, id),
         (_, KEYSYNC_OFF) => keysync_off_flow(h),
         (_, GATE_DROP) => gate_drop_flow(h),
@@ -3180,11 +3200,47 @@ pub(crate) fn ask_gate(
     epoch: u64,
     note: Option<&str>,
 ) -> Option<GateAnswer> {
-    let answer = ask_gate_typed(h, kind, choices, opened, epoch, note);
+    let answer = match ask_gate_typed(h, kind, choices, opened, epoch, note, false) {
+        Some(Gated::Answer(answer)) => Some(answer),
+        _ => None,
+    };
     if !matches!(answer, Some(GateAnswer::Code(_))) {
         TYPED_CODE.with(|c| c.borrow_mut().clear());
     }
     answer
+}
+/// What a gate dialog was answered with: a pick or a code, or (on a PC
+/// without keys taking the server's key file) the trust without a code.
+enum Gated {
+    Answer(GateAnswer),
+    NoCode,
+}
+/// The code's gate (S-GATE-CODE) of '서버의 새 열쇠 파일 받기…' on a PC
+/// without security keys: the other PC's code, or [코드 없이 이 서버를
+/// 믿고 받기…] and S-NOCODE-SERVER's yes (danger, default no; a no asks
+/// the code again), bound to the file of state (`epoch`, `tag`). None:
+/// [나중에].
+fn ask_server_gate(h: Hwnd, epoch: u64, tag: [u8; 16], note: Option<&str>) -> Option<GatePass> {
+    let mut note = note;
+    loop {
+        let answer = ask_gate_typed(h, GateKind::G1, &[], None, epoch, note, true);
+        if !matches!(answer, Some(Gated::Answer(GateAnswer::Code(_)))) {
+            TYPED_CODE.with(|c| c.borrow_mut().clear());
+        }
+        return match answer {
+            Some(Gated::Answer(GateAnswer::Code(code))) => {
+                Some(GatePass::G1Passed { code, epoch, tag })
+            }
+            Some(Gated::NoCode) if ask(h, NOCODE_SERVER_ASK) => {
+                Some(GatePass::NoCode { epoch, tag })
+            }
+            Some(Gated::NoCode) => {
+                note = None;
+                continue;
+            }
+            _ => None,
+        };
+    }
 }
 thread_local! {
     /// The key code last typed at a gate (a key code is public, as the Keys
@@ -3198,7 +3254,8 @@ fn ask_gate_typed(
     opened: Option<u8>,
     epoch: u64,
     note: Option<&str>,
-) -> Option<GateAnswer> {
+    nocode: bool,
+) -> Option<Gated> {
     let lead = |text: String| match note {
         Some(note) => format!("{}\n\n{text}", tr(note)),
         None => text,
@@ -3216,6 +3273,11 @@ fn ask_gate_typed(
     let to_code = DialogButton {
         id: GATE_TO_CODE,
         label: TO_CODE,
+        role: Role::Switch,
+    };
+    let trust = DialogButton {
+        id: GATE_NOCODE,
+        label: NOCODE_SERVER_LABEL,
         role: Role::Switch,
     };
     let mut kind = kind;
@@ -3244,13 +3306,13 @@ fn ask_gate_typed(
                         note_pick = Some(LOSTPICK_NONE);
                     }
                     InputAnswer::Pick(picked) => {
-                        return Some(GateAnswer::Pick(
+                        return Some(Gated::Answer(GateAnswer::Pick(
                             picked
                                 .iter()
                                 .filter_map(|i| choices.get(usize::from(*i)))
                                 .map(|c| c.credhash)
                                 .collect(),
-                        ));
+                        )));
                     }
                     InputAnswer::Switch(GATE_TO_CODE) => kind = GateKind::G1,
                     _ => return None,
@@ -3271,11 +3333,17 @@ fn ask_gate_typed(
                         Some(n) => format!("{}\n\n{text}", tr(n)),
                         None => lead(text),
                     };
-                    match ask_input(h, InputKind::Code(&typed_before), &text, &[ok, later]) {
+                    let buttons: &[DialogButton] = if nocode {
+                        &[ok, trust, later]
+                    } else {
+                        &[ok, later]
+                    };
+                    match ask_input(h, InputKind::Code(&typed_before), &text, buttons) {
+                        InputAnswer::Switch(GATE_NOCODE) if nocode => return Some(Gated::NoCode),
                         InputAnswer::Code(typed) => {
                             TYPED_CODE.with(|c| *c.borrow_mut() = typed.to_string());
                             match vault::parse_code(&typed) {
-                                Some(code) => return Some(GateAnswer::Code(code)),
+                                Some(code) => return Some(Gated::Answer(GateAnswer::Code(code))),
                                 None => {
                                     format_note = Some(CODE_FORMAT);
                                     typed_before = typed.to_string();
@@ -5183,6 +5251,10 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         // at login only with no question before the open; with [받기] it
         // skips the fork's options (it is option 2, with no gate).
         let mut removal = false;
+        // A PC without keys judges no server file (spec §7.14): its
+        // [서버의 새 열쇠 파일 받기…] takes the one pwonly_server_file
+        // names, which adopt_check judges below.
+        let mut pwonly = false;
         let (other, source) = match &login {
             Some(proof) => match s.login_candidate(proof) {
                 Some((file, seq)) => (file, Source::Server { seq }),
@@ -5196,7 +5268,8 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
             },
             None if server => {
                 let (file, seq) = s.server_key_file().ok_or(vault::NO_CANDIDATE)?;
-                if !server_takes(s.server_class()) {
+                pwonly = s.pwonly_server_file().is_some();
+                if !pwonly && !server_takes(s.server_class()) {
                     return Err(vault::NOT_A_SUCCESSOR);
                 }
                 removal = s.removal_merge().is_some();
@@ -5264,11 +5337,18 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
             a.flow = Some(if server { KEY_ACCEPT } else { SUBMIT });
         }
         Ok(Some((
-            a.serial, other, check, typed, keys, gate, removal, trusted,
+            a.serial,
+            other,
+            check,
+            typed,
+            keys,
+            gate,
+            (removal, trusted, pwonly),
         )))
     });
     drain_pending(h);
-    let Some((serial, other, check, t, keys, (choices, opened_with), removal, trusted)) = p1?
+    let Some((serial, other, check, t, keys, (choices, opened_with), (removal, trusted, pwonly))) =
+        p1?
     else {
         return Ok(());
     };
@@ -5296,9 +5376,16 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         vault::ForkOption::Both => check.keys.gate,
     };
     let mut pass = GatePass::none(&check);
+    // On a PC without keys the code's gate also offers the trust without a
+    // code (S-NOCODE-SERVER), bound to this file.
+    let server_gate = |note: Option<&str>| ask_server_gate(h, epoch, tag, note);
     if let Some(kind) = gate_of(option) {
         pass = match trusted {
             true => GatePass::Trusted { epoch, tag },
+            false if pwonly && kind == GateKind::G1 => match server_gate(None) {
+                Some(pass) => pass,
+                None => return Ok(()),
+            },
             false => match ask_gate(h, kind, &choices, opened_with, epoch, None) {
                 Some(GateAnswer::Pick(pick)) => GatePass::G2Passed { pick, epoch, tag },
                 Some(GateAnswer::Code(code)) => GatePass::G1Passed { code, epoch, tag },
@@ -5490,6 +5577,18 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
             match planned {
                 None => return Ok(()),
                 Some(Ok(plan)) => break plan,
+                Some(Err(e)) if e == vault::GATE_CODE_WRONG && pwonly => match server_gate(Some(e))
+                {
+                    Some(given) => {
+                        pass = given;
+                        opened = match open(typed.as_deref().map(String::as_str))? {
+                            Some(Ok(opened)) => opened,
+                            Some(Err(e)) => return Err(e),
+                            None => return Ok(()),
+                        };
+                    }
+                    None => return Ok(()),
+                },
                 Some(Err(e)) if e == vault::GATE_CODE_WRONG => {
                     match ask_gate(h, GateKind::G1, &[], None, epoch, Some(e)) {
                         Some(GateAnswer::Code(code)) => {
@@ -5669,6 +5768,8 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
     let Some(r) = renewed(h, &t, r, WRITE_RESERVE)? else {
         return Ok(());
     };
+    // A take without the other PC's code says so in its status.
+    let nocode = matches!(pass, GatePass::NoCode { .. });
     let acks = vault::Acks {
         password_only: preview.password_only,
         union_password: if own {
@@ -5728,6 +5829,7 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
             (true, true) => lines.push(merged.as_str()),
             (true, false) => lines.push(accepted.as_str()),
             (false, true) => lines.extend([merged.as_str(), pass]),
+            (false, false) if nocode => lines.extend([ADOPT_NOCODE, code.as_str(), pass]),
             (false, false) => lines.extend([code.as_str(), pass]),
         }
         if adopted.vault_pending {
@@ -5907,6 +6009,13 @@ pub const N_KEY_CHANGED_SERVER: &str = concat!(
     "\r\n",
     "그런 변경을 한 PC가 없다면 서버 사본이 위조되었을 수 있습니다. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
 );
+/// KeyChangedServerPwOnly: the same on a PC without security keys, which
+/// takes the server's key file with [서버의 새 열쇠 파일 받기…].
+pub const N_KEY_CHANGED_SERVER_PWONLY: &str = concat!(
+    "다른 PC에서 이 금고에 보안 키를 켜 동기화를 멈췄습니다. 새 열쇠 파일은 서버로 옵니다. '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받으세요(그 PC의 열쇠 확인 코드와 새 열쇠 파일의 보안 키 하나가 필요합니다).",
+    "\r\n",
+    "그런 PC가 없다면 서버 사본이 위조되었을 수 있습니다. 그때까지 이 PC의 변경은 이 PC에만 저장됩니다.",
+);
 
 /// The status line of a key notice of key-file sync and whether it is a
 /// danger line (spec §7.4); None for the notices main.rs words.
@@ -5915,6 +6024,7 @@ pub fn key_sync_line(notice: &vault::SyncNotice) -> Option<(Zeroizing<String>, b
     Some(match notice {
         N::KeyFork => (line(N_KEYFORK_SK), true),
         N::KeyChangedServer => (line(N_KEY_CHANGED_SERVER), true),
+        N::KeyChangedServerPwOnly => (line(N_KEY_CHANGED_SERVER_PWONLY), true),
         N::KeyForkMerge { auto: true } => (line(N_KEYFORK_AUTO), true),
         N::KeyForkMerge { auto: false } => (line(N_KEYFORK_MERGE), true),
         N::KeyRollback => (line(N_KEY_ROLLBACK), true),

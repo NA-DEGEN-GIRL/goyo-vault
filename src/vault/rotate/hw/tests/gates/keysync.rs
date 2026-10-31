@@ -2101,6 +2101,63 @@ fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
     set_kdf_profile(KdfProfile::Real);
 }
 
+/// '코드 없이 이 서버를 믿고 받기…' is for a PC without keys only: a PC
+/// with keys taking another PC's added key from the server (G1) is offered
+/// no such take (pwonly_server_file) and refused one (NOT_TRUSTED), with
+/// nothing written; its code still takes it.
+#[test]
+fn a_take_without_a_code_is_only_for_a_pc_without_keys() {
+    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    a.here();
+    let key4 = keys.register(&id, 4, true);
+    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    assert_eq!(
+        sa.rekey(
+            r,
+            Vec::new(),
+            Change::AddKey(key4),
+            Consent::default(),
+            true
+        ),
+        Ok(Rekeyed::Done)
+    );
+    fetch(&a, &mut sa, &mut server, &id);
+    fetch(&b, &mut sb, &mut server, &id);
+    assert_eq!(sb.pwonly_server_file(), None);
+    let (served, seq) = sb.server_key_file().unwrap();
+    let check = sb.adopt_check(&served, Source::Server { seq }).unwrap();
+    assert_eq!(check.class, AdoptClass::Successor);
+    assert_eq!(check.keys.gate, Some(GateKind::G1));
+    assert!(!sb.trusts_without_code(&check));
+    let before = fs::read(b.key()).unwrap();
+    let take = |sb: &mut Session, codes: &mut Codes, pass: GatePass| {
+        let r = reauth(sb, OLD, codes, &keys, 2).unwrap();
+        let t = touch_other(&served, &keys, 2);
+        let opened = sb.adopt_open_with(&r, &served, None, Some(&t)).unwrap();
+        let planned = sb.adopt_preview_with(&r, &served, opened, &check, pass, ForkOption::Both);
+        (r, planned)
+    };
+    let nocode = GatePass::NoCode {
+        epoch: check.other.epoch,
+        tag: check.other.tag,
+    };
+    let (_, planned) = take(&mut sb, &mut codes, nocode);
+    assert_eq!(planned.err(), Some(NOT_TRUSTED));
+    assert_eq!(fs::read(b.key()).unwrap(), before);
+    let code = GatePass::G1Passed {
+        code: code_of(&sa),
+        epoch: check.other.epoch,
+        tag: check.other.tag,
+    };
+    let (r, planned) = take(&mut sb, &mut codes, code);
+    let planned = planned.unwrap();
+    let acked = acks(planned.preview(), ForkOption::Both);
+    sb.adopt(r, planned, Vec::new(), acked, Consent::default(), false)
+        .unwrap();
+    assert_eq!(header(&b).state(), header(&a).state());
+    set_kdf_profile(KdfProfile::Real);
+}
+
 /// The take of auto-apply (spec §2.30): no gate question, the gate passed
 /// as trusted.
 fn trusted(c: &AdoptCheck, _: &Session) -> GatePass {
@@ -2454,25 +2511,38 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
     set_kdf_profile(KdfProfile::Real);
 }
 
+/// How a PC without keys takes another PC's keys-on file: by USB behind
+/// that PC's code, from the server behind it, or from the server without it
+/// ('코드 없이 이 서버를 믿고 받기…').
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Took {
+    Usb,
+    ServerCode,
+    ServerNoCode,
+}
 /// A vault made without security keys and synced on two PCs (from a 0.8
 /// pair and from a GOYOKE03): A turns keys on, then key-file sync on. B,
 /// still on its password-only key file, has neither [받기…] nor an unlock
-/// touch, so it is told the USB advice (KeyChanged), never KeyChangedServer;
-/// it takes A's GOYOKS01 file from the server's key view or by USB behind
-/// A's code (G1), the touch of one of A's keys stating the transport its
-/// password-only Reauth cannot, and syncs again: both PCs hold the same
-/// key-file state, entries and check code, and B's own edit goes up.
+/// touch: it is told KeyChangedServerPwOnly (never KeyChangedServer or the
+/// USB advice), and its Keys screen offers the server's file
+/// (pwonly_server_file). B takes A's GOYOKS01 file by USB or from the
+/// server's key view behind A's code (G1), or from the server without it,
+/// which a USB file never is and which the write judges again; the touch
+/// of one of A's keys states the transport its password-only Reauth
+/// cannot. Then it syncs again: both PCs hold the same key-file state,
+/// entries and check code, and B's own edit goes up.
 #[test]
 fn keys_on_then_key_file_sync_reaches_a_password_only_pc() {
     for kf2 in [false, true] {
-        for usb in [false, true] {
-            keys_on_then_key_file_sync(kf2, usb);
+        for took in [Took::Usb, Took::ServerCode, Took::ServerNoCode] {
+            keys_on_then_key_file_sync(kf2, took);
         }
     }
     set_kdf_profile(KdfProfile::Real);
 }
-fn keys_on_then_key_file_sync(kf2: bool, usb: bool) {
-    let case = format!("kf2={kf2} usb={usb}");
+fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
+    let usb = took == Took::Usb;
+    let case = format!("kf2={kf2} took={took:?}");
     let a = Pc::new();
     let (mut sa, mut codes) = setup(&a, kf2, false, true);
     let id = sa.id;
@@ -2528,15 +2598,21 @@ fn keys_on_then_key_file_sync(kf2: bool, usb: bool) {
     let mut told: Vec<SyncNotice> = sb.take_unlock_notice().into_iter().collect();
     told.extend(polls(&mut sb));
     assert!(
-        told.contains(&SyncNotice::KeyChanged { hardware: false }),
+        told.contains(&SyncNotice::KeyChangedServerPwOnly),
         "{case}: {told:?}"
     );
     assert!(
-        !told.contains(&SyncNotice::KeyChangedServer),
+        !told.iter().any(|n| matches!(
+            n,
+            SyncNotice::KeyChangedServer | SyncNotice::KeyChanged { .. }
+        )),
         "{case}: {told:?}"
     );
-    // The server's key file, or A's on a stick, behind A's code, with a
-    // touch of one of A's keys.
+    // The Keys screen offers the server's file; A, with keys, has none.
+    assert_eq!(sb.pwonly_server_file(), Some(header(&a).epoch), "{case}");
+    assert_eq!(sa.pwonly_server_file(), None, "{case}");
+    // The server's key file, or A's on a stick, behind A's code or (from
+    // the server only) without it, with a touch of one of A's keys.
     let (f, seq) = sb.server_key_file().expect("the server's key file");
     let (f, source) = if usb {
         let path = b.file("from-a.goyokey");
@@ -2545,27 +2621,81 @@ fn keys_on_then_key_file_sync(kf2: bool, usb: bool) {
     } else {
         (f, Source::Server { seq })
     };
-    let check = sb.adopt_check(&f, source).unwrap();
+    let mut check = sb.adopt_check(&f, source.clone()).unwrap();
     assert_eq!(
         (check.class, check.keys.gate),
         (AdoptClass::Successor, Some(GateKind::G1)),
         "{case}"
     );
-    let (otp, typed) = codes.next();
-    let r = sb.reauth(OLD, Some((&otp, typed)), None).unwrap();
-    let t = touch_other(&f, &keys, 2);
-    let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
-    let pass = GatePass::G1Passed {
-        code: code_of(&sa),
+    // A 0.8 PC's unlock was a bootstrap: no take without a code before it
+    // trusts its own key file (S-TOFU-LEGACY, '코드 없이 이 열쇠 파일
+    // 믿기…'); A's code takes A's file even so.
+    assert_eq!(sb.tofu(), !kf2, "{case}");
+    if sb.tofu() {
+        assert!(!sb.trusts_without_code(&check), "{case}");
+        if took == Took::ServerNoCode {
+            sb.tofu_confirm(None).unwrap();
+            assert!(!sb.tofu(), "{case}");
+            check = sb.adopt_check(&f, source).unwrap();
+        }
+    }
+    assert_eq!(
+        sb.trusts_without_code(&check),
+        took == Took::ServerNoCode || (!usb && kf2),
+        "{case}"
+    );
+    let nocode = GatePass::NoCode {
         epoch: check.other.epoch,
         tag: check.other.tag,
     };
-    let plan = sb
-        .adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both)
+    let pass = match took {
+        Took::ServerNoCode => nocode.clone(),
+        _ => GatePass::G1Passed {
+            code: code_of(&sa),
+            epoch: check.other.epoch,
+            tag: check.other.tag,
+        },
+    };
+    let before = fs::read(b.key()).unwrap();
+    let plan = |sb: &mut Session, codes: &mut Codes, pass: GatePass| {
+        let (otp, typed) = codes.next();
+        let r = sb.reauth(OLD, Some((&otp, typed)), None).unwrap();
+        let t = touch_other(&f, &keys, 2);
+        let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
+        let plan = sb.adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both);
+        (r, plan)
+    };
+    // A USB file is never taken without the code.
+    if usb {
+        let (_, planned) = plan(&mut sb, &mut codes, nocode.clone());
+        assert_eq!(planned.err(), Some(NOT_TRUSTED), "{case}");
+        assert_eq!(fs::read(b.key()).unwrap(), before, "{case}");
+    }
+    // Without the code, judged again at the write: the server's view gone
+    // since the preview writes nothing; back again, the same take lands.
+    if took == Took::ServerNoCode {
+        let (r, planned) = plan(&mut sb, &mut codes, pass.clone());
+        let planned = planned.unwrap();
+        let acked = acks(planned.preview(), ForkOption::Both);
+        let view = fs::read(dir(&b).join(KEY_VIEW)).unwrap();
+        fs::remove_file(dir(&b).join(KEY_VIEW)).unwrap();
+        sb.poll_sync();
+        assert!(!sb.trusts_without_code(&check), "{case}");
+        let written = sb.adopt(r, planned, Vec::new(), acked, Consent::default(), false);
+        assert_eq!(written.err(), Some(NOT_TRUSTED), "{case}");
+        assert_eq!(fs::read(b.key()).unwrap(), before, "{case}");
+        syncfile::replace_file(&dir(&b).join(KEY_VIEW), &view).unwrap();
+        sb.poll_sync();
+        assert!(sb.trusts_without_code(&check), "{case}");
+    }
+    let (r, planned) = plan(&mut sb, &mut codes, pass);
+    let planned = planned.unwrap();
+    let acks = acks(planned.preview(), ForkOption::Both);
+    let adopted = sb
+        .adopt(r, planned, Vec::new(), acks, Consent::default(), false)
         .unwrap();
-    let acks = acks(plan.preview(), ForkOption::Both);
-    sb.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
-        .unwrap();
+    assert!(!adopted.trusted, "{case}");
+    assert_eq!(sb.pwonly_server_file(), None, "{case}");
     assert!(!sb.tofu(), "{case}");
     assert_eq!(header(&b).state(), header(&a).state(), "{case}");
     assert_eq!(header(&b).magic, Magic::Ks01, "{case}");
@@ -2593,4 +2723,31 @@ fn keys_on_then_key_file_sync(kf2: bool, usb: bool) {
     // B's pair now opens with a key.
     let s = open(&b, OLD, &mut codes, &keys, 1).unwrap();
     assert!(has(&s, "from b"), "{case}");
+    drop(s);
+    // A turns keys off: its key file has no keys again. A view whose top
+    // is still A's own older file (the helper answered the off with a
+    // conflict) offers it nothing to take.
+    a.here();
+    let on = fs::read(a.key()).unwrap();
+    assert_eq!(
+        rekey(&mut sa, &mut codes, &keys, 1, Change::KeysOff),
+        Ok(Rekeyed::Done),
+        "{case}"
+    );
+    assert!(sa.keys_overview().is_none(), "{case}");
+    let mut view = KeyView {
+        seq: 99,
+        ..Default::default()
+    };
+    view.record = render_record_header(RecordKind::Key, false, 0, header(&b).epoch).to_vec();
+    view.record.extend_from_slice(&on);
+    if let Some(req) = kreq(&a) {
+        view.outcome = KeyOutcome::Conflict;
+        view.answered = Some(sha256(&req));
+    }
+    syncfile::replace_file(&dir(&a).join(KEY_VIEW), &render_key_view(&view)).unwrap();
+    sa.poll_sync();
+    let (old, _) = sa.server_key_file().expect("A's record from before");
+    assert!(old.needs_security_key(), "{case}");
+    assert_eq!(sa.pwonly_server_file(), None, "{case}");
 }

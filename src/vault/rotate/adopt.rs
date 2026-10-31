@@ -94,6 +94,15 @@ pub enum GatePass {
         epoch: u64,
         tag: [u8; 16],
     },
+    /// '코드 없이 이 서버를 믿고 받기…': S-NOCODE-SERVER's yes on a PC
+    /// without security keys, in place of the other PC's code; the preview
+    /// and the write take it only where `Session::trusts_without_code`
+    /// holds.
+    #[cfg(feature = "security-key")]
+    NoCode {
+        epoch: u64,
+        tag: [u8; 16],
+    },
 }
 impl GatePass {
     /// The pass of a file that needs no gate.
@@ -113,7 +122,8 @@ impl GatePass {
             #[cfg(feature = "security-key")]
             Self::G2Passed { epoch, tag, .. }
             | Self::G1Passed { epoch, tag, .. }
-            | Self::Trusted { epoch, tag } => KeyState {
+            | Self::Trusted { epoch, tag }
+            | Self::NoCode { epoch, tag } => KeyState {
                 epoch: *epoch,
                 tag: *tag,
             },
@@ -873,6 +883,11 @@ impl Session {
         if matches!(plan.gate, GatePass::Trusted { .. }) && !self.trusts(&plan.check) {
             return Err(gate::NOT_TRUSTED);
         }
+        // So is a take without the other PC's code.
+        #[cfg(feature = "security-key")]
+        if matches!(plan.gate, GatePass::NoCode { .. }) && !self.trusts_without_code(&plan.check) {
+            return Err(gate::NOT_TRUSTED);
+        }
         // Key-file sync turned on here only with S-KEYSYNC-ON's yes, a
         // touch that stated its transport, and no off of this PC pending;
         // the `ks` and `merged` this write records (spec §7.16). A PC
@@ -896,7 +911,12 @@ impl Session {
                 plan.preview.keysync_off.and(self.take_ks(&plan.check))
             };
             let (merged, clear_gate) = self.take_marks(&plan.check);
-            let trusted = matches!(plan.gate, GatePass::Trusted { .. });
+            // Neither a trusted take nor one without a code passed a gate:
+            // neither allows G2 again.
+            let trusted = matches!(
+                plan.gate,
+                GatePass::Trusted { .. } | GatePass::NoCode { .. }
+            );
             (ks, merged, clear_gate, trusted)
         };
         if !self.key_on_disk()? {
@@ -1040,7 +1060,10 @@ impl Session {
         #[cfg(feature = "security-key")]
         {
             (self.tofu, self.held_unconfirmed) = (false, false);
-            if !matches!(plan_gate, GatePass::Trusted { .. }) {
+            if !matches!(
+                plan_gate,
+                GatePass::Trusted { .. } | GatePass::NoCode { .. }
+            ) {
                 self.g2_spent.set(false);
             }
         }
@@ -1449,6 +1472,12 @@ impl Session {
             // write's checks) still holds.
             (GatePass::Trusted { .. }, Some(_)) if self.trusts(check) => Ok(()),
             (GatePass::Trusted { .. }, Some(_)) => Err(gate::NOT_TRUSTED),
+            // Without the other PC's code: only the code's gate, on a PC
+            // without keys, from the server channel (trusts_without_code).
+            (GatePass::NoCode { .. }, Some(GateKind::G1)) if self.trusts_without_code(check) => {
+                Ok(())
+            }
+            (GatePass::NoCode { .. }, Some(_)) => Err(gate::NOT_TRUSTED),
             _ => Err(ADOPT_STALE),
         }
     }

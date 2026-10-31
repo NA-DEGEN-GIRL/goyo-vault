@@ -193,6 +193,8 @@ AUTO_REFUSES_T = KS_T + 'auto_apply_still_refuses_a_file_of_a_removed_key'
 AUTO_FORK_T = KS_T + 'auto_apply_never_joins_a_fork'
 NOTICE_T = KS_T + 'a_copy_under_another_pcs_new_key_points_to_the_server_key_file'
 KS_LATER = KS_T + 'keys_on_then_key_file_sync_reaches_a_password_only_pc'
+KS_NOCODE_KEYED = KS_T + 'a_take_without_a_code_is_only_for_a_pc_without_keys'
+PWONLY_UI = CEREMONY_T + 'a_pc_without_keys_takes_keys_on_from_the_server'
 AUTO_ANCHOR_T = ANCHOR_T + 'auto_round_trips_and_is_kept'
 AUTO_UI_T = CEREMONY_T + 'server_key_changes_apply_by_themselves_once_the_server_is_trusted'
 AUTO_BOUND_T = KS_T + 'auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write'
@@ -274,22 +276,58 @@ ROWS = [
      [NOTICE_T, SYNC_T + 'copies_are_judged_by_their_key_first']),
     ('A a copy written under key-file sync points to the server key file', 11, 'feature',
      'lib', SYNC,
-     '                let server = flags & 2 != 0 && self.keyed;',
-     '                let server = false;',
-     [NOTICE_T]),
-    # Security keys turned on later, for a vault made without them: a
-    # password-only PC is pointed to USB (it has neither [받기…] nor an
-    # unlock touch), and takes a GOYOKS01 file with the transport of the
-    # touch that opened it.
-    ('A a password-only PC gets the USB advice for a key-file sync copy', 11, 'feature',
-     'lib', SYNC,
-     '                let server = flags & 2 != 0 && self.keyed;',
      '                let server = flags & 2 != 0;',
+     '                let server = false;',
+     [NOTICE_T, KS_LATER]),
+    # Security keys turned on later, for a vault made without them: a
+    # password-only PC (it has neither [받기…] nor an unlock touch) is
+    # pointed to [서버의 새 열쇠 파일 받기…], and takes a GOYOKS01 file with
+    # the transport of the touch that opened it.
+    ('A a password-only PC is pointed to the server key file for a key-file sync copy', 11,
+     'feature', 'lib', SYNC,
+     '            } => SyncNotice::KeyChangedServerPwOnly,',
+     '            } => SyncNotice::KeyChanged { hardware: false },',
      [KS_LATER, SYNC_T + 'copies_are_judged_by_their_key_first']),
     ('A a password-only PC takes a GOYOKS01 file with its opening touch', 11, 'feature',
      'lib', ADOPT,
      '                .or_else(|| plan.other.touched.as_ref().and_then(|t| t.transport));',
      '                .or(None);',
+     [KS_LATER]),
+    # The server's keys-on file for a password-only PC: offered only to a PC
+    # without keys and only when newer than its key file; taken without the
+    # other PC's code only from the server channel, on a PC without keys
+    # that confirmed its own key file, behind the preview's and the
+    # write's judgment.
+    ('A only a PC without keys is offered the server keys-on file', 11, 'feature', 'lib',
+     KEYSYNC,
+     '        if self.key_file.needs_security_key() {\n            return None;\n        }\n        let (file, _) = self.server_key_file()?;\n',
+     '        let (file, _) = self.server_key_file()?;\n',
+     [KS_LATER, KS_NOCODE_KEYED]),
+    ('A the offer is only a key file later than this PC\'s', 11, 'feature', 'lib', KEYSYNC,
+     '        (epoch > self.key_state.epoch).then_some(epoch)\n',
+     '        Some(epoch)\n',
+     [KS_LATER]),
+    ('A no take without a code of a USB file', 11, 'feature', 'lib', KEYSYNC,
+     '        let super::Source::Server { seq } = &check.source else {\n            return false;\n        };\n',
+     '        let seq = &match &check.source {\n            super::Source::Server { seq } => *seq,\n            super::Source::File(_) => self.server_key_file().map_or(0, |(_, n)| n),\n        };\n',
+     [KS_LATER]),
+    ('A no take without a code on a PC with keys', 11, 'feature', 'lib', KEYSYNC,
+     '        let pwonly = !self.key_file.needs_security_key();\n',
+     '        let pwonly = true;\n',
+     [KS_NOCODE_KEYED]),
+    ('A no take without a code before this PC confirmed its key file', 11, 'feature', 'lib',
+     KEYSYNC,
+     '            && !check.fork\n            && !self.unconfirmed()\n',
+     '            && !check.fork\n',
+     [KS_LATER]),
+    ('A the preview takes a pass without a code only where it is allowed', 11, 'feature',
+     'lib', ADOPT,
+     '            (GatePass::NoCode { .. }, Some(GateKind::G1)) if self.trusts_without_code(check) => {',
+     '            (GatePass::NoCode { .. }, Some(GateKind::G1)) => {',
+     [KS_LATER, KS_NOCODE_KEYED]),
+    ('A the write judges a take without a code again', 11, 'feature', 'lib', ADOPT,
+     '        if matches!(plan.gate, GatePass::NoCode { .. }) && !self.trusts_without_code(&plan.check) {\n            return Err(gate::NOT_TRUSTED);\n        }\n',
+     '',
      [KS_LATER]),
     # Stage 4: the public checks, the gate and E5 (§14.11; forger tests of
     # the removed-key simulator, §14.10-5).
@@ -1797,6 +1835,29 @@ ROWS = [
      '        done.more(tr(keys_on_others(synced)).to_owned())',
      '        done',
      [CEREMONY_T + 'keys_on_add_pair_reseed_and_off']),
+    # A PC without keys and the server's keys-on file (UI): the Keys
+    # screen's offer, its flow, and the code's gate with the trust without
+    # a code behind its own question.
+    ('U a PC without keys is offered the server keys-on file (UI)', 11, 'feature', 'bin',
+     MAIN,
+     '    return s.pwonly_server_file().map(|epoch| Hold::ServerKeysOn {',
+     '    return None::<u64>.map(|epoch| Hold::ServerKeysOn {',
+     [PWONLY_UI]),
+    ('U its button takes the file a PC without keys cannot judge (UI)', 11, 'feature', 'bin',
+     UI_SK,
+     '                pwonly = s.pwonly_server_file().is_some();',
+     '                pwonly = false;',
+     [PWONLY_UI]),
+    ('U the code gate there offers the trust without a code (UI)', 11, 'feature', 'bin',
+     UI_SK,
+     '            false if pwonly && kind == GateKind::G1 => match server_gate(None) {',
+     '            false if false && pwonly && kind == GateKind::G1 => match server_gate(None) {',
+     [PWONLY_UI]),
+    ('U the trust without a code asks S-NOCODE-SERVER first (UI)', 11, 'feature', 'bin',
+     UI_SK,
+     '            Some(Gated::NoCode) if ask(h, NOCODE_SERVER_ASK) => {',
+     '            Some(Gated::NoCode) if true => {',
+     [PWONLY_UI]),
     ('U a 0.8 key file in TOFU shows no code field (UI)', 11, 'feature', 'bin', UI_SK,
      '        if tofu && !legacy {\n            self.field(GATE_CODE',
      '        if tofu {\n            self.field(GATE_CODE',

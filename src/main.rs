@@ -170,6 +170,7 @@ const KEY_ADOPT: i32 = 156;
 const ADOPT_OWN_PASS: i32 = 168;
 /// [서버 사본을 이 PC 상태로 덮어쓰기…] (spec §7.5a).
 const KEY_OVERRIDE_HEAD: i32 = 169;
+const OVERRIDE_HEAD_LABEL: &str = "서버 사본을 이 PC 상태로 덮어쓰기…";
 /// [이 열쇠 파일이 맞습니다] (spec §5.10).
 const KEY_LOCAL_OK: i32 = 170;
 /// [끝나지 않은 열쇠 변경 버리기…] (spec §5.10).
@@ -410,6 +411,12 @@ enum Hold {
     LocalRollback(u64, u64),
     /// A server copy halts sync, with the head override (spec §7.5a).
     Halted,
+    /// A PC without security keys whose vault's server holds another PC's
+    /// key file with keys, at this epoch (keys on, then key-file sync):
+    /// S-PWONLY-SERVER with [서버의 새 열쇠 파일 받기…], and the head
+    /// override below it while a server copy halts sync.
+    #[cfg(feature = "security-key")]
+    ServerKeysOn { epoch: u64, halted: bool },
     /// Not a hold: a removal that never landed (S-REMOVE-UNDONE, its key
     /// numbers), with [다시 하기] before any other key change.
     #[cfg(feature = "security-key")]
@@ -430,6 +437,8 @@ impl KeysView {
             pending
         } else if s.local_rollback() {
             Hold::LocalRollback(old, new)
+        } else if let Some(server) = server_hold(s) {
+            server
         } else if s.halted_head().is_some() {
             Hold::Halted
         } else {
@@ -448,6 +457,20 @@ impl KeysView {
 fn gate_hold(s: &Session) -> Option<Hold> {
     #[cfg(feature = "security-key")]
     return s.gate_pending().then_some(Hold::GatePending);
+    #[cfg(not(feature = "security-key"))]
+    {
+        let _ = s;
+        None
+    }
+}
+/// The server's key file with keys that a PC without keys takes (see
+/// Hold::ServerKeysOn); never in the default build.
+fn server_hold(s: &Session) -> Option<Hold> {
+    #[cfg(feature = "security-key")]
+    return s.pwonly_server_file().map(|epoch| Hold::ServerKeysOn {
+        epoch,
+        halted: s.halted_head().is_some(),
+    });
     #[cfg(not(feature = "security-key"))]
     {
         let _ = s;
@@ -496,7 +519,13 @@ impl Hold {
             Hold::Halted => (
                 tr("서버 사본 때문에 동기화가 멈춰 있습니다. 그 사본을 올린 PC의 열쇠 파일을 받을 수 없을 때만 서버 사본을 덮어쓰세요.").to_owned(),
                 TONE_DANGER,
-                Some((KEY_OVERRIDE_HEAD, "서버 사본을 이 PC 상태로 덮어쓰기…")),
+                Some((KEY_OVERRIDE_HEAD, OVERRIDE_HEAD_LABEL)),
+            ),
+            #[cfg(feature = "security-key")]
+            Hold::ServerKeysOn { epoch, .. } => (
+                fill(keys_ui::SERVER_TAKE_HOLD, &[epoch]),
+                TONE_DANGER,
+                Some((keys_ui::KEY_SERVER_TAKE, keys_ui::SERVER_TAKE_BUTTON)),
             ),
             #[cfg(feature = "security-key")]
             Hold::Undone(list) => (
@@ -1947,27 +1976,52 @@ impl App {
                     }
                     None
                 }
+                // [서버의 새 열쇠 파일 받기…], whose Reauth reads the
+                // password (and OTP), and under it the head override while
+                // a server copy halts sync.
+                Some((id, label)) if id == keys_ui::KEY_SERVER_TAKE => {
+                    self.reauth_row(516);
+                    self.button(id, label, AX + AW - 400, 592, 400, 40, theme::PRIMARY);
+                    if matches!(view.hold, Hold::ServerKeysOn { halted: true, .. }) {
+                        self.button(
+                            KEY_OVERRIDE_HEAD,
+                            OVERRIDE_HEAD_LABEL,
+                            AX + AW - 400,
+                            640,
+                            400,
+                            36,
+                            theme::DANGER_GHOST,
+                        );
+                    }
+                    focus = self.handle(CURRENT_PASS);
+                    None
+                }
                 other => other,
             };
             if let Some((id, label)) = action {
                 // The button's flow checks the password (and OTP) again.
-                let otp = self
-                    .session
-                    .as_ref()
-                    .filter(|s| s.uses_otp())
-                    .map(|s| s.tag());
-                let w = if otp.is_some() { AW - 196 } else { AW };
-                self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 516, w);
-                if let Some(tag) = otp {
-                    let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-                    self.field(OTP, &caption, "", AX + AW - 180, 516, 180, true);
-                }
+                self.reauth_row(516);
                 self.button(id, label, AX + AW - 400, 592, 400, 40, theme::DANGER_GHOST);
                 focus = self.handle(CURRENT_PASS);
             }
         }
         unsafe {
             SetFocus(focus);
+        }
+    }
+    /// The Keys screen's current password (and new OTP code) at `y`, which
+    /// a hold's button reads for its re-authentication.
+    fn reauth_row(&mut self, y: i32) {
+        let otp = self
+            .session
+            .as_ref()
+            .filter(|s| s.uses_otp())
+            .map(|s| s.tag());
+        let w = if otp.is_some() { AW - 196 } else { AW };
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, y, w);
+        if let Some(tag) = otp {
+            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
+            self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
         }
     }
     /// Where the edit screen goes back to (the security-key build's goes
@@ -2116,7 +2170,7 @@ impl App {
         let revealed = entry.is_some() && self.reveal_until.is_some();
         let paging = revealed
             && entry
-                .and_then(|e| self.pages(&e.secret).ok())
+                .and_then(|e| self.shown(e).ok())
                 .is_some_and(|p| p.len() > 1);
         unsafe {
             let reveal = if revealed {
@@ -3113,9 +3167,9 @@ impl App {
                     return Err("먼저 15초간 보기를 눌러주세요.");
                 }
                 let e = self.entry().ok_or("항목을 선택하세요.")?;
-                let pages = self.pages(&e.secret)?;
+                let pages = self.shown(e)?.len();
                 self.page = if id == NEXT {
-                    (self.page + 1).min(pages.len().saturating_sub(1))
+                    (self.page + 1).min(pages.saturating_sub(1))
                 } else {
                     self.page.saturating_sub(1)
                 };
@@ -3889,13 +3943,18 @@ impl App {
             let secret_rect = self.r(CARD_X + 16, 242, 430, 48);
             let wrap = DT_WORDBREAK | DT_NOPREFIX;
             if revealed {
-                match self.pages(&e.secret) {
-                    Ok(pages) => {
-                        let index = self.page.min(pages.len() - 1);
-                        theme::text(dc, &pages[index], &secret_rect, body, p.text, wrap);
-                        if pages.len() > 1 {
+                match self.shown(e) {
+                    Ok(shown) => {
+                        let index = self.page.min(shown.len() - 1);
+                        match &shown {
+                            Shown::Text(pages) => {
+                                theme::text(dc, &pages[index], &secret_rect, body, p.text, wrap);
+                            }
+                            Shown::Grid(pages) => self.draw_grid(dc, &e.secret, &pages[index]),
+                        }
+                        if shown.len() > 1 {
                             let r = self.r(612, 198, 200, 20);
-                            let n = fill("{} / {} 페이지", &[&(index + 1), &pages.len()]);
+                            let n = fill("{} / {} 페이지", &[&(index + 1), &shown.len()]);
                             theme::text(dc, &n, &r, small, p.muted, DT_RIGHT | LINE);
                         }
                     }
@@ -3949,6 +4008,70 @@ impl App {
             result
         }
     }
+    /// What the 15-second view shows of `e`: a mnemonic (the built-in kind
+    /// "니모닉") as its numbered grid, else, or when its grid fits at no
+    /// face, the running text in pages.
+    fn shown(&self, e: &Entry) -> crypto::Result<Shown> {
+        if e.kind.as_str() == KIND_PRESETS[1]
+            && let Some(pages) = self.grid(&e.secret)?
+        {
+            return Ok(Shown::Grid(pages));
+        }
+        self.pages(&e.secret).map(Shown::Text)
+    }
+    /// `secret`'s grid pages (see mnemonic_grid), measured with the grid's
+    /// faces at this DPI.
+    fn grid(&self, secret: &str) -> crypto::Result<Option<Vec<GridPage>>> {
+        unsafe {
+            let dc = GetDC(self.hwnd);
+            if dc == 0 {
+                return Err("화면 글자 크기를 측정할 수 없습니다.");
+            }
+            let gaps = (self.px(GRID_GAP), self.px(GRID_NUM_GAP));
+            let result = mnemonic_grid(
+                secret,
+                self.px(GRID.2),
+                theme::GRID_FONTS,
+                gaps,
+                |font, text| {
+                    let face = theme::with(|t| t.grid_font(font)).unwrap_or(self.font);
+                    Ok(theme::text_width(dc, text, face))
+                },
+            );
+            ReleaseDC(self.hwnd, dc);
+            result
+        }
+    }
+    /// One page of a mnemonic's grid in the secret box: each word after its
+    /// number, the numbers muted and right-aligned in their column, the
+    /// rows centred in the box.
+    unsafe fn draw_grid(&self, dc: isize, secret: &str, page: &GridPage) {
+        let p = theme::palette();
+        let face = theme::with(|t| t.grid_font(page.font)).unwrap_or(self.font);
+        let (x, y, _, h) = GRID;
+        let top = y + (h - page.rows as i32 * GRID_ROW) / 2;
+        let (left, gap) = (self.px(x), self.px(GRID_NUM_GAP));
+        for c in &page.cells {
+            let row_top = self.px(top + c.row as i32 * GRID_ROW);
+            let bottom = row_top + self.px(GRID_ROW);
+            let number = Rect {
+                left: left + c.x,
+                top: row_top,
+                right: left + c.x + c.num_w,
+                bottom,
+            };
+            let word = Rect {
+                left: number.right + gap,
+                right: left + c.x + c.w,
+                ..number
+            };
+            let n = c.number.to_string();
+            unsafe {
+                theme::text(dc, &n, &number, face, p.muted, DT_RIGHT | LINE);
+                theme::text(dc, &secret[c.word.clone()], &word, face, p.text, LINE);
+            }
+        }
+    }
 }
 impl Drop for App {
     fn drop(&mut self) {
@@ -3997,6 +4120,147 @@ fn secret_pages(
         pages.push(page);
     }
     Ok(pages)
+}
+
+/// What the 15-second view shows: running text in pages, or a mnemonic's
+/// numbered grid in pages.
+enum Shown {
+    Text(Vec<Zeroizing<String>>),
+    Grid(Vec<GridPage>),
+}
+impl Shown {
+    fn len(&self) -> usize {
+        match self {
+            Shown::Text(pages) => pages.len(),
+            Shown::Grid(pages) => pages.len(),
+        }
+    }
+}
+/// A mnemonic's numbered grid: 8 words a row, 3 rows a page.
+const GRID_COLS: usize = 8;
+const GRID_ROWS: usize = 3;
+/// The grid's place in the secret box (96-DPI units), the height of one
+/// row, the space between two columns and between a number and its word.
+const GRID: (i32, i32, i32, i32) = (CARD_X + 8, 224, CARD_W - 16, 84);
+const GRID_ROW: i32 = 26;
+const GRID_GAP: i32 = 6;
+const GRID_NUM_GAP: i32 = 3;
+/// The page, row and column of word `i` (from 0) of a mnemonic's grid; its
+/// number is `i + 1`.
+fn grid_place(i: usize) -> (usize, usize, usize) {
+    let per_page = GRID_COLS * GRID_ROWS;
+    (i / per_page, i % per_page / GRID_COLS, i % GRID_COLS)
+}
+/// A word on a page of the grid: its number, row and column; its column's
+/// left edge and width and the width of its number column (device px from
+/// the grid's left); where the word is in the secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GridCell {
+    number: usize,
+    row: usize,
+    col: usize,
+    x: i32,
+    w: i32,
+    num_w: i32,
+    word: std::ops::Range<usize>,
+}
+/// A page of the grid: the face its words fit at (see Theme::grid_font)
+/// and how many rows it has.
+#[derive(Debug)]
+struct GridPage {
+    font: usize,
+    rows: usize,
+    cells: Vec<GridCell>,
+}
+/// Lays `secret`'s words (its whitespace-separated tokens; the secret is
+/// not changed or copied) out on grid pages `width` device px wide. Each
+/// page takes the first of `fonts` faces at which every column holds its
+/// widest number and widest word side by side (`gaps`: between columns,
+/// and between a number and its word): columns of one width when the
+/// widest fits so, else a long word widens its own column and narrows none
+/// below its own content; the spare width is shared out, and no two
+/// columns overlap. None when there is no word, or when a page
+/// fits at no face: the caller then shows the running text, in pages.
+/// `measure(font, text)` is the width of `text` in face `font`.
+fn mnemonic_grid(
+    secret: &str,
+    width: i32,
+    fonts: usize,
+    gaps: (i32, i32),
+    mut measure: impl FnMut(usize, &str) -> crypto::Result<i32>,
+) -> crypto::Result<Option<Vec<GridPage>>> {
+    let (gap, num_gap) = gaps;
+    let base = secret.as_ptr() as usize;
+    let words: Vec<std::ops::Range<usize>> = secret
+        .split_whitespace()
+        .map(|w| {
+            let start = w.as_ptr() as usize - base;
+            start..start + w.len()
+        })
+        .collect();
+    let mut pages: Vec<GridPage> = Vec::new();
+    for (i, word) in words.into_iter().enumerate() {
+        let (page, row, col) = grid_place(i);
+        if pages.len() == page {
+            pages.push(GridPage {
+                font: 0,
+                rows: 0,
+                cells: Vec::new(),
+            });
+        }
+        let p = &mut pages[page];
+        p.rows = p.rows.max(row + 1);
+        p.cells.push(GridCell {
+            number: i + 1,
+            row,
+            col,
+            x: 0,
+            w: 0,
+            num_w: 0,
+            word,
+        });
+    }
+    if pages.is_empty() {
+        return Ok(None);
+    }
+    for page in &mut pages {
+        let cols = page.cells.len().min(GRID_COLS);
+        let mut fitted = None;
+        for font in 0..fonts {
+            let (mut num_w, mut word_w) = (vec![0; cols], vec![0; cols]);
+            for c in &page.cells {
+                num_w[c.col] = num_w[c.col].max(measure(font, &c.number.to_string())?);
+                word_w[c.col] = word_w[c.col].max(measure(font, &secret[c.word.clone()])?);
+            }
+            let mut need: Vec<i32> = (0..cols).map(|c| num_w[c] + num_gap + word_w[c]).collect();
+            let gaps = gap * (cols as i32 - 1);
+            // Columns of one width when the widest fits so; else each as
+            // wide as its own content.
+            let widest = need.iter().copied().max().unwrap_or(0);
+            if widest * cols as i32 + gaps <= width {
+                need.fill(widest);
+            }
+            let total = need.iter().sum::<i32>() + gaps;
+            if total <= width {
+                fitted = Some((font, num_w, need, (width - total) / cols as i32));
+                break;
+            }
+        }
+        let Some((font, num_w, need, extra)) = fitted else {
+            return Ok(None);
+        };
+        let mut lefts = Vec::with_capacity(cols);
+        let mut x = 0;
+        for w in &need {
+            lefts.push(x);
+            x += w + extra + gap;
+        }
+        page.font = font;
+        for c in &mut page.cells {
+            (c.x, c.w, c.num_w) = (lefts[c.col], need[c.col] + extra, num_w[c.col]);
+        }
+    }
+    Ok(Some(pages))
 }
 
 // Native dialogs pump messages. No RefCell borrow may span these calls: timers,
@@ -6481,6 +6745,147 @@ mod tests {
             }
         }
     }
+    /// A mnemonic's numbered grid: words 1-8 on the first row, 9-16 on the
+    /// second, 17-24 on the third, then a new page; any count of words, the
+    /// whitespace-separated tokens of the secret, which stays as stored. A
+    /// column is as wide as its widest number and word, no two overlap, a
+    /// page steps down a face until it fits, and one that fits at no face
+    /// is shown as running text (None).
+    #[test]
+    fn a_mnemonic_is_a_numbered_grid_of_eight_words_a_row() {
+        // A face's width per character: 8 px at the largest, 4 at the last.
+        let per_char = [8, 7, 6, 5, 4];
+        let measure = |font: usize, text: &str| Ok(per_char[font] * text.chars().count() as i32);
+        let width = 440;
+        let words = |n: usize| -> String {
+            (1..=n)
+                .map(|i| ["abandon", "zoo", "category", "act"][i % 4])
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for (n, rows) in [
+            (1, vec![vec![1]]),
+            (5, vec![vec![1, 2, 3, 4, 5]]),
+            (12, vec![(1..=8).collect(), (9..=12).collect()]),
+            (
+                18,
+                vec![(1..=8).collect(), (9..=16).collect(), vec![17, 18]],
+            ),
+            (
+                24,
+                vec![(1..=8).collect(), (9..=16).collect(), (17..=24).collect()],
+            ),
+        ] {
+            let secret = words(n);
+            let pages = mnemonic_grid(&secret, width, 5, (8, 4), measure)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{n} words: no grid"));
+            assert_eq!(pages.len(), 1, "{n}");
+            let page = &pages[0];
+            assert_eq!(page.rows, rows.len(), "{n}");
+            for (r, numbers) in rows.iter().enumerate() {
+                let row: Vec<&GridCell> = page.cells.iter().filter(|c| c.row == r).collect();
+                assert_eq!(
+                    row.iter().map(|c| c.number).collect::<Vec<_>>(),
+                    *numbers,
+                    "{n} words, row {r}"
+                );
+                for (col, c) in row.iter().enumerate() {
+                    assert_eq!(c.col, col, "{n} words, number {}", c.number);
+                    assert_eq!(grid_place(c.number - 1), (0, r, col));
+                }
+            }
+            // Word i is the i-th token, the stored text unchanged.
+            let tokens: Vec<&str> = secret.split_whitespace().collect();
+            for c in &page.cells {
+                assert_eq!(&secret[c.word.clone()], tokens[c.number - 1]);
+            }
+            assert_eq!(secret, words(n));
+            grid_fits(page, &secret, width, per_char[page.font]);
+        }
+        // 24 words step down a face (8 columns of "8 category" do not fit
+        // 440 px at 8 px a character); 5 words fit at the largest.
+        let pages = mnemonic_grid(&words(24), width, 5, (8, 4), measure)
+            .unwrap()
+            .unwrap();
+        assert!(pages[0].font > 0);
+        let pages = mnemonic_grid(&words(5), width, 5, (8, 4), measure)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pages[0].font, 0);
+        // Tabs, line breaks and runs of spaces separate words too; 25 words
+        // and more go on to a second page, numbered on from 25.
+        let secret = format!("  {}\t\r\nlast  ", words(24));
+        let pages = mnemonic_grid(&secret, width, 5, (8, 4), measure)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].cells.len(), 24);
+        let c = &pages[1].cells[0];
+        assert_eq!((c.number, c.row, c.col, pages[1].rows), (25, 0, 0, 1));
+        assert_eq!(&secret[c.word.clone()], "last");
+        assert_eq!(grid_place(24), (1, 0, 0));
+        assert_eq!(grid_place(47), (1, 2, 7));
+        assert_eq!(grid_place(48), (2, 0, 0));
+        // A long word widens its own column, never into the next one.
+        let long = format!("{} supercalifragilistic", words(11));
+        let pages = mnemonic_grid(&long, width, 5, (8, 4), measure)
+            .unwrap()
+            .unwrap();
+        grid_fits(&pages[0], &long, width, per_char[pages[0].font]);
+        let wide = pages[0].cells.iter().find(|c| c.number == 12).unwrap();
+        let narrow = pages[0].cells.iter().find(|c| c.number == 5).unwrap();
+        assert!(wide.w > narrow.w);
+        // Short words: columns of one width, the whole width shared out.
+        let pages = mnemonic_grid(&["zoo"; 12].join(" "), width, 5, (8, 4), measure)
+            .unwrap()
+            .unwrap();
+        let w = pages[0].cells[0].w;
+        assert!(
+            pages[0]
+                .cells
+                .iter()
+                .all(|c| c.w == w && c.x == c.col as i32 * (w + 8))
+        );
+        assert!(8 * w + 7 * 8 <= width && 8 * (w + 1) + 7 * 8 > width - 8);
+        // A word too long for any face: the running text, in pages.
+        let too_long = format!("{} {}", words(3), "x".repeat(120));
+        assert!(
+            mnemonic_grid(&too_long, width, 5, (8, 4), measure)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            mnemonic_grid(" \t\r\n", width, 5, (8, 4), measure)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            mnemonic_grid("", width, 5, (8, 4), measure)
+                .unwrap()
+                .is_none()
+        );
+        // A measure that fails fails the layout.
+        assert!(mnemonic_grid("a b", width, 5, (8, 4), |_, _| Err("x")).is_err());
+    }
+    /// Every column of `page` holds its numbers and words at a face of
+    /// `per_char` px a character, inside `width`, apart from the next.
+    fn grid_fits(page: &GridPage, secret: &str, width: i32, per_char: i32) {
+        for c in &page.cells {
+            let word = per_char * secret[c.word.clone()].chars().count() as i32;
+            let number = per_char * c.number.to_string().len() as i32;
+            assert!(number <= c.num_w, "{c:?}");
+            assert!(c.num_w + 4 + word <= c.w, "{c:?}");
+            assert!(c.x >= 0 && c.x + c.w <= width, "{c:?}");
+            if let Some(next) = page
+                .cells
+                .iter()
+                .find(|n| n.row == c.row && n.col == c.col + 1)
+            {
+                assert!(c.x + c.w + 8 <= next.x, "{c:?} {next:?}");
+            }
+        }
+    }
     /// The login's note for a key file that is not there (spec §2.29):
     /// "next to the vault" only for the vault's own key name or a synced
     /// vault; a key kept elsewhere (an unplugged stick) is to be plugged in
@@ -6804,6 +7209,21 @@ mod tests {
                     app.build();
                     visit(&mut app, name);
                 }
+                // A PC without keys and the server's keys-on file, halted:
+                // [서버의 새 열쇠 파일 받기…] and the head override below it.
+                KEYS_VIEW.with(|v| {
+                    *v.borrow_mut() = Some(KeysView {
+                        code: Some("E65536 · DDDD-DDDD-DDDD-DDDD".to_owned()),
+                        hold: Hold::ServerKeysOn {
+                            epoch: (1 << 48) - 1,
+                            halted: true,
+                        },
+                        keys: None,
+                    })
+                });
+                app.screen = Screen::Keys;
+                app.build();
+                visit(&mut app, "keys-server-take");
                 // Key-file sync on, a gated change waiting and "열쇠 변경
                 // 자동 적용" on (spec §2.30): its toggle beside the state line.
                 keys_ui::KS_SHOWN.with(|k| {
@@ -6968,6 +7388,20 @@ mod tests {
                     code: Some("E5 · 7F2A-90C4-1B5E-D836".into()),
                     hold,
                     keys: Some(keys),
+                })
+            });
+        }
+        // A PC without keys, halted, the server holding another PC's
+        // keys-on file: [서버의 새 열쇠 파일 받기…].
+        if file.ends_with("25-keys-server-take") {
+            KEYS_VIEW.with(|v| {
+                *v.borrow_mut() = Some(KeysView {
+                    code: Some("E4 · 7F2A-90C4-1B5E-D836".into()),
+                    hold: Hold::ServerKeysOn {
+                        epoch: 5,
+                        halted: true,
+                    },
+                    keys: None,
                 })
             });
         }
@@ -7675,6 +8109,80 @@ mod tests {
             )
             .unwrap()
     }
+    /// The 15-second view of a mnemonic (the built-in kind "니모닉") paints
+    /// its words one by one after their numbers, 24 a page with [‹] [›] for
+    /// more; the same words under another kind stay running text; nothing
+    /// of either is put into a control, and the view ends after 15 s.
+    #[test]
+    fn a_revealed_mnemonic_paints_its_numbered_words() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let dir = test_dir("mnemonic-grid");
+        let mut session = synthetic_session(&dir, "synthetic grid password");
+        let words: Vec<String> = (1..=30).map(|i| format!("w{i:02}x")).collect();
+        let mnemonic = |n: usize| words[..n].join(" ");
+        for (kind, secret) in [
+            ("니모닉", mnemonic(24)),
+            ("비밀번호", mnemonic(24)),
+            ("니모닉", mnemonic(30)),
+        ] {
+            let entry = Entry::new("t".into(), kind.into(), secret, String::new()).unwrap();
+            session.put(None, entry).unwrap();
+        }
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.session = Some(session);
+            app.screen = Screen::Vault;
+            app.build();
+            let shown = |app: &mut App, i: usize| -> Vec<String> {
+                app.selected = Some(i);
+                app.page = 0;
+                app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+                app.sync_detail();
+                painted(app)
+            };
+            // 24 words: each word alone, after its number; one page.
+            let texts = shown(&mut app, 0);
+            for (i, w) in words[..24].iter().enumerate() {
+                assert!(texts.contains(w), "{w}");
+                assert!(texts.contains(&(i + 1).to_string()), "{i}");
+            }
+            assert!(!texts.iter().any(|t| t.contains("w01x w02x")));
+            assert_eq!(GetWindowLongPtrW(app.handle(NEXT), -16) & 0x1000_0000, 0);
+            // No control holds a word.
+            for c in &app.children {
+                assert!(!caption(*c).contains("w01x"), "{}", caption(*c));
+            }
+            // Another kind: the running text.
+            let texts = shown(&mut app, 1);
+            assert!(texts.iter().any(|t| t.starts_with("w01x w02x")));
+            assert!(!texts.contains(&"w01x".to_owned()));
+            // 30 words: 24 on the first page, 25-30 on the next, numbered on.
+            let texts = shown(&mut app, 2);
+            assert!(texts.contains(&"w24x".to_owned()) && !texts.contains(&"w25x".to_owned()));
+            assert!(texts.contains(&"1 / 2 페이지".to_owned()));
+            assert_ne!(GetWindowLongPtrW(app.handle(NEXT), -16) & 0x1000_0000, 0);
+            app.command(NEXT, 0).unwrap();
+            let texts = painted(&app);
+            assert!(texts.contains(&"w25x".to_owned()) && texts.contains(&"25".to_owned()));
+            assert!(texts.contains(&"w30x".to_owned()) && !texts.contains(&"w24x".to_owned()));
+            assert!(texts.contains(&"2 / 2 페이지".to_owned()));
+            app.command(NEXT, 0).unwrap();
+            assert_eq!(app.page, 1);
+            // The view ends after 15 s: no word painted.
+            app.reveal_until = Some(Instant::now() - Duration::from_secs(1));
+            app.timer();
+            assert!(app.reveal_until.is_none());
+            assert!(!painted(&app).iter().any(|t| t.starts_with('w')));
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     const SYNC_PASSWORD: &str = "synthetic sync password";
     fn sync_entry(title: &str, secret: &str) -> Entry {
         Entry::new(title.into(), "kind".into(), secret.into(), String::new()).unwrap()
@@ -7826,6 +8334,19 @@ mod tests {
             !text.contains("지원하지 않아") && !text.contains("USB"),
             "{text}"
         );
+        // On a PC without keys: the Keys screen's button, never [받기…],
+        // the next unlock or USB.
+        let (text, tone) = sync_line(&SyncNotice::KeyChangedServerPwOnly);
+        let text: &str = &text;
+        assert_eq!(tone, TONE_DANGER);
+        assert!(text.contains(keys_ui::SERVER_TAKE_BUTTON), "{text}");
+        assert!(
+            !text.contains("[받기…]")
+                && !text.contains("다음 잠금 해제")
+                && !text.contains("USB")
+                && !text.contains("지원하지 않아"),
+            "{text}"
+        );
     }
     /// Every sync notice, with values as long as they get.
     fn sync_notices() -> Vec<SyncNotice> {
@@ -7895,6 +8416,8 @@ mod tests {
             SyncNotice::KeyForkMerge { auto: false },
             #[cfg(feature = "security-key")]
             SyncNotice::KeyChangedServer,
+            #[cfg(feature = "security-key")]
+            SyncNotice::KeyChangedServerPwOnly,
         ]
     }
     fn base32_decode(s: &str) -> Vec<u8> {
@@ -8575,6 +9098,7 @@ mod tests {
                 Some(&code),
             )
             .unwrap();
+        const MNEMONIC_24: &str = "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual";
         for (title, kind, value, notes) in [
             (
                 "GitHub",
@@ -8588,7 +9112,7 @@ mod tests {
             (
                 pick("비트코인 지갑", "Bitcoin wallet"),
                 "니모닉",
-                "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual",
+                MNEMONIC_24,
                 pick(
                     "하드웨어 지갑 · 2024년 생성",
                     "Hardware wallet · created 2024",
@@ -8667,6 +9191,9 @@ mod tests {
                 ("4-vault", Screen::Vault),
                 ("5-vault-selected", Screen::Vault),
                 ("6-vault-revealed", Screen::Vault),
+                // The same mnemonic cut to 12 and 18 words (its grid).
+                ("6-vault-revealed-12", Screen::Vault),
+                ("6-vault-revealed-18", Screen::Vault),
                 ("7-edit", Screen::Edit),
                 ("8-new", Screen::Edit),
                 ("9-password", Screen::Password),
@@ -8689,6 +9216,7 @@ mod tests {
                 ("22-vault-tofu", Screen::Vault),
                 ("23-keys-ks-off", Screen::Keys),
                 ("24-keys-ks-on", Screen::Keys),
+                ("25-keys-server-take", Screen::Keys),
             ]);
             for (dark, (file, screen)) in [true, false]
                 .into_iter()
@@ -8735,7 +9263,7 @@ mod tests {
                     a.sync_badge = a.session.as_ref().map(|_| SyncBadge::Synced);
                     a.selected = if file.ends_with("5-vault-selected") {
                         Some(0)
-                    } else if file.ends_with("6-vault-revealed") {
+                    } else if file.contains("6-vault-revealed") {
                         Some(1)
                     } else {
                         None
@@ -8776,11 +9304,28 @@ mod tests {
                         let s = a.session.as_ref().unwrap();
                         s.otp_setup("synthetic preview password").unwrap()
                     });
-                    if file.ends_with("6-vault-revealed") {
+                    // The mnemonic has 24 words but in its 12 and 18 shots.
+                    if let Some(s) = a.session.as_mut() {
+                        let n = match file.rsplit_once("revealed-") {
+                            Some((_, n)) => n.parse().unwrap(),
+                            None => 24,
+                        };
+                        let e = &s.entries[1];
+                        let words: Vec<&str> = MNEMONIC_24.split(' ').take(n).collect();
+                        let entry = Entry::new(
+                            e.title.to_string(),
+                            e.kind.to_string(),
+                            words.join(" "),
+                            e.notes.to_string(),
+                        )
+                        .unwrap();
+                        s.put(Some(1), entry).unwrap();
+                    }
+                    if file.contains("6-vault-revealed") {
                         a.reveal_until = Some(Instant::now() + Duration::from_secs(15));
                     }
                     a.build();
-                    if file.ends_with("6-vault-revealed") {
+                    if file.contains("6-vault-revealed") {
                         a.copy_until = Some(Instant::now() + Duration::from_secs(30));
                         a.set_toggle(true);
                     }
@@ -9945,6 +10490,7 @@ mod tests {
                     GATE_SUPERSEDE,
                     KEY_ROLLOUT_DONE,
                     KEY_AUTO,
+                    KEY_SERVER_TAKE,
                 ],
                 _ => Vec::new(),
             }
@@ -15420,6 +15966,233 @@ mod tests {
             let up = vault::keyfile::parse(&std::fs::read(&kb).unwrap()).unwrap();
             assert_eq!(up.magic, vault::keyfile::Magic::Ks01);
             assert_eq!(up.epoch, on.epoch + 1);
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// A PC without security keys and the server's keys-on file: A and
+        /// B sync a vault made without keys; A turns keys on, then key-file
+        /// sync, and uploads. B's unlock halts with KeyChangedServerPwOnly,
+        /// which names [서버의 새 열쇠 파일 받기…]; B's Keys screen offers it
+        /// (S-PWONLY-SERVER) with the password field, the USB adopt and the
+        /// head override still there, and no [받기…]. In S-GATE-CODE,
+        /// [코드 없이 이 서버를 믿고 받기…] asks S-NOCODE-SERVER, whose No
+        /// asks the code again; [나중에] writes nothing. Then the take: A's
+        /// code, or the trust without it; S-OTHERKEY-ONLY and one touch of
+        /// A's key; the preview; S-KEYSYNC-ON; S-BACKUP. B holds A's file
+        /// (GOYOKS01), its status says how it was taken, the offer is gone
+        /// and the halt lifts.
+        #[test]
+        fn a_pc_without_keys_takes_keys_on_from_the_server() {
+            for nocode in [false, true] {
+                pwonly_take(nocode);
+            }
+        }
+        fn pwonly_take(nocode: bool) {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b) = (test_dir("pwonly-take-a"), test_dir("pwonly-take-b"));
+            let pass = "synthetic pwonly take password";
+            let clock = Arc::new(AtomicU64::new(1_000_000));
+            let fake = Arc::new(Fake::new(Some(clock.clone())));
+            let devices: Vec<usize> = (0..2).map(|_| fake.plug(Device::with_pin())).collect();
+            let provision = Provision::new().unwrap();
+            let id = provision.vault_id();
+            let (anchor_a, anchor_b) = (dir_a.join("anchor"), dir_b.join("anchor"));
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
+            let mut a = provision.finish(&va, &ka, pass, None).unwrap();
+            a.put(None, sync_entry("one", "secret")).unwrap();
+            let mut server = Server::default();
+            server.helper(&va);
+            a.enable_sync().unwrap();
+            upload(&mut server, &mut a);
+            // B: copies of A's pair, its own helper with version 1.
+            let (vb, kb) = (dir_b.join("vault.goyo"), dir_b.join("vault.goyokey"));
+            std::fs::copy(&va, &vb).unwrap();
+            std::fs::copy(&ka, &kb).unwrap();
+            server.helper(&vb);
+            server.pass(&vb);
+            // B opens it once, syncing, before A's change: its record.
+            vault::set_anchor_dir(Some(anchor_b.clone()));
+            let prepared = vault::prepare(&vb, &kb).unwrap();
+            let now = goyo_vault::otp::now().unwrap();
+            let mut b = Session::login(prepared, pass, "", now, None).unwrap();
+            b.poll_sync();
+            drop(b);
+            vault::set_anchor_dir(Some(anchor_a.clone()));
+            // A: keys on with two keys, then key-file sync on.
+            let keys: Vec<_> = devices
+                .iter()
+                .zip(1u8..)
+                .map(|(d, n)| {
+                    fake.touch(Some(*d));
+                    register(&*fake, &id, n, 0, true, Vec::new()).unwrap()
+                })
+                .collect();
+            let r = a.reauth(pass, None, None).unwrap();
+            let on = vault::Change::KeysOn {
+                pin: true,
+                keys,
+                new_password: None,
+            };
+            assert_eq!(
+                a.rekey(r, Vec::new(), on, vault::Consent::default(), true),
+                Ok(vault::Rekeyed::Done)
+            );
+            key_view(&va, 0, &[]);
+            a.poll_sync();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::KeySyncOn,
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            let a_key = std::fs::read(&ka).unwrap();
+            let state_a = vault::keyfile::parse(&a_key).unwrap().state();
+            let code_a = a.key_code().unwrap();
+            // The server took A's key file; A's next copy goes up.
+            key_view(&va, 1, &a_key);
+            a.poll_sync();
+            a.put(None, sync_entry("from a", "secret")).unwrap();
+            upload(&mut server, &mut a);
+            assert_eq!(server.versions.len(), 2, "A's copy under its new key");
+            drop(a);
+            // B's helper brought that copy and the key view.
+            server.pass(&vb);
+            key_view(&vb, 1, &a_key);
+            let before = std::fs::read(&kb).unwrap();
+            let auth = Scripted::new(fake.clone());
+            let h = window(
+                &format!("GoyoCeremonyPwOnlyTake{nocode}"),
+                &vb,
+                &kb,
+                auth.clone(),
+                &clock,
+            );
+            let guard = Window(h);
+            vault::set_anchor_dir(Some(anchor_b.clone()));
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            // The unlock's notice names the Keys screen's button. B's key
+            // file is a 0.8 one, which no code confirms: S-TOFU-LEGACY,
+            // pointing to the same button, and its trust without a code.
+            let notice = keys_ui::N_KEY_CHANGED_SERVER_PWONLY;
+            assert!(status().contains(notice), "{}", status());
+            with_app(|a| {
+                assert!(a.tofu_banner());
+                let shown: Vec<String> = a.children.iter().map(|c| caption(*c)).collect();
+                assert!(shown.contains(&keys_ui::TOFU_LEGACY.to_owned()));
+                assert!(keys_ui::TOFU_LEGACY.contains(keys_ui::SERVER_TAKE_BUTTON));
+            });
+            let trusted = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&trusted, |text| text == keys_ui::TOFU_NOPC_TEXT);
+            press(h, keys_ui::TOFU_NOPC);
+            stop_answers();
+            assert_eq!(*trusted.borrow(), [keys_ui::TOFU_NOPC_TEXT]);
+            with_app(|a| {
+                let s = a.session.as_ref().unwrap();
+                assert!(s.halted_head().is_some() && !s.tofu(), "{}", *a.status);
+                assert_eq!(s.pwonly_server_file(), Some(state_a.epoch));
+                a.command(CHANGE, 0).unwrap();
+                assert!(a.screen == Screen::Keys);
+                let shown: Vec<String> = a.children.iter().map(|c| caption(*c)).collect();
+                let hold = fill(keys_ui::SERVER_TAKE_HOLD, &[&state_a.epoch]);
+                assert!(shown.contains(&hold), "{shown:?}");
+            });
+            assert_eq!(
+                controls_of(&[
+                    keys_ui::KEY_SERVER_TAKE,
+                    CURRENT_PASS,
+                    KEY_ADOPT,
+                    KEY_OVERRIDE_HEAD,
+                    keys_ui::KEY_ACCEPT,
+                    keys_ui::KEY_ON,
+                ]),
+                [true, true, true, true, false, false]
+            );
+            set(h, CURRENT_PASS, pass);
+            // S-NOCODE-SERVER's No asks the code again; [나중에] ends it.
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+            every_answer(&asked, |_| false);
+            let buttons = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = buttons.clone();
+            every_input(move |n, text, kind| {
+                assert!(matches!(kind, InputKind::Code(_)), "{text}");
+                record.borrow_mut().push(text.to_owned());
+                match n {
+                    0 => InputAnswer::Switch(keys_ui::GATE_NOCODE),
+                    _ => InputAnswer::Cancel(keys_ui::GATE_LATER),
+                }
+            });
+            let seen = fake.seen().len();
+            press(h, keys_ui::KEY_SERVER_TAKE);
+            stop_answers();
+            assert_eq!(*asked.borrow(), [keys_ui::NOCODE_SERVER_ASK]);
+            assert_eq!(buttons.borrow().len(), 2);
+            let gate = fill(keys_ui::GATE_CODE_TEXT, &[&state_a.epoch]);
+            assert!(buttons.borrow().iter().all(|t| *t == gate));
+            assert_eq!(fake.seen().len(), seen, "no touch");
+            assert_eq!(std::fs::read(&kb).unwrap(), before);
+            asked.borrow_mut().clear();
+            // The take: the code or the trust without it, then one touch of
+            // A's key, the preview, S-KEYSYNC-ON and S-BACKUP.
+            every_answer(&asked, |text| {
+                text == keys_ui::NOCODE_SERVER_ASK || text == keys_ui::KEYSYNC_ON_TEXT
+            });
+            let shown = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = shown.clone();
+            let code = code_a.clone();
+            every_input(move |_, text, kind| {
+                record.borrow_mut().push(text.to_owned());
+                match kind {
+                    InputKind::Code(_) if nocode => InputAnswer::Switch(keys_ui::GATE_NOCODE),
+                    InputKind::Code(_) => InputAnswer::Code(Zeroizing::new(code.clone())),
+                    InputKind::Preview { .. } => InputAnswer::Accept { checked: false },
+                    _ => panic!("unexpected input: {text}"),
+                }
+            });
+            auth.plan(&[Some(devices[1])]);
+            set(h, CURRENT_PASS, pass);
+            press(h, keys_ui::KEY_SERVER_TAKE);
+            stop_answers();
+            assert_eq!(fake.seen().len(), seen + 1, "one touch: {}", status());
+            let mut questions = vec![keys_ui::KEYSYNC_ON_TEXT, BACKUP_QUESTION];
+            if nocode {
+                questions.insert(0, keys_ui::NOCODE_SERVER_ASK);
+            }
+            assert_eq!(*asked.borrow(), questions, "{}", status());
+            {
+                let shown = shown.borrow();
+                assert_eq!(shown.len(), 3, "{shown:?}");
+                assert_eq!(shown[0], fill(keys_ui::GATE_CODE_TEXT, &[&state_a.epoch]));
+                assert!(shown[1].starts_with(keys_ui::OTHERKEY_ONLY.split('{').next().unwrap()));
+            }
+            let taken = vault::keyfile::parse(&std::fs::read(&kb).unwrap()).unwrap();
+            assert_eq!(taken.state(), state_a);
+            assert_eq!(taken.magic, vault::keyfile::Magic::Ks01);
+            assert_eq!(
+                status().starts_with(keys_ui::ADOPT_NOCODE),
+                nocode,
+                "{}",
+                status()
+            );
+            with_app(|a| {
+                let s = a.session.as_mut().unwrap();
+                assert_eq!(s.pwonly_server_file(), None);
+                assert!(s.keys_overview().is_some());
+                s.poll_sync();
+                assert!(s.halted_head().is_none());
+                a.show(Screen::Keys);
+                a.build();
+                assert_eq!(a.handle(keys_ui::KEY_SERVER_TAKE), 0);
+            });
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);
