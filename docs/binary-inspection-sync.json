@@ -1,6 +1,6 @@
 {
-  "sha256": "30f1628fff405ffe58cd63d13d86d136ec29c5c4f913137bd8dbc160cfd7768f",
-  "bytes": 844800,
+  "sha256": "06f7a1848c1ec209aea29bffdd9fc72d23205dab631e2d7d310d31e136478bdb",
+  "bytes": 1045504,
   "machine": "0x8664",
   "dll_characteristics": "0xc160",
   "dependent_load_flags": "0x800",
@@ -9,7 +9,6 @@
       "InvalidateRect",
       "DrawTextW",
       "GetWindowTextW",
-      "GetWindowTextLengthW",
       "SendMessageW",
       "SetFocus",
       "SetWindowLongPtrW",
@@ -20,6 +19,7 @@
       "IsIconic",
       "ShowWindow",
       "SetForegroundWindow",
+      "GetWindowTextLengthW",
       "CallWindowProcW",
       "RegisterClassW",
       "LoadCursorW",
@@ -65,7 +65,6 @@
       "GetDpiForSystem"
     ],
     "KERNEL32.dll": [
-      "GetACP",
       "IsValidCodePage",
       "GetCommandLineA",
       "WriteFile",
@@ -90,15 +89,16 @@
       "IsDebuggerPresent",
       "InitializeSListHead",
       "GetSystemTimeAsFileTime",
+      "GetOEMCP",
       "GetCPInfo",
       "SetEnvironmentVariableW",
       "GetFileType",
-      "GetOEMCP",
+      "GetACP",
       "GetStringTypeW",
-      "GetProcessHeap",
-      "HeapFree",
       "FlushFileBuffers",
       "CloseHandle",
+      "GetProcessHeap",
+      "HeapFree",
       "GetLastError",
       "WriteFileEx",
       "SleepEx",
@@ -138,12 +138,13 @@
       "CreateDirectoryW",
       "AssignProcessToJobObject",
       "GetExitCodeProcess",
+      "SetLastError",
+      "GetFullPathNameW",
       "CreateProcessW",
       "OpenMutexW",
       "AddVectoredExceptionHandler",
       "SetThreadStackGuarantee",
       "GetCurrentThread",
-      "SetLastError",
       "GetCurrentDirectoryW",
       "RtlCaptureContext",
       "RtlLookupFunctionEntry",
@@ -154,7 +155,7 @@
       "CreateMutexA",
       "ReleaseMutex",
       "RtlVirtualUnwind",
-      "FormatMessageW",
+      "MultiByteToWideChar",
       "WriteConsoleW",
       "FlsAlloc",
       "GetModuleHandleExW",
@@ -167,7 +168,6 @@
       "QueryPerformanceFrequency",
       "QueryPerformanceCounter",
       "GetModuleHandleA",
-      "GetFullPathNameW",
       "SetFileTime",
       "FindFirstFileExW",
       "GetFileInformationByHandleEx",
@@ -192,12 +192,12 @@
       "HeapSize",
       "SetFilePointerEx",
       "SetStdHandle",
-      "MultiByteToWideChar"
+      "FormatMessageW"
     ],
     "ADVAPI32.dll": [
-      "RegSetKeyValueW",
+      "RegGetValueW",
       "RegDeleteKeyValueW",
-      "RegGetValueW"
+      "RegSetKeyValueW"
     ],
     "GDI32.dll": [
       "DeleteObject",
@@ -207,14 +207,14 @@
       "CreateCompatibleBitmap",
       "SelectObject",
       "BitBlt",
-      "SetBkMode",
-      "SetBkColor",
       "CreatePen",
+      "GetTextExtentPoint32W",
       "GetStockObject",
       "RoundRect",
       "DeleteDC",
       "SetTextColor",
-      "GetTextExtentPoint32W"
+      "SetBkColor",
+      "SetBkMode"
     ],
     "ntdll.dll": [
       "NtReadFile",
@@ -231,7 +231,8 @@
     ],
     "COMDLG32.dll": [
       "GetSaveFileNameW",
-      "GetOpenFileNameW"
+      "GetOpenFileNameW",
+      "CommDlgExtendedError"
     ],
     "api-ms-win-core-synch-l1-2-0.dll": [
       "WakeByAddressSingle",
