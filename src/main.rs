@@ -283,6 +283,15 @@ struct App {
     /// Korean source of the status line, shown translated line by line.
     /// Wiped when replaced: a sync conflict line names an entry.
     status: Zeroizing<String>,
+    /// The process protection that stopped holding (THREADS_OPEN,
+    /// DLL_BESIDE): sticky until the app ends, shown in the header pill and
+    /// on any screen whose status line is empty (VC-4).
+    weakened: Option<&'static str>,
+    /// A notice that stays first on the status line, in the danger tone,
+    /// over every line that comes by itself (a poll, a lock), until the
+    /// next click: a key change taken from the server under auto-apply
+    /// (G-01), which no question showed before it was applied.
+    pinned: Option<Zeroizing<String>>,
     page: usize,
     closing: bool,
     auth_dirty: bool,
@@ -686,6 +695,8 @@ impl App {
             failed: 0,
             retry: Instant::now(),
             status: line("금고·열쇠 파일을 확인하고 비밀번호를 입력하세요."),
+            weakened: None,
+            pinned: None,
             page: 0,
             closing: false,
             auth_dirty: false,
@@ -1182,6 +1193,28 @@ impl App {
     fn status(&mut self, text: &str) {
         self.set_status(text, TONE_MUTED);
     }
+    /// A process protection stopped holding: said at once in the danger
+    /// tone, and kept for the header pill and later screens (`weakened`).
+    fn weaken(&mut self, why: &'static str) {
+        if self.weakened.is_none() {
+            self.weakened = Some(why);
+            self.status_tone = TONE_DANGER;
+            self.set_status(why, TONE_DANGER);
+            if self.hwnd != 0 {
+                unsafe {
+                    InvalidateRect(self.hwnd, null(), 0);
+                }
+            }
+        }
+    }
+    /// The header pill's words: the lock state, and first a weakened
+    /// process protection.
+    fn pill_text(&self, state: String) -> String {
+        match self.weakened {
+            Some(_) => fill("보호 약화 · {}", &[&state]),
+            None => state,
+        }
+    }
     /// Errors stay on the screen in the status line instead of a modal box.
     /// A save cut off by the replace gap also locks: the newest state is
     /// only in a temp file, which the next unlock takes back, and the
@@ -1213,8 +1246,21 @@ impl App {
         self.prompt.clear();
         self.prompt.push_str(text);
     }
+    /// `text` with the pinned notice first, unless it holds it already.
+    fn with_pinned(&self, text: &str) -> Zeroizing<String> {
+        match self.pinned.as_deref() {
+            Some(p) if text.is_empty() => Zeroizing::new(p.to_owned()),
+            Some(p) if !text.contains(p.as_str()) => joined(&[p.as_str(), text]),
+            _ => Zeroizing::new(text.to_owned()),
+        }
+    }
     fn set_status(&mut self, text: &str, tone: isize) {
         self.told = self.told.wrapping_add(1);
+        let (text, tone) = match self.pinned {
+            Some(_) => (self.with_pinned(text), TONE_DANGER),
+            None => (Zeroizing::new(text.to_owned()), tone),
+        };
+        let text = text.as_str();
         // Wipe the line it replaces, before the buffer may grow.
         self.status.zeroize();
         self.status.push_str(text);
@@ -1373,8 +1419,16 @@ impl App {
             Screen::Fetched => self.build_fetched(),
         }
         let small = self.font_of(|t| t.small());
+        let mut tone = std::mem::replace(&mut self.status_tone, TONE_MUTED);
+        if let Some(why) = self.weakened.filter(|_| self.status.is_empty()) {
+            self.status.push_str(why);
+            tone = TONE_DANGER;
+        }
+        if self.pinned.is_some() {
+            self.status = self.with_pinned(&self.status);
+            tone = TONE_DANGER;
+        }
         let status = tr_lines(&self.status);
-        let tone = std::mem::replace(&mut self.status_tone, TONE_MUTED);
         self.text(STATUS, &status, (40, 690, 796, 60), small, tone, 0);
         let dark = theme::is_dark();
         let (x, y, _, _) = THEME_SWITCH;
@@ -3440,8 +3494,12 @@ impl App {
         }
     }
     fn timer(&mut self) {
-        // Threads Windows started since the last tick (e.g. for a file dialog).
-        restrict_threads();
+        // Threads Windows started since the last tick (e.g. for a file
+        // dialog). One that stays open to other programs is said, and the
+        // flag stays (VC-4).
+        if !threads_restricted() {
+            self.weaken(THREADS_OPEN);
+        }
         let now = Instant::now();
         let ticking =
             self.reveal_until.is_some() || self.copy_until.is_some() || self.clipboard.is_some();
@@ -3738,6 +3796,7 @@ impl App {
                 }
                 None => tr("잠김").into(),
             };
+            let state = self.pill_text(state);
             let x = self.px(40) + theme::text_width(dc, brand, title) + self.px(14);
             let width = theme::text_width(dc, &state, small) + self.px(32);
             let pill = Rect {
@@ -3754,6 +3813,7 @@ impl App {
                 bottom: self.px(42),
             };
             let dot_color = match (open, badge) {
+                _ if self.weakened.is_some() => p.danger,
                 (None, _) => p.faint,
                 (Some(_), Some(SyncBadge::Warning)) => p.danger,
                 (Some(_), _) => p.unlocked,
@@ -5955,6 +6015,17 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         drain_pending(h);
         return 0;
     }
+    // A click, or Enter or Esc, on the main window, whichever route it
+    // takes below: the pinned notice has been seen (G-01).
+    if m == 0x111 && (w >> 16) == 0 {
+        APP.with(|cell| {
+            if let Ok(mut b) = cell.try_borrow_mut()
+                && let Some(a) = b.as_mut()
+            {
+                a.pinned = None;
+            }
+        });
+    }
     if m == 0x111
         && (w >> 16) == 0
         && matches!(
@@ -6292,6 +6363,24 @@ fn joined(lines: &[&str]) -> Zeroizing<String> {
         out.push_str(l);
     }
     out
+}
+/// The status line when a thread of this process stays open to other
+/// programs (restrict_threads failed on a timer tick).
+const THREADS_OPEN: &str = "프로세스 보호가 약해졌습니다. 다른 프로그램이 열 수 있는 스레드가 남아, 같은 PC의 악성 프로그램이 금고를 엿볼 수 있습니다. 금고를 잠그고 앱을 다시 시작하세요.";
+/// The status line when a DLL was loaded from the program's folder.
+const DLL_BESIDE: &str = "프로세스 보호가 약해졌습니다. 프로그램 폴더에 있던 DLL이 앱에 로드되었습니다. 그 폴더에는 고요 금고 파일만 두고 앱을 다시 시작하세요.";
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for a thread restrict_threads could not restrict.
+    static THREADS_STUCK: Cell<bool> = const { Cell::new(false) };
+}
+/// restrict_threads, or under test what the test says it found.
+fn threads_restricted() -> bool {
+    #[cfg(test)]
+    if THREADS_STUCK.with(Cell::get) {
+        return false;
+    }
+    restrict_threads()
 }
 /// tr() for each line of a status: an unlock line and the placement warning
 /// after it are separate entries, and the stored Korean source lets a
@@ -6832,6 +6921,11 @@ fn main() {
         APP.with(|a| {
             let mut app = App::new(h);
             app.start_screen();
+            // --self-check fails on it; a normal start says so and stays
+            // flagged (VC-4).
+            if !modules_beside_exe().is_empty() {
+                app.weaken(DLL_BESIDE);
+            }
             app.build();
             *a.borrow_mut() = Some(app);
         });
@@ -7092,6 +7186,31 @@ mod tests {
             Some(fill(KEY_MISSING_NOTE, &[&"vault.goyokey"]))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A thread restrict_threads cannot restrict is said at the next tick,
+    /// in the danger tone, and the flag stays after ticks that find every
+    /// thread restricted again; the header pill names it (VC-4).
+    #[test]
+    fn a_weakened_protection_is_said_and_stays() {
+        let _korean = KoreanAfter::hold();
+        let mut app = App::new(0);
+        app.timer();
+        assert_eq!(app.weakened, None);
+        assert_eq!(app.pill_text("잠김".into()), "잠김");
+        THREADS_STUCK.with(|s| s.set(true));
+        app.timer();
+        THREADS_STUCK.with(|s| s.set(false));
+        assert_eq!(app.weakened, Some(THREADS_OPEN));
+        assert_eq!(app.status.as_str(), THREADS_OPEN);
+        assert_eq!(app.status_tone, TONE_DANGER);
+        app.status("다른 안내");
+        app.timer();
+        assert_eq!(app.weakened, Some(THREADS_OPEN));
+        assert_eq!(app.pill_text("잠김".into()), "보호 약화 · 잠김");
+        // A later cause does not replace the first one.
+        app.weaken(DLL_BESIDE);
+        assert_eq!(app.weakened, Some(THREADS_OPEN));
+        assert_eq!(app.status.as_str(), "다른 안내");
     }
     #[test]
     fn first_run_starts_on_welcome() {
@@ -15434,7 +15553,7 @@ mod tests {
                             .find_map(|s| {
                                 let mut p = s.split(':');
                                 (p.next()? == n.to_string())
-                                    .then(|| p.next().unwrap()[..8].to_owned())
+                                    .then(|| p.next().unwrap()[..32].to_owned())
                             })
                             .unwrap()
                     };
@@ -16597,7 +16716,31 @@ mod tests {
             assert!(status().starts_with(notice.trim_end()), "{}", status());
             assert_ne!(std::fs::read(&kb).unwrap(), before);
             assert_eq!(parsed(&kb).state(), parsed(&ka).state());
+            // G-01: in the danger tone, and first over every line that
+            // comes by itself (a poll's, a lock's) until the next click.
+            with_app(|a| {
+                assert_eq!(
+                    unsafe { GetWindowLongPtrW(a.handle(STATUS), -21) },
+                    TONE_DANGER
+                );
+                a.status("synthetic poll line");
+                assert_eq!(
+                    unsafe { GetWindowLongPtrW(a.handle(STATUS), -21) },
+                    TONE_DANGER
+                );
+            });
+            assert!(
+                status().starts_with(notice.trim_end())
+                    && status().ends_with("synthetic poll line"),
+                "{}",
+                status()
+            );
             with_app(|a| a.lock("synthetic lock", true));
+            assert!(
+                status().starts_with(notice.trim_end()) && status().ends_with("synthetic lock"),
+                "{}",
+                status()
+            );
             // A adds key 4; B's next login takes it with the unlock's touch.
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let d4 = fake.plug(Device::with_pin());
@@ -16631,6 +16774,15 @@ mod tests {
             let notice = keys_ui::auto_applied(&added, "");
             assert!(status().contains(notice.trim_end()), "{}", status());
             assert_eq!(parsed(&kb).state(), parsed(&ka).state());
+            // Taken at the login too, it stays first over a line that
+            // comes by itself (G-01).
+            with_app(|a| a.status("synthetic poll line"));
+            assert!(
+                status().starts_with(notice.trim_end())
+                    && status().ends_with("synthetic poll line"),
+                "{}",
+                status()
+            );
             // Off asks nothing.
             with_app(|a| {
                 a.show(Screen::Keys);
@@ -16643,6 +16795,50 @@ mod tests {
                 assert!(!a.session.as_ref().unwrap().auto_apply());
                 assert_eq!(*a.status, keys_ui::AUTO_OFF_DONE);
             });
+            // On again for the last case.
+            every_answer(&asked, |_| true);
+            press(h, keys_ui::KEY_AUTO);
+            stop_answers();
+            asked.borrow_mut().clear();
+            with_app(|a| assert!(a.session.as_ref().unwrap().auto_apply()));
+            // A changes the password; B's login with the new one fails on
+            // B's own key file, and S-TRY-SERVER-KEY's yes takes A's file
+            // with no gate: that notice is pinned too (G-01).
+            with_app(|a| a.lock("synthetic lock", true));
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let newest = "synthetic auto-apply newest password";
+            change_password(&fake, devices[0], &mut a, PASS2, newest);
+            key_view(&vb, 4, &std::fs::read(&ka).unwrap());
+            every_input(|n, text, _| panic!("asked {n}: {text}"));
+            every_answer(&asked, |text| text == keys_ui::TRY_SERVER_KEY);
+            vault::set_anchor_dir(Some(dir_b.join("anchor")));
+            with_app(|a| {
+                if a.screen != Screen::Login {
+                    a.show(Screen::Login);
+                }
+                a.build();
+            });
+            auth.plan(&[Some(devices[1])]);
+            set(h, PASS, newest);
+            press(h, SUBMIT);
+            stop_answers();
+            assert_eq!(
+                *asked.borrow(),
+                [keys_ui::TRY_SERVER_KEY, BACKUP_QUESTION],
+                "{}",
+                status()
+            );
+            asked.borrow_mut().clear();
+            assert_eq!(parsed(&kb).state(), parsed(&ka).state());
+            with_app(|a| a.status("synthetic poll line"));
+            let lead = keys_ui::AUTO_APPLIED.split('{').next().unwrap();
+            assert!(
+                status().starts_with(lead)
+                    && status().contains(keys_ui::AUTO_PASSWORD)
+                    && status().ends_with("synthetic poll line"),
+                "{}",
+                status()
+            );
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);
             let _ = std::fs::remove_dir_all(&dir_b);

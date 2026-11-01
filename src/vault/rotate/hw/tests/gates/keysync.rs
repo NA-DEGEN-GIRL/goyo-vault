@@ -971,9 +971,7 @@ fn a_join_that_clears_a_gate_names_its_candidate() {
     )
     .unwrap();
     let merged = b.lines(&id).vault.unwrap().merged;
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&on.tag[..8]);
-    assert!(merged.contains(&(on.epoch, prefix)), "{merged:?}");
+    assert!(merged.contains(&(on.epoch, on.tag)), "{merged:?}");
     assert!(!sb.gate_waits());
     // Judged at S4 against the state just written: no fork, no hold.
     assert_eq!(sb.server_class(), Some(KeyClass::Stale));

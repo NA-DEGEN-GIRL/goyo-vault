@@ -42,7 +42,7 @@ use config::{Config, Problem};
 use engine::{Engine, Folder, Log, Outcome, Report, call, tag, utc};
 use goyo_vault::{
     syncfile::{self, STATUS, SyncState},
-    syncwire::{self, Request, Status},
+    syncwire::{self, Op, Request, Status},
 };
 use msg::{Msg, say, warn};
 use std::{
@@ -203,6 +203,7 @@ fn report_config(line: usize, problem: Problem, path: &Path) {
         Problem::Identity => Msg::BadIdentity,
         Problem::Interval => Msg::BadInterval,
         Problem::Timeout => Msg::BadTimeout,
+        Problem::Hash => Msg::HashInValue,
         Problem::Vault => Msg::BadVault,
         Problem::KeyFile => Msg::KeyFileVault,
         Problem::TooManyVaults => Msg::TooManyVaults,
@@ -531,7 +532,11 @@ fn fetch_into<T: Transport>(
             warn(Msg::FetchNotFound, &[]);
             ERROR
         }
-        Fetched::Server => {
+        Fetched::Server(Some(number)) => {
+            warn(Msg::ServerDamaged, &[&host, &number]);
+            ERROR
+        }
+        Fetched::Server(None) => {
             warn(Msg::StateServer, &[&host]);
             ERROR
         }
@@ -551,8 +556,9 @@ enum Fetched {
     /// No valid response.
     Failed(engine::CallError),
     NotFound,
-    /// A valid response with another status.
-    Server,
+    /// A valid response with another status; the stored version the
+    /// server named as damaged, if it did.
+    Server(Option<u64>),
     /// The new file could not be created or written (it may exist now).
     Write,
 }
@@ -574,7 +580,9 @@ fn fetch_file<T: Transport>(
     match reply.status {
         Status::Ok => {}
         Status::NotFound => return Fetched::NotFound,
-        _ => return Fetched::Server,
+        status => {
+            return Fetched::Server(engine::damaged_version(Op::Fetch, status, reply.version));
+        }
     }
     let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(path) else {
         return Fetched::Write;

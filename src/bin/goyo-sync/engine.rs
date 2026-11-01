@@ -258,6 +258,12 @@ fn call_with<T: Transport>(
                 "{label} {op} {} v={version} out={sent} in={received} ms={ms} exit={exit}{note} err={err}",
                 status_name(status)
             ));
+            if let Some(number) = damaged_version(request.op, status, version) {
+                log.line(&format!(
+                    "{label} {}",
+                    damaged_note(&request.vault_id, number)
+                ));
+            }
             Ok(Reply {
                 status,
                 version,
@@ -297,6 +303,23 @@ fn call_with<T: Transport>(
             Err(CallError::Failed(state, detail))
         }
     }
+}
+
+/// The stored version a vault op's SERVER_ERROR names as damaged: the
+/// server answers so, with the version's number, when something at a
+/// version name is no stored version (a link, a folder, a FIFO, a file under
+/// 96 bytes or over 8 MiB). Without the number the vault would stay stuck
+/// with no hint which file to repair.
+pub fn damaged_version(op: Op, status: Status, version: u64) -> Option<u64> {
+    (status == Status::ServerError && version >= 1 && matches!(op, Op::Get | Op::Put | Op::Fetch))
+        .then_some(version)
+}
+/// The log line for [`damaged_version`]: the number and the server path.
+pub fn damaged_note(id: &[u8; 16], number: u64) -> String {
+    format!(
+        "server version {number} of this vault is damaged: remove or repair data/{}/v/{number:012}.goyo on the server",
+        syncfile::hex(id)
+    )
 }
 
 /// An outgoing file that passed the upload gate.

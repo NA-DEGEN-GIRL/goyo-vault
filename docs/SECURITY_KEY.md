@@ -30,6 +30,7 @@ OTP와 달리 보안 키는 복호화에 직접 참여합니다. 그래서 열�
    cargo build --release --locked --bins --features security-key
    ```
 3. `target\release\goyo-vault.exe --self-check | Out-Host`가 `security-key: EXPERIMENTAL build`와 `salt self-test: PASS`를 보여 주는지 확인합니다. Windows의 WebAuthn을 쓸 수 있으면 `WebAuthn API <번호>`도 나옵니다.
+   Microsoft Defender가 방금 빌드한 서명 없는 실행 파일을 막거나 격리하면, README '직접 빌드하기'의 'Windows Defender·SmartScreen이 막을 때'대로 보호 기록에서 그것이 직접 빌드한 파일인지 확인한 뒤에만 복원·허용하세요.
 4. `target\release\goyo-vault.exe`와 `goyo-sync.exe`를 `GoyoVault` 폴더의 같은 이름 파일 위에 복사합니다. 두 파일은 **함께** 바꾸세요. 열쇠 파일 동기화는 보안 키 빌드의 goyo-sync만 합니다. 그러면 그 폴더의 `SHA256SUMS.txt`(기본 빌드의 해시 목록)는 이 두 파일과 더 이상 맞지 않습니다.
 
 기본 빌드로 되돌아가려면 먼저 보안 키 빌드에서 **보안 키 끄기**를 하세요. 기본 빌드는 보안 키로 잠긴 열쇠 파일을 열지 않습니다(아래 [기본 빌드가 보안 키 열쇠 파일을 만나면](#기본-빌드가-보안-키-열쇠-파일을-만나면)). 그다음 이 금고를 쓰는 **다른 PC마다, 아직 보안 키 빌드인 채로** 그 변경을 받으세요(끈 PC의 새 열쇠 파일을 USB로 옮겨 '새 열쇠 파일 받기', 열쇠 확인 코드 입력). 그 PC는 받은 뒤에만 기본 빌드로 바꾸세요. 받기 전의 PC는 이 금고를 보안 키 금고로 기억하고 있어서, 어느 빌드든 비밀번호만으로 여는 열쇠 파일을 거부합니다. 그때 남는 방법은 그 PC의 열쇠 기록(`goyo-vault.keys`)을 지우는 것뿐이고, 그러면 모든 금고의 기록이 사라집니다.

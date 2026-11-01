@@ -1256,8 +1256,17 @@ pub const EN: &[(&str, &str)] = &[
         "The server must be an ssh alias or host name (letters, digits, . _ -, optional user@, not starting with -).",
     ),
     (
-        "서버의 스크립트 경로는 영문·숫자·. _ / ~ + -만 쓸 수 있고 -로 시작할 수 없습니다.",
-        "The script path may use only letters, digits and . _ / ~ + -, and cannot start with -.",
+        "프로세스 보호가 약해졌습니다. 다른 프로그램이 열 수 있는 스레드가 남아, 같은 PC의 악성 프로그램이 금고를 엿볼 수 있습니다. 금고를 잠그고 앱을 다시 시작하세요.",
+        "Process protection has weakened: a thread is left open to other programs, so malware on this PC could look into the vault. Lock the vault and restart the app.",
+    ),
+    (
+        "프로세스 보호가 약해졌습니다. 프로그램 폴더에 있던 DLL이 앱에 로드되었습니다. 그 폴더에는 고요 금고 파일만 두고 앱을 다시 시작하세요.",
+        "Process protection has weakened: a DLL from the program's folder was loaded into the app. Keep only Goyo Vault's files in that folder and restart the app.",
+    ),
+    ("보호 약화 · {}", "Protection weakened · {}"),
+    (
+        "서버의 스크립트 경로는 영문·숫자·. _ / ~ + -만 쓸 수 있고, -로 시작하거나 . 또는 .. 경로 조각을 넣을 수 없습니다.",
+        "The script path may use only letters, digits and . _ / ~ + -, cannot start with -, and has no . or .. segment.",
     ),
     (
         "파이썬 명령은 영문·숫자·. _ / + -만 쓸 수 있고 -로 시작할 수 없습니다.",

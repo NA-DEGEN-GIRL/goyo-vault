@@ -488,11 +488,7 @@ impl Session {
         let superseded = self.anchor.lines.gate.as_ref().is_some_and(|g| {
             g.state == GateState::Superseded && (g.epoch, g.tag) == (state.epoch, state.tag)
         });
-        let merged = line.is_some_and(|l| {
-            l.merged
-                .iter()
-                .any(|(e, tag)| *e == state.epoch && tag[..] == state.tag[..8])
-        });
+        let merged = line.is_some_and(|l| l.merged_state(state));
         if t.epoch < own.epoch && (line.is_some_and(|l| l.state.had(state)) || superseded || merged)
         {
             return KeyClass::Stale;

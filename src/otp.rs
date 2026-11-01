@@ -41,12 +41,16 @@ pub fn verify(secret: &[u8], input: &str, time: u64, last: Option<u64>) -> Resul
     }
     let step = time / 30;
     let mut found = None;
+    // Every candidate is computed; the lowest one that matches is used, so
+    // a code valid for two steps of the window (a 10^-6 coincidence) moves
+    // the stored step only as far as it must and the next code still
+    // counts.
     for candidate in [step.saturating_sub(1), step, step.saturating_add(1)] {
         let expected = Zeroizing::new(format!("{:06}", code(secret, candidate, 6)));
         if bool::from(expected.as_bytes().ct_eq(input.as_bytes()))
             && last.is_none_or(|v| candidate > v)
         {
-            found = Some(candidate);
+            found.get_or_insert(candidate);
         }
     }
     found.ok_or(
@@ -95,5 +99,16 @@ mod tests {
         assert!(verify(s, " 87082", 59, None).is_err());
         assert!(verify(s, "287082", 159, None).is_err());
         assert_eq!(&*base32(b"foobar"), "MZXW6YTBOI");
+    }
+    /// Steps 910737 and 910738 of this secret give the same code: the
+    /// lower one is used, and the higher one still counts after it (VC-7).
+    #[test]
+    fn a_code_of_two_steps_uses_the_lower_one() {
+        let s = b"12345678901234567890";
+        assert_eq!(code(s, 910_737, 6), code(s, 910_738, 6));
+        let time = 910_738 * 30;
+        assert_eq!(verify(s, "911617", time, None).unwrap(), 910_737);
+        assert_eq!(verify(s, "911617", time, Some(910_737)).unwrap(), 910_738);
+        assert!(verify(s, "911617", time, Some(910_738)).is_err());
     }
 }

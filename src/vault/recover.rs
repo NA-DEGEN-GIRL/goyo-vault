@@ -78,7 +78,7 @@ pub(super) fn candidates(path: &Path, limit: usize) -> Vec<Candidate> {
 }
 /// Whether `file` is `<name>.<32 lowercase hex>.goyotmp`, the name
 /// atomic_write gives its temp files. Windows names ignore case.
-fn temp_of(file: &str, name: &str) -> bool {
+pub(super) fn temp_of(file: &str, name: &str) -> bool {
     let Some(rest) = file.get(name.len()..) else {
         return false;
     };

@@ -14,7 +14,8 @@ use crate::{
     engine::{self, CallError, Engine, Log, Outcome, call},
     fetch_file,
     transport::{
-        Failure, Killed, Output, SshLog, Transport, classify, first_line, run_bounded, ssh_options,
+        Failure, Killed, LOG_LOST, Output, SshLog, Transport, classify, first_line, log_dirs,
+        run_bounded, ssh_options,
     },
 };
 use goyo_vault::{
@@ -378,7 +379,7 @@ pub enum Unsafe {
 /// complete, and a cut-off copy must never become the installed script.
 pub fn install_command(remote: &str, python: &str) -> Result<String, Unsafe> {
     let name = remote.rsplit('/').next().unwrap_or(remote);
-    if !config::word(remote, 256, b"._/~+-")
+    if !config::remote(remote)
         || name.is_empty()
         || name == "."
         || name == ".."
@@ -498,15 +499,7 @@ impl Runner for SshRunner {
         // remote side's stderr, so a server cannot fake a host key or login
         // failure (see transport::SshLog).
         let log = match tool {
-            Tool::Ssh => {
-                let dirs: Vec<PathBuf> = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .into_iter()
-                    .chain([std::env::temp_dir()])
-                    .collect();
-                Some(SshLog::create(&dirs).ok_or(Failure::Start)?)
-            }
+            Tool::Ssh => Some(SshLog::create(&log_dirs()).ok_or(Failure::Start)?),
             Tool::Keygen => None,
         };
         let mut command = Command::new(&program);
@@ -522,7 +515,7 @@ impl Runner for SshRunner {
         })?;
         // The child has exited and its job is closed: nothing writes it now.
         if let Some(log) = &log {
-            out.log = log.read();
+            out.log = log.read().unwrap_or_else(|| LOG_LOST.into());
         }
         Ok(out)
     }
@@ -1008,7 +1001,7 @@ pub fn fetch(
     match fetch_file(&mut wire, log, id, 0, path) {
         Fetched::Saved { version, bytes } => Got::Saved { version, bytes },
         Fetched::NotFound => Got::NotFound,
-        Fetched::Server => Got::Failed(Trouble::of(SyncState::Server)),
+        Fetched::Server(_) => Got::Failed(Trouble::of(SyncState::Server)),
         Fetched::Write => Got::Write,
         Fetched::Failed(CallError::Cancelled) => Got::Cancelled,
         Fetched::Failed(CallError::Failed(state, detail)) => {
@@ -1719,6 +1712,8 @@ pub(crate) mod tests {
             "~",
             "a/..",
             "a/.",
+            "../../x.py",
+            "a/../x.py",
             "\"x\"",
             "x|y",
             "x>y",

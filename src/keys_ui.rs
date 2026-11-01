@@ -5197,6 +5197,10 @@ fn server_entry(
                     }
                     let danger = a.status_tone == TONE_DANGER;
                     a.status = at_login_status(&a.status, danger, &lines);
+                    // Applied with no question: it stays in sight (G-01).
+                    if trusted {
+                        a.pinned = Some(Zeroizing::new(accepted.clone()));
+                    }
                     a.build();
                     Ok(())
                 }
@@ -5868,6 +5872,11 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         };
         if !changed.is_empty() || notices.iter().any(|(_, tone)| *tone == TONE_DANGER) {
             a.status_tone = TONE_DANGER;
+        }
+        // Applied with no question or preview: it stays first on the
+        // status line, in the danger tone, until the next click (G-01).
+        if trusted {
+            a.pinned = Some(Zeroizing::new(applied.clone()));
         }
         a.build();
         Ok(true)

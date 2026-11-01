@@ -50,6 +50,9 @@ pub enum Problem {
     Identity,
     Interval,
     Timeout,
+    /// A `#` right after a value: it starts a comment, so the value (a
+    /// vault path such as `C:\x\v#1.goyo`) would be cut there silently.
+    Hash,
     Vault,
     /// A vault line naming a `*.goyokey` file.
     KeyFile,
@@ -97,7 +100,11 @@ pub fn read(path: &Path) -> Result<String, ConfigError> {
 }
 
 /// `name = value` lines; `#` starts a comment anywhere on a line, so no
-/// value can contain `#`. A UTF-8 byte order mark (Notepad) is ignored.
+/// value can contain `#`. A `#` right after a value, with no space before
+/// it, is refused ([`Problem::Hash`]): it is far likelier part of the
+/// value (a path) than a comment, and the value cut there could still be
+/// valid, naming another file. A UTF-8 byte order mark (Notepad) is
+/// ignored.
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut first: Option<(usize, Problem)> = None;
@@ -112,7 +119,11 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         vaults: Vec::new(),
     };
     for (n, raw) in text.split('\n').enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
+        let (code, comment) = match raw.split_once('#') {
+            Some((code, _)) => (code, true),
+            None => (raw, false),
+        };
+        let line = code.trim();
         if line.is_empty() {
             continue;
         }
@@ -120,7 +131,9 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             None => Err(Problem::NoEquals),
             Some((name, value)) => {
                 let (name, value) = (name.trim(), value.trim());
-                if name != "vault" && !seen.insert(name.to_owned()) {
+                if comment && !value.is_empty() && !code.ends_with(char::is_whitespace) {
+                    Err(Problem::Hash)
+                } else if name != "vault" && !seen.insert(name.to_owned()) {
                     Err(Problem::Duplicate)
                 } else {
                     apply(&mut config, name, value)
@@ -152,7 +165,7 @@ fn apply(config: &mut Config, name: &str, value: &str) -> Result<(), Problem> {
     match name {
         "host" if host(value) => config.host = value.into(),
         "host" => return Err(Problem::Host),
-        "remote" if word(value, 256, b"._/~+-") => config.remote = value.into(),
+        "remote" if remote(value) => config.remote = value.into(),
         "remote" => return Err(Problem::Remote),
         "python" if word(value, 64, b"._/+-") => config.python = value.into(),
         "python" => return Err(Problem::Python),
@@ -204,6 +217,12 @@ pub fn word(s: &str, max: usize, extra: &[u8]) -> bool {
         && !s.starts_with('-')
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
+}
+/// The server script's path: a [`word`] of `. _ / ~ + -`, relative to the
+/// remote home or absolute, with no `.` or `..` segment, so it names the
+/// script it says and never climbs out of a folder.
+pub fn remote(s: &str) -> bool {
+    word(s, 256, b"._/~+-") && s.split('/').all(|seg| seg != "." && seg != "..")
 }
 /// Plain decimal digits within `min..=max`.
 fn number(s: &str, min: u64, max: u64) -> Option<u64> {

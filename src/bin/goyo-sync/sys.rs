@@ -545,6 +545,9 @@ pub struct FileInfo {
     pub attributes: u32,
     pub links: u32,
     pub size: u64,
+    /// The volume serial number and the file index: which file this is,
+    /// whatever name it has now.
+    pub id: (u32, u64),
 }
 /// Opens `path` itself even if it is a symlink or junction
 /// (FILE_FLAG_OPEN_REPARSE_POINT), so a link is seen as a link and its
@@ -565,6 +568,10 @@ pub fn file_info(file: &File) -> io::Result<FileInfo> {
         attributes: info.attributes,
         links: info.links,
         size: (u64::from(info.size_high) << 32) | u64::from(info.size_low),
+        id: (
+            info.volume,
+            (u64::from(info.index_high) << 32) | u64::from(info.index_low),
+        ),
     })
 }
 

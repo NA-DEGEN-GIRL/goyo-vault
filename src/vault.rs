@@ -3375,13 +3375,15 @@ fn publish_temp(temp: &Path, target: &Path, replace: bool) -> Result<()> {
     publish(temp, target, replace)
 }
 
-/// Whether an interrupted save left `<path>.<random>.goyotmp` next to `path`.
-/// When the main file is missing, that temp file may be the only full copy.
+/// Whether an interrupted save left `<name>.<32 hex>.goyotmp` next to
+/// `path`, exactly the name atomic_write gives its temp files (so not the
+/// temp of a backup such as `vault.goyo.bak`, nor any other name that only
+/// starts and ends alike). When the main file is missing, that temp file may
+/// be the only full copy.
 pub fn leftover_temp(path: &Path) -> bool {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
         return false;
     };
-    let prefix = format!("{}.", name.to_string_lossy().to_lowercase());
     fs::read_dir(if dir.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -3389,8 +3391,9 @@ pub fn leftover_temp(path: &Path) -> bool {
     })
     .map(|entries| {
         entries.flatten().any(|e| {
-            let n = e.file_name().to_string_lossy().to_lowercase();
-            n.starts_with(&prefix) && n.ends_with(".goyotmp")
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| recover::temp_of(n, name))
         })
     })
     .unwrap_or(false)
@@ -3591,9 +3594,28 @@ mod workflow_tests {
         assert!(setup.uri().contains(&format!("Goyo%20Vault:{}?", s.tag())));
         assert!(setup.uri().len() <= crate::qr::CAPACITY);
         assert!(!leftover_temp(&v));
-        fs::write(t.file("vault.goyo.0123.goyotmp"), b"synthetic").unwrap();
+        // Only `<name>.<32 hex>.goyotmp` counts (VC-10): not the temp of a
+        // backup, not a short or upper-case suffix, not another extension.
+        let hex = format!("{:032x}", 0x0123_u128);
+        let near = [
+            "vault.goyo.0123.goyotmp".to_owned(),
+            format!("vault.goyo.bak.{hex}.goyotmp"),
+            "vault.goyo.bak.goyotmp".to_owned(),
+            format!(
+                "vault.goyo.{}.goyotmp",
+                hex.to_uppercase().replace('0', "A")
+            ),
+            format!("vault.goyo.{hex}.goyotmp.txt"),
+            format!("vault.goyo.{hex}0.goyotmp"),
+        ];
+        for name in &near {
+            fs::write(t.file(name), b"synthetic").unwrap();
+            assert!(!leftover_temp(&v), "{name}");
+            fs::remove_file(t.file(name)).unwrap();
+        }
+        fs::write(t.file(&format!("VAULT.GOYO.{hex}.goyotmp")), b"synthetic").unwrap();
         assert!(leftover_temp(&v) && !leftover_temp(&k));
-        fs::remove_file(t.file("vault.goyo.0123.goyotmp")).unwrap();
+        fs::remove_file(t.file(&format!("VAULT.GOYO.{hex}.goyotmp"))).unwrap();
         assert_eq!(
             s.otp_setup("wrong synthetic password").err(),
             Some(AUTH_ERROR)

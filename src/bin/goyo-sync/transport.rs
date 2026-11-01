@@ -23,12 +23,17 @@ pub const MAX_STDOUT: usize = MAX_RESPONSE;
 pub const MAX_STDERR: usize = 4 * 1024;
 const POLL: Duration = Duration::from_millis(50);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Each call's ssh log beside the exe (else in %TEMP%):
+/// Each call's ssh log in this account's %TEMP% (else beside the exe):
 /// `goyo-sync.ssh-<pid>-<nanos>-<n>.log` (hex), removed when the call ends.
 pub const SSH_LOG: [&str; 2] = ["goyo-sync.ssh-", ".log"];
 /// One left by a helper killed mid-call is removed at a later start once it
-/// is this old: no call outlives the 600 s timeout.
+/// is this old (no call outlives the 600 s timeout), or once it is
+/// [`STALE_EMPTY_LOG`] old while it is empty: ssh never wrote to it.
 pub const STALE_LOG: Duration = Duration::from_secs(3600);
+/// An empty log this old is debris: ssh holds its log exclusively while it
+/// runs, so only the moments before it opens it and after it exits are
+/// left, far shorter than this.
+pub const STALE_EMPTY_LOG: Duration = Duration::from_secs(60);
 /// The fixed ssh options, in order: no TTY, no forwarding, no escape
 /// character, never a password or host-key prompt, no local commands.
 const SSH_OPTIONS: [&str; 10] = [
@@ -232,13 +237,32 @@ pub fn ssh_options(config: &Config) -> Vec<OsString> {
     args
 }
 
+/// Where ssh logs are made, in order: this account's temp folder (per
+/// user, not shared, and made absolute: ssh runs in the OpenSSH folder, so
+/// a relative TMP would name another place), then the exe's folder.
+pub fn log_dirs() -> Vec<PathBuf> {
+    let temp = std::path::absolute(std::env::temp_dir())
+        .ok()
+        .filter(|p| p.is_absolute());
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    temp.into_iter().chain(exe).collect()
+}
+
 static LOGS: AtomicU64 = AtomicU64::new(0);
 /// The file one ssh run writes its own messages to (`-E`). ssh passes the
 /// remote side's stderr through to its own, so only this file tells a real
 /// host key, login or network failure from a server that prints the same
-/// words. It is made here, so nothing was at that name before; ssh appends
-/// to it; it is read without following links and removed on drop.
-pub struct SshLog(PathBuf);
+/// words. It is made here (`create_new`, so nothing was at that name
+/// before) and its identity (volume and file index) kept; ssh opens it
+/// exclusively and appends; it is read back only if the name still holds
+/// that very file, and removed on drop. Windows OpenSSH shares its log with
+/// nobody, so the helper cannot keep a handle open across the run.
+pub struct SshLog {
+    path: PathBuf,
+    id: (u32, u64),
+}
 impl SshLog {
     /// A new empty file in the first of `dirs` that takes one (a read-only
     /// exe folder does not), named uniquely without an RNG (process ID,
@@ -255,41 +279,52 @@ impl SshLog {
                 std::process::id()
             ));
             // Refused if anything has the name already, a link included.
-            OpenOptions::new()
+            let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&path)
                 .ok()?;
-            Some(Self(path))
+            let id = sys::file_info(&file).ok()?.id;
+            Some(Self { path, id })
         })
     }
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
-    /// What ssh wrote, at most [`MAX_STDERR`] bytes. A link, a directory or
-    /// a file with other names put there meanwhile is not read.
-    pub fn read(&self) -> Vec<u8> {
-        let Ok(file) = sys::open_no_follow(&self.0) else {
-            return Vec::new();
-        };
+    /// What ssh wrote, at most [`MAX_STDERR`] bytes; None when the name no
+    /// longer holds the file [`SshLog::create`] made, alone (removed,
+    /// replaced, a link, a directory, or a file with another name too), so
+    /// the caller can say the log was lost instead of reading nothing.
+    pub fn read(&self) -> Option<Vec<u8>> {
+        let file = sys::open_no_follow(&self.path).ok()?;
         // FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
-        if !sys::file_info(&file).is_ok_and(|i| i.attributes & 0x410 == 0 && i.links == 1) {
-            return Vec::new();
+        let info = sys::file_info(&file).ok()?;
+        if info.attributes & 0x410 != 0 || info.links != 1 || info.id != self.id {
+            return None;
         }
         let mut kept = Vec::new();
-        let _ = (&file).take(MAX_STDERR as u64).read_to_end(&mut kept);
-        kept
+        (&file)
+            .take(MAX_STDERR as u64)
+            .read_to_end(&mut kept)
+            .ok()?;
+        Some(kept)
     }
 }
 impl Drop for SshLog {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(&self.path);
     }
 }
+/// What stands for ssh's log when [`SshLog::read`] found it lost: it is
+/// the `ssh=` detail goyo-sync.log and the CLI show, so a failure that can
+/// no longer be told from a server error (a host-key or login failure
+/// among them) says why. It holds none of the words [`classify`] and
+/// [`key_ignored`] look for.
+pub const LOG_LOST: &str = "ssh's own log was removed or replaced during the call";
 /// Removes the ssh logs that helpers killed mid-call left in `dir`, judged
 /// from the listing alone: plain files with the log name, at least
-/// [`STALE_LOG`] old, so a call still running elsewhere keeps its own.
-/// Returns how many.
+/// [`STALE_LOG`] old, or [`STALE_EMPTY_LOG`] old and empty, so a call
+/// still running elsewhere keeps its own. Returns how many.
 pub fn sweep_logs(dir: &Path, now: SystemTime) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -302,9 +337,14 @@ pub fn sweep_logs(dir: &Path, now: SystemTime) -> usize {
             .to_str()
             .is_some_and(|n| n.starts_with(prefix) && n.ends_with(suffix));
         let stale = e.metadata().is_ok_and(|m| {
+            let wait = if m.len() == 0 {
+                STALE_EMPTY_LOG
+            } else {
+                STALE_LOG
+            };
             m.is_file()
                 && m.modified()
-                    .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age >= STALE_LOG))
+                    .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age >= wait))
         });
         if own && stale && fs::remove_file(e.path()).is_ok() {
             removed += 1;
@@ -317,21 +357,15 @@ pub fn sweep_logs(dir: &Path, now: SystemTime) -> usize {
 pub struct SshTransport {
     program: Option<PathBuf>,
     config: Config,
-    /// Where each call's ssh log is made: the exe's folder, beside
-    /// goyo-sync.log, if Windows said where the exe is, else or if that
-    /// folder takes no file, this account's temp folder.
+    /// Where each call's ssh log is made ([`log_dirs`]): this account's
+    /// temp folder, else the exe's folder.
     logs: Vec<PathBuf>,
     timeout: Duration,
     wait: Wait,
 }
 impl SshTransport {
     pub fn new(config: &Config, wait: Wait) -> Self {
-        let logs: Vec<PathBuf> = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .into_iter()
-            .chain([std::env::temp_dir()])
-            .collect();
+        let logs = log_dirs();
         for dir in &logs {
             sweep_logs(dir, SystemTime::now());
         }
@@ -368,7 +402,7 @@ impl Transport for SshTransport {
             wait(d)
         })?;
         // ssh has exited and its job is closed: nothing writes the file now.
-        out.log = log.read();
+        out.log = log.read().unwrap_or_else(|| LOG_LOST.into());
         Ok(out)
     }
     fn dedicated_key(&self) -> Option<PathBuf> {

@@ -38,7 +38,8 @@ use std::{
 /// The anchor's file name in its folder.
 const NAME: &str = "goyo-vault.keys";
 /// The first line of a version-4 file. Version 4 states key IDs, `pw_id`s,
-/// tags, credhashes and seed hashes in full where version 3 kept prefixes
+/// tags (`merged` too), credhashes (`pbad` too) and seed hashes in full
+/// where version 3 kept prefixes
 /// (review finding: a 4-byte key ID prefix is cheap to grind). A version-3
 /// file is read with this grammar: its lines with prefixes are unreadable
 /// and count as absent, as any malformed line, until a write of that vault
@@ -262,7 +263,7 @@ pub(super) struct State {
     pub tombs: Vec<Tomb>,
     pub slots: Vec<Slot>,
     pub hist: Vec<Hist>,
-    pub pbad: Vec<([u8; 4], [u8; 4])>,
+    pub pbad: Vec<([u8; 16], [u8; 16])>,
     /// The newest state this PC wrote for a change its user started, or
     /// confirmed (spec §5.10).
     pub gated: u64,
@@ -308,9 +309,9 @@ impl State {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct VaultLine {
     pub state: State,
-    /// Server files this PC merged into a write of its own (epoch and tag
-    /// prefix), newest first.
-    pub merged: Vec<(u64, [u8; 8])>,
+    /// Server files this PC merged into a write of its own (epoch and the
+    /// whole state tag), newest first.
+    pub merged: Vec<(u64, [u8; 16])>,
     /// The key ID of the last vault file this PC read as current or wrote.
     pub vkey: Option<[u8; 16]>,
 }
@@ -374,14 +375,20 @@ pub(super) struct PendingLine {
     /// line.
     pub base: Option<(u64, [u8; 16])>,
 }
+impl VaultLine {
+    /// Whether this PC merged the server file at `state` into a write of
+    /// its own: by its epoch and its whole state tag.
+    #[cfg(any(test, feature = "security-key"))]
+    pub fn merged_state(&self, state: KeyState) -> bool {
+        self.merged
+            .iter()
+            .any(|(epoch, tag)| *epoch == state.epoch && *tag == state.tag)
+    }
+}
 impl PendingLine {
     /// The confirmed line this entry becomes once it landed over `old`.
     pub fn promoted(&self, old: Option<&VaultLine>) -> VaultLine {
-        let mut merged: Vec<(u64, [u8; 8])> = self
-            .merged
-            .iter()
-            .map(|(epoch, tag)| (*epoch, prefix(tag)))
-            .collect();
+        let mut merged: Vec<(u64, [u8; 16])> = self.merged.iter().copied().collect();
         merged.extend(old.into_iter().flat_map(|o| o.merged.iter().copied()));
         merged.truncate(RECENT_MAX);
         VaultLine {
@@ -1044,7 +1051,7 @@ fn state(f: &mut Fields) -> Option<State> {
 }
 /// `pbad`, `gated` (a line without it reads as its epoch), `sup`, `ks` (a
 /// line without it reads as `-`) and `auto` (a line without it is off).
-type Tail = (Vec<([u8; 4], [u8; 4])>, u64, Vec<Sup>, Ks, bool);
+type Tail = (Vec<([u8; 16], [u8; 16])>, u64, Vec<Sup>, Ks, bool);
 fn tail(f: &mut Fields, epoch: u64) -> Option<Tail> {
     let pbad = list(f.get("pbad")?, SLOTS_MAX * (SLOTS_MAX - 1), |p| {
         let (owner, target) = p.split_once('>')?;
@@ -1332,6 +1339,7 @@ pub(super) fn kpath_of(path: &Path) -> Option<Vec<u16>> {
     let units: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
     (!units.is_empty() && units.len() <= KPATH_MAX).then_some(units)
 }
+#[cfg(feature = "security-key")]
 pub(super) fn prefix<const N: usize>(bytes: &[u8]) -> [u8; N] {
     let mut out = [0; N];
     out.copy_from_slice(&bytes[..N]);
@@ -1893,7 +1901,7 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             hist[0].kind = 8;
         }
         // A broken record stays broken while both its keys stay live.
-        let live = |c: &[u8; 4]| slots.iter().any(|s| s.credhash[..4] == c[..]);
+        let live = |c: &[u8; 16]| slots.iter().any(|s| s.credhash == *c);
         let pbad = old
             .map(|o| o.state.pbad.clone())
             .unwrap_or_default()
@@ -2273,7 +2281,7 @@ mod tests {
                     kind: 0,
                 },
             ],
-            pbad: vec![([11; 4], [12; 4])],
+            pbad: vec![([11; 16], [12; 16])],
             gated: 11,
             sup: vec![
                 Sup {
@@ -2364,7 +2372,7 @@ mod tests {
         for line in [
             VaultLine {
                 state: full_state(),
-                merged: vec![(10, [15; 8]), (9, [16; 8])],
+                merged: vec![(10, [15; 16]), (9, [16; 16])],
                 vkey: Some([17; 16]),
             },
             VaultLine {
@@ -2472,7 +2480,17 @@ mod tests {
         line.state.tombs[0].keyid = seq(0x50);
         line.state.slots[0].idhash = seq(0x60);
         line.state.slots[0].seedhash = seq(0x70);
+        line.state.pbad = vec![(seq(0x80), seq(0x90))];
+        line.merged = vec![(11, seq(0xa0))];
         let text = render_vault(&id, &line);
+        assert!(
+            text.contains(&format!(" merged=11:{} ", hex(&seq(0xa0)))),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(" pbad={}>{} ", hex(&seq(0x80)), hex(&seq(0x90)))),
+            "{text}"
+        );
         let h = line.state.hist[0];
         let entry = format!(
             " hist=12:{}:{}:{}:{}:4,",
@@ -2495,6 +2513,9 @@ mod tests {
             (seq(0x50), 4),
             (seq(0x60), 8),
             (seq(0x70), 4),
+            (seq(0x80), 4),
+            (seq(0x90), 4),
+            (seq(0xa0), 8),
         ] {
             let short = text.replace(&hex(&whole), &hex(&whole[..kept]));
             assert_ne!(short, text);
@@ -2552,6 +2573,17 @@ mod tests {
         };
         assert!(!foreign_key(&line, &older.keyid));
         assert!(foreign_key(&line, &near(older.keyid)));
+        // A server file this PC merged.
+        let line = VaultLine {
+            merged: vec![(12, newer.tag)],
+            ..line
+        };
+        assert!(line.merged_state(state(newer.tag)));
+        assert!(!line.merged_state(state(near(newer.tag))));
+        assert!(!line.merged_state(KeyState {
+            epoch: 11,
+            tag: newer.tag
+        }));
     }
 
     /// A file this version cannot fully read is never thrown away: every

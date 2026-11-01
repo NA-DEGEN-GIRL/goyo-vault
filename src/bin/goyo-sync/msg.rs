@@ -68,8 +68,8 @@ messages! {
         "this setting appears twice.";
     BadHost = "host는 ssh 별칭이나 호스트 이름이어야 합니다(영문·숫자·. _ -, user@ 허용, -로 시작 불가).",
         "host must be an ssh alias or host name (letters, digits, . _ -, optional user@, not starting with -).";
-    BadRemote = "remote는 서버의 스크립트 경로여야 합니다(영문·숫자·. _ / ~ + -, -로 시작 불가).",
-        "remote must be the script path on the server (letters, digits, . _ / ~ + -, not starting with -).";
+    BadRemote = "remote는 서버의 스크립트 경로여야 합니다(영문·숫자·. _ / ~ + -, -로 시작 불가, . 또는 .. 경로 조각 불가).",
+        "remote must be the script path on the server (letters, digits, . _ / ~ + -, not starting with -, no . or .. segment).";
     BadPython = "python은 서버의 파이썬 명령이어야 합니다(영문·숫자·. _ / + -, -로 시작 불가).",
         "python must be the Python command on the server (letters, digits, . _ / + -, not starting with -).";
     BadIdentity = "identity는 따옴표 없는, 있는 SSH 개인 키 파일의 절대 경로여야 합니다.",
@@ -78,6 +78,8 @@ messages! {
         "interval must be a number from 30 to 3600 (seconds).";
     BadTimeout = "timeout은 30~600(초) 사이의 숫자여야 합니다.",
         "timeout must be a number from 30 to 600 (seconds).";
+    HashInValue = "값 바로 뒤에 #가 있습니다. #는 주석을 시작하므로 값(예: 금고 경로)에 쓸 수 없고, 값이 그 자리에서 잘립니다. 경로에서 #를 빼거나, 주석이라면 앞에 공백을 두세요.",
+        "a # right after the value. # starts a comment, so no value (a vault path, say) can hold it, and the value would be cut there. Remove # from the path, or put a space before a comment.";
     BadVault = "vault는 따옴표 없는 금고 파일의 절대 경로여야 합니다.",
         "vault must be the absolute path of a vault file, without quotes.";
     KeyFileVault = "vault에 열쇠 파일(*.goyokey)을 적을 수 없습니다. 열쇠 파일은 동기화하지 않습니다.",
@@ -164,6 +166,8 @@ messages! {
         "{}: the Windows OpenSSH client (ssh.exe) is missing.";
     StateServer = "{}: 서버 또는 통신 오류입니다. goyo-sync.log를 확인하세요.",
         "{}: server or protocol error. See goyo-sync.log.";
+    ServerDamaged = "{}: 서버에 있는 이 금고의 버전 {}이(가) 손상되었습니다. 서버에서 그 파일을 지우거나 고치세요(goyo-sync.log에 경로가 있습니다).",
+        "{}: version {} of this vault on the server is damaged. Remove or repair that file on the server (goyo-sync.log names its path).";
     StateRefused = "{}: 올릴 파일이 검사나 서버에서 거부되었습니다. goyo-sync.log를 확인하세요.",
         "{}: the upload was refused by a check or by the server. See goyo-sync.log.";
     StateUpdate = "{}: 서버 사본이 더 새로운 형식입니다. 고요 금고를 업데이트하세요.",

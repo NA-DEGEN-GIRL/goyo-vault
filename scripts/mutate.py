@@ -199,6 +199,23 @@ AUTO_ANCHOR_T = ANCHOR_T + 'auto_round_trips_and_is_kept'
 AUTO_UI_T = CEREMONY_T + 'server_key_changes_apply_by_themselves_once_the_server_is_trusted'
 AUTO_BOUND_T = KS_T + 'auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write'
 
+
+# Stage 12, the external audit's follow-up (audit/REPORT.md: SY-2..SY-6,
+# VC-4, VC-7, VC-10, DY-2, DY-3, G-01, and the whole values of `pbad` and
+# `merged` in the anchor).
+TRANSPORT = 'src/bin/goyo-sync/transport.rs'
+CONFIG = 'src/bin/goyo-sync/config.rs'
+OTP = 'src/otp.rs'
+SSH_LOG_T = BIN_T + 'ssh_log_is_fresh_bounded_and_removed'
+CONFIG_T = BIN_T + 'config_accepts_the_example_and_rejects_the_rest'
+DAMAGED_T = BIN_T + 'a_damaged_server_version_is_named_in_the_log'
+FETCH_T = BIN_T + 'fetch_writes_only_a_new_file'
+LIST_T = 'syncwire::tests::list_lines'
+OTP_LOW_T = 'otp::tests::a_code_of_two_steps_uses_the_lower_one'
+LEFTOVER_T = WORKFLOW_T + 'lifecycle_backup_restore_password_and_failed_save'
+WEAKENED_T = BIN_T + 'a_weakened_protection_is_said_and_stays'
+PBAD_T = HW + 'a_broken_pair_record_is_named_by_whole_credhashes'
+
 ROWS = [
     # Auto-apply (trust the server) and the notice of a key change made
     # elsewhere under key-file sync (spec §2.30; stage 11).
@@ -1911,6 +1928,138 @@ ROWS = [
      '    let keyed = n == head.len() && head.starts_with(b"GOYOVA04");',
      '    let keyed = n == head.len();',
      [FORCED_LINE_T]),
+    # Stage 12: the external audit's follow-up. The server script is the
+    # same in both builds; its selftest catches each server row through
+    # server_selftest_passes.
+    ('SY-2 server: a file under 96 bytes is no version', 12, 'default', 'sync', SERVER,
+     '    return stat.S_ISREG(info.st_mode) and info.st_size >= MIN_BLOB\n',
+     '    return stat.S_ISREG(info.st_mode)\n',
+     [SELFTEST]),
+    ('SY-2 server: a next name no PUT can commit is named, not CONFLICT', 12, 'default', 'sync',
+     SERVER,
+     "                    if not held:\n                        raise damaged(expected + 1, 'a name held by a link, folder or short file')\n",
+     '',
+     [SELFTEST]),
+    ('SY-2 server: a damaged version carries its number', 12, 'default', 'sync', SERVER,
+     "        status, version, blob = e.status, e.version, b''\n",
+     "        status, version, blob = e.status, 0, b''\n",
+     [SELFTEST]),
+    ('SY-2 server: read_blob refuses a file under 96 bytes', 12, 'default', 'sync', SERVER,
+     "        if size < MIN_BLOB:\n            raise damaged(number, 'a file of %d bytes, under 96' % size)\n",
+     '',
+     [SELFTEST]),
+    # O_NONBLOCK itself is 0 on Windows, where these rows run; the check
+    # before the open is what a folder at a version name catches here.
+    ('SY-3 server: read_blob checks the entry before it opens it', 12, 'default', 'sync', SERVER,
+     "    before = os.lstat(path)\n    if not stat.S_ISREG(before.st_mode):\n        raise damaged(number, 'not a plain file')\n",
+     '    before = os.lstat(path)\n',
+     [SELFTEST]),
+    ('SY-6 server: LIST shows no all-zero vault ID', 12, 'default', 'sync', SERVER,
+     '                              if VAULT_NAME.fullmatch(e.name) and e.name != ZERO_VAULT\n',
+     '                              if VAULT_NAME.fullmatch(e.name)\n',
+     [SELFTEST]),
+    ('SY-6 helper: a LIST row with an all-zero vault ID is refused', 12, 'both', 'lib', SYNCWIRE,
+     '            id: parse_hex(f.next()?).filter(|id| *id != [0; 16])?,',
+     '            id: parse_hex(f.next()?)?,',
+     [LIST_T]),
+    ('SY-2 helper: a damaged server version is named', 12, 'default', 'sync', ENGINE,
+     '            if let Some(number) = damaged_version(request.op, status, version) {',
+     '            if let Some(number) = None::<u64> {',
+     [DAMAGED_T, FETCH_T]),
+    ('SY-4 helper: the ssh log is read only while it is the file made', 12, 'default', 'sync',
+     TRANSPORT,
+     '        if info.attributes & 0x410 != 0 || info.links != 1 || info.id != self.id {',
+     '        if info.attributes & 0x410 != 0 || info.links != 1 {',
+     [SSH_LOG_T]),
+    ('SY-4 helper: the ssh log goes to %TEMP% first', 12, 'default', 'sync', TRANSPORT,
+     '    temp.into_iter().chain(exe).collect()\n',
+     '    exe.into_iter().chain(temp).collect()\n',
+     [SSH_LOG_T]),
+    ('DY-3 helper: an empty ssh log is swept after a minute', 12, 'default', 'sync', TRANSPORT,
+     '            let wait = if m.len() == 0 {\n                STALE_EMPTY_LOG\n',
+     '            let wait = if m.len() == 0 {\n                STALE_LOG\n',
+     [SSH_LOG_T]),
+    ('DY-2 helper: a # right after a value is refused', 12, 'default', 'sync', CONFIG,
+     '                if comment && !value.is_empty() && !code.ends_with(char::is_whitespace) {',
+     '                if false {',
+     [CONFIG_T]),
+    ('DY-3 helper: remote has no . or .. segment', 12, 'default', 'sync', CONFIG,
+     '''    word(s, 256, b"._/~+-") && s.split('/').all(|seg| seg != "." && seg != "..")''',
+     '''    word(s, 256, b"._/~+-")''',
+     [CONFIG_T]),
+    ('VC-7 the lowest matching OTP step is used', 12, 'both', 'lib', OTP,
+     '            found.get_or_insert(candidate);',
+     '            found = Some(candidate);',
+     [OTP_LOW_T]),
+    ('VC-10 a leftover temp is exactly <name>.<32 hex>.goyotmp', 12, 'both', 'lib', VAULT,
+     '                .is_some_and(|n| recover::temp_of(n, name))',
+     '''                .is_some_and(|n| {
+                    let n = n.to_lowercase();
+                    n.starts_with(&format!("{}.", name.to_lowercase())) && n.ends_with(".goyotmp")
+                })''',
+     [LEFTOVER_T]),
+    ('VC-4 a thread left open is said at the next tick', 12, 'both', 'bin', MAIN,
+     '        if !threads_restricted() {\n            self.weaken(THREADS_OPEN);\n        }',
+     '        threads_restricted();',
+     [WEAKENED_T]),
+    ('VC-4 a weakened protection stays flagged', 12, 'both', 'bin', MAIN,
+     '        if !threads_restricted() {\n            self.weaken(THREADS_OPEN);\n        }',
+     '        if !threads_restricted() {\n            self.weaken(THREADS_OPEN);\n        } else {\n            self.weakened = None;\n        }',
+     [WEAKENED_T]),
+    ('G-01 a take under auto-apply pins its notice ([받기…])', 12, 'feature', 'bin', UI_SK,
+     '        if trusted {\n            a.pinned = Some(Zeroizing::new(applied.clone()));\n        }\n',
+     '',
+     [AUTO_UI_T]),
+    ('G-01 a take under auto-apply pins its notice (login)', 12, 'feature', 'bin', UI_SK,
+     '                    if trusted {\n                        a.pinned = Some(Zeroizing::new(accepted.clone()));\n                    }\n',
+     '',
+     [AUTO_UI_T]),
+    ('G-01 the pinned notice stays first over later lines', 12, 'feature', 'bin', MAIN,
+     '            Some(_) => (self.with_pinned(text), TONE_DANGER),',
+     '            Some(_) => (Zeroizing::new(text.to_owned()), TONE_DANGER),',
+     [AUTO_UI_T]),
+    ('G-01 the pinned notice keeps the danger tone', 12, 'feature', 'bin', MAIN,
+     '            Some(_) => (self.with_pinned(text), TONE_DANGER),',
+     '            Some(_) => (self.with_pinned(text), tone),',
+     [AUTO_UI_T]),
+    ('G-01 a click ends the pinned notice', 12, 'feature', 'bin', MAIN,
+     '                a.pinned = None;\n',
+     '',
+     [AUTO_UI_T]),
+    ('R pbad is read only with whole credhashes', 12, 'both', 'lib', ANCHOR,
+     '        Some((unhex(owner)?, unhex(target)?))',
+     '''        let wide = |s: &str| {
+            unhex(s).or_else(|| {
+                unhex::<4>(s).map(|p| {
+                    let mut w = [0; 16];
+                    w[..4].copy_from_slice(&p);
+                    w
+                })
+            })
+        };
+        Some((wide(owner)?, wide(target)?))''',
+     [ANCHOR_T + 'ids_round_trip_whole_and_a_version_3_line_is_unreadable']),
+    ('R merged is read only with whole tags', 12, 'both', 'lib', ANCHOR,
+     '                Some((epoch_num(epoch)?, unhex(tag)?))',
+     '''                Some((
+                    epoch_num(epoch)?,
+                    unhex(tag).or_else(|| {
+                        unhex::<8>(tag).map(|p| {
+                            let mut w = [0; 16];
+                            w[..8].copy_from_slice(&p);
+                            w
+                        })
+                    })?,
+                ))''',
+     [ANCHOR_T + 'ids_round_trip_whole_and_a_version_3_line_is_unreadable']),
+    ('R a merged server file by its whole tag', 12, 'both', 'lib', ANCHOR,
+     '            .any(|(epoch, tag)| *epoch == state.epoch && *tag == state.tag)',
+     '            .any(|(epoch, tag)| *epoch == state.epoch && tag[..8] == state.tag[..8])',
+     [ANCHOR_T + 'a_prefix_matches_no_state_no_removal_and_no_key']),
+    ('R pbad keeps an entry only while both whole keys are live', 12, 'feature', 'lib', ANCHOR,
+     '        let live = |c: &[u8; 16]| slots.iter().any(|s| s.credhash == *c);',
+     '        let live = |c: &[u8; 16]| slots.iter().any(|s| s.credhash[..4] == c[..4]);',
+     [PBAD_T]),
 ]
 
 FEATURE = ['--features', 'security-key']

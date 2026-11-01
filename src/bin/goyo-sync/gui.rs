@@ -2196,7 +2196,7 @@ fn bad_text(bad: &Bad, f: &Fields) -> String {
         (Why::TooLarge, _) => tr("설정이 8 KiB를 넘습니다. 금고 경로가 너무 깁니다.").to_owned(),
         (Why::Config(Problem::NoHost), _) => tr("서버(ssh 호스트)를 적으세요.").to_owned(),
         (Why::Config(_), Field::Host) => tr("서버는 ssh 별칭이나 호스트 이름이어야 합니다(영문·숫자·. _ -, user@ 허용, -로 시작 불가).").to_owned(),
-        (Why::Config(_), Field::Remote) => tr("서버의 스크립트 경로는 영문·숫자·. _ / ~ + -만 쓸 수 있고 -로 시작할 수 없습니다.").to_owned(),
+        (Why::Config(_), Field::Remote) => tr("서버의 스크립트 경로는 영문·숫자·. _ / ~ + -만 쓸 수 있고, -로 시작하거나 . 또는 .. 경로 조각을 넣을 수 없습니다.").to_owned(),
         (Why::Config(_), Field::Python) => tr("파이썬 명령은 영문·숫자·. _ / + -만 쓸 수 있고 -로 시작할 수 없습니다.").to_owned(),
         (Why::Config(_), Field::Identity) => tr("전용 키 파일은 있는 SSH 개인 키 파일의 절대 경로여야 합니다(.goyo·.goyokey 불가).").to_owned(),
         (Why::Config(_), Field::Interval) => tr("간격은 30~3600초 사이의 숫자여야 합니다.").to_owned(),

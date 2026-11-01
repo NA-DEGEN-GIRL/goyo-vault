@@ -348,6 +348,7 @@ target/release/goyo-sync.exe --self-check
 ```
 
 - 설치에 쓰는 ZIP은 `python scripts/package_release.py`로 만듭니다. 커밋되지 않은 소스나 `RUSTFLAGS`가 있으면 멈추고, 실행 파일에서 빌드한 PC의 경로를 지우며(남아 있으면 멈춤), 두 실행 파일이 각각의 PE 보호 플래그·DLL 목록 검사(`scripts/inspect_pe.py --profile vault|sync`)와 DLL 심기 검사(`scripts/check_dll_planting.py`)를 통과하고 서버 스크립트의 selftest가 `PASS`여야 패키징합니다. ZIP에 들어가는 프로그램은 `goyo-vault.exe`, `goyo-sync.exe`, 서버 스크립트뿐입니다.
+- **Windows Defender·SmartScreen이 막을 때.** 방금 빌드한 서명 없는 실행 파일을 Microsoft Defender가 실행이나 복사를 막거나 격리할 수 있습니다(`파일에 바이러스 또는 기타 사용자 동의 없이 설치된 소프트웨어가 있기 때문에…` 같은 오류, 또는 파일이 사라짐). 서명이 없고 새로 만들어진 파일이라 평판이 없어서 생기는 일입니다. 'Windows 보안 → 바이러스 및 위협 방지 → 보호 기록'에서 그 항목이 **직접 빌드한 바로 그 파일**(`target\release\…` 또는 복사한 `GoyoVault\…`)인지 경로와 시간을 확인한 뒤, 맞을 때만 '복원'이나 '장치에서 허용'을 고르세요. 다른 파일이거나 확실하지 않으면 허용하지 말고 소스를 다시 받아 빌드하세요. 직접 판단해 빌드 폴더를 검사 제외로 둘 수도 있지만, 제외한 폴더의 다른 파일도 검사되지 않으므로 이 저장소 폴더처럼 범위를 좁게 정하세요. SmartScreen이나 '스마트 앱 컨트롤'이 실행을 막는 경우도 같은 원인입니다(위 '설치' 4단계).
 - 아이콘은 `scripts/make_icon.ps1`로 다시 만들 수 있습니다. `build.rs`가 `assets/goyo.ico`를 실행 파일에 넣습니다.
 - 화면 미리보기는 `cargo test ui_preview -- --ignored`로 만듭니다. 결과는 `test-output/ui-preview/`에 저장되며, 이때 미리보기 창이 잠깐 화면에 뜹니다. goyo-sync 설정 창은 `cargo test --bin goyo-sync sync_ui_preview -- --ignored`로 `test-output/sync-ui-preview/`에 만듭니다.
 

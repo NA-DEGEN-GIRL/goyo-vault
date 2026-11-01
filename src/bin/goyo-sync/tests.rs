@@ -10,8 +10,9 @@ use crate::{
         jittered,
     },
     transport::{
-        Failure, Killed, MAX_STDERR, MAX_STDOUT, Output, SSH_LOG, STALE_LOG, SshLog, Transport,
-        classify, first_line, run_bounded, ssh_args, ssh_program, sweep_logs,
+        Failure, Killed, LOG_LOST, MAX_STDERR, MAX_STDOUT, Output, SSH_LOG, STALE_EMPTY_LOG,
+        STALE_LOG, SshLog, Transport, classify, first_line, log_dirs, run_bounded, ssh_args,
+        ssh_program, sweep_logs,
     },
 };
 use goyo_vault::{
@@ -285,6 +286,15 @@ fn config_accepts_the_example_and_rejects_the_rest() {
     assert_eq!((c.interval, c.timeout), (30, 600));
     assert_eq!(c.vaults.len(), 2);
     assert!(parse_with("interval = 3600\ntimeout = 30").is_ok());
+    // A comment after a value needs a space before its #; a name like
+    // x..y.py is no .. segment.
+    assert!(
+        parse_with("interval = 60 # one minute\ntimeout = 30\t#x\n#vault = C:\\v#1.goyo").is_ok()
+    );
+    assert_eq!(
+        parse_with("remote = s/x..y.py").unwrap().remote,
+        "s/x..y.py"
+    );
     let eight: String = (0..8)
         .map(|i| format!("vault = D:\\v{i}\\vault.goyo\n"))
         .collect();
@@ -316,6 +326,14 @@ fn config_accepts_the_example_and_rejects_the_rest() {
         ("remote = $HOME/x.py", Problem::Remote),
         ("remote = x`id`", Problem::Remote),
         ("remote = \"x\"", Problem::Remote),
+        ("remote = ../../x.py", Problem::Remote),
+        ("remote = sync/../x.py", Problem::Remote),
+        ("remote = ./x.py", Problem::Remote),
+        ("remote = ~/x/..", Problem::Remote),
+        ("vault = C:\\x\\v#1.goyo", Problem::Hash),
+        ("vault = D:\\GoyoVault\\vault.goyo#main", Problem::Hash),
+        ("identity = C:\\keys\\goyo#sync", Problem::Hash),
+        ("host = my-server#2", Problem::Hash),
         ("python = python3;id", Problem::Python),
         ("python = -c", Problem::Python),
         ("python = py thon", Problem::Python),
@@ -507,11 +525,12 @@ fn ssh_argv_is_exact() {
     assert_eq!(t.program(), Some(ssh_program(&system).as_path()));
 }
 
-/// Each ssh call gets a log file of its own (`-E`), made new beside the exe
-/// (else in %TEMP%) and named without an RNG. What ssh appends is read back
-/// bounded, never through a link or another name of a file, and the file is
-/// removed after the call. Logs a killed helper left are swept once they are
-/// an hour old.
+/// Each ssh call gets a log file of its own (`-E`), made new in %TEMP%
+/// (absolute; else beside the exe) and named without an RNG. What ssh
+/// appends is read back bounded, only while the name still holds the very
+/// file made, alone; else the log counts as lost and says so. The file is
+/// removed after the call. Logs a killed helper left are swept: empty ones
+/// after a minute, others after an hour.
 #[test]
 fn ssh_log_is_fresh_bounded_and_removed() {
     let t = Temp::new("sshlog");
@@ -529,8 +548,20 @@ fn ssh_log_is_fresh_bounded_and_removed() {
         let hex = |p: &&str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_hexdigit());
         assert!(parts.iter().all(hex), "{name}");
         assert_eq!(fs::metadata(log.path()).unwrap().len(), 0);
-        assert!(log.read().is_empty());
+        assert_eq!(log.read(), Some(Vec::new()));
     }
+    // %TEMP% first, absolute; then the exe's folder.
+    let dirs = log_dirs();
+    assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+    assert_eq!(dirs[0], std::path::absolute(std::env::temp_dir()).unwrap());
+    assert_eq!(
+        dirs.get(1),
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .map(Path::to_path_buf)
+            .as_ref()
+    );
     // In the argv right after "-E", among ssh's options.
     let c = config::parse(include_str!("../../../goyo-sync.conf.example")).unwrap();
     let args = ssh_args(&c, a.path());
@@ -548,54 +579,80 @@ fn ssh_log_is_fresh_bounded_and_removed() {
         .unwrap()
         .write_all(text.as_bytes())
         .unwrap();
-    assert_eq!(a.read(), text.as_bytes()[..MAX_STDERR]);
+    assert_eq!(a.read().unwrap(), text.as_bytes()[..MAX_STDERR]);
     let path = a.path().to_path_buf();
     drop(a);
     assert!(!path.exists());
-    // Another name of some file, or a junction, put at the name is not read.
+    // The file replaced by another (here: removed, and a file that holds
+    // other words put at the name), a second name of some file, a junction
+    // or nothing at all: the log is lost, never read, and the lost log is
+    // what the exchange shows instead of ssh's words.
     let other = t.0.join("other.txt");
     fs::write(&other, b"Permission denied").unwrap();
     fs::remove_file(b.path()).unwrap();
+    fs::write(b.path(), b"Permission denied").unwrap();
+    assert_eq!(b.read(), None);
+    fs::remove_file(b.path()).unwrap();
     fs::hard_link(&other, b.path()).unwrap();
-    assert!(b.read().is_empty());
+    assert_eq!(b.read(), None);
+    fs::remove_file(b.path()).unwrap();
+    assert_eq!(b.read(), None);
     drop(b);
     assert_eq!(fs::read(&other).unwrap(), b"Permission denied");
+    let c = SshLog::create(&dir).unwrap();
+    fs::hard_link(c.path(), t.0.join("second.log")).unwrap();
+    assert_eq!(c.read(), None);
+    fs::remove_file(t.0.join("second.log")).unwrap();
+    assert_eq!(c.read(), Some(Vec::new()));
+    fs::remove_file(c.path()).unwrap();
+    junction(c.path(), &t.0);
+    assert_eq!(c.read(), None);
+    let path = c.path().to_path_buf();
+    drop(c);
+    fs::remove_dir(&path).unwrap();
+    let lost = Output {
+        stdout: Vec::new(),
+        stderr: b"Host key verification failed.".to_vec(),
+        log: LOG_LOST.into(),
+        code: Some(255),
+        killed: None,
+    };
+    assert_eq!(classify(&lost), SyncState::Server);
+    assert_eq!(first_line(&lost.log), LOG_LOST);
     // A folder that takes no file (here one that is not there) passes the
-    // log to the next: a read-only exe folder does not stop syncing.
+    // log to the next: a read-only folder does not stop syncing.
     let missing = t.0.join("missing");
     assert!(SshLog::create(std::slice::from_ref(&missing)).is_none());
     let next = SshLog::create(&[missing.clone(), t.0.clone()]).unwrap();
     assert_eq!(next.path().parent(), Some(t.0.as_path()));
     assert!(!missing.exists());
     drop(next);
-    let c = SshLog::create(&dir).unwrap();
-    fs::remove_file(c.path()).unwrap();
-    junction(c.path(), &t.0);
-    assert!(c.read().is_empty());
-    let path = c.path().to_path_buf();
-    drop(c);
-    fs::remove_dir(&path).unwrap();
-    // Swept: own names only, plain files only, an hour old only.
+    // Swept: own names only, plain files only; empty ones a minute old,
+    // others an hour old.
     let now = SystemTime::now();
-    let old = now - STALE_LOG;
-    let make = |name: &str, at: SystemTime| {
+    let make = |name: &str, at: SystemTime, data: &[u8]| {
         let p = t.0.join(name);
-        fs::File::create(&p).unwrap().set_modified(at).unwrap();
+        let mut f = fs::File::create(&p).unwrap();
+        f.write_all(data).unwrap();
+        f.set_modified(at).unwrap();
         p
     };
-    let stale = make("goyo-sync.ssh-1-2-3.log", old);
-    let fresh = make("goyo-sync.ssh-1-2-4.log", now);
+    let stale = make("goyo-sync.ssh-1-2-3.log", now - STALE_LOG, b"x");
+    let fresh = make("goyo-sync.ssh-1-2-4.log", now - STALE_EMPTY_LOG, b"x");
+    let empty = make("goyo-sync.ssh-1-2-7.log", now - STALE_EMPTY_LOG, b"");
+    let starting = make("goyo-sync.ssh-1-2-8.log", now, b"");
     let kept = [
-        make("goyo-sync.log", old),
-        make("goyo-sync.ssh-1-2-5.txt", old),
-        make("vault.goyo", old),
+        make("goyo-sync.log", now - STALE_LOG, b""),
+        make("goyo-sync.ssh-1-2-5.txt", now - STALE_LOG, b""),
+        make("vault.goyo", now - STALE_LOG, b""),
     ];
     fs::create_dir(t.0.join("goyo-sync.ssh-1-2-6.log")).unwrap();
-    assert_eq!(sweep_logs(&t.0, now), 1);
-    assert!(!stale.exists() && fresh.exists());
+    assert_eq!(sweep_logs(&t.0, now), 2);
+    assert!(!stale.exists() && !empty.exists() && fresh.exists() && starting.exists());
     assert!(kept.iter().all(|p| p.exists()) && other.exists());
-    assert_eq!(sweep_logs(&t.0, now + STALE_LOG), 1);
-    assert!(!fresh.exists() && t.0.join("goyo-sync.ssh-1-2-6.log").is_dir());
+    assert_eq!(sweep_logs(&t.0, now + STALE_LOG), 2);
+    assert!(!fresh.exists() && !starting.exists());
+    assert!(t.0.join("goyo-sync.ssh-1-2-6.log").is_dir());
 }
 
 // ---- 19: bounded child processes ----
@@ -1007,6 +1064,33 @@ fn conflict_with_another_head_ends_the_outgoing() {
         .push_back(reply(Status::Conflict, 4, &theirs));
     assert_eq!(e.pass(0, false), done(SyncState::Ok, 4, None, None));
     assert_eq!(syncfile::stamp(&pc.dir, INCOMING), before);
+}
+
+/// A damaged entry at a version name on the server (SY-2): its SERVER_ERROR
+/// carries the number, and the log names the file to repair; a
+/// SERVER_ERROR without one names nothing.
+#[test]
+fn a_damaged_server_version_is_named_in_the_log() {
+    let pc = Pc::with_folder();
+    let clock = TestClock::new();
+    let id = [0x3C; 16];
+    seed_incoming(&pc, id, 3, &blob(&id, 3));
+    let mut e = pc.engine(
+        Mock::with([
+            reply(Status::ServerError, 0, b""),
+            reply(Status::ServerError, 4, b""),
+        ]),
+        &clock,
+    );
+    assert_eq!(e.pass(0, false), done(SyncState::Server, 3, None, None));
+    assert!(!pc.log().contains("is damaged"));
+    clock.advance(30);
+    assert_eq!(e.pass(0, false), done(SyncState::Server, 3, None, None));
+    assert_eq!(e.transport.ops(), [(Op::Get, 3), (Op::Get, 3)]);
+    assert!(pc.log().contains(&format!(
+        "3C3C-3C3C server version 4 of this vault is damaged: remove or repair data/{}/v/000000000004.goyo on the server",
+        "3c".repeat(16)
+    )));
 }
 
 /// A server that keeps this PC's uploads out while it shows a head the app
@@ -2532,6 +2616,26 @@ fn fetch_writes_only_a_new_file() {
         ERROR
     );
     assert!(!new.exists());
+    // Something at a version name that is no stored version (SY-2): the
+    // server names it with its number, and so do --fetch and the log; the
+    // head is still served.
+    let slot = server.0.join("data").join(&hex).join("v");
+    fs::write(slot.join("000000000003.goyo"), b"short").unwrap();
+    assert_eq!(
+        fetch_file(&mut local, &log, id, 3, &new),
+        Fetched::Server(Some(3))
+    );
+    assert_eq!(
+        fetch_into(&mut local, &log, "my-server", id, 3, &new),
+        ERROR
+    );
+    assert!(!new.exists());
+    assert!(fs::read_to_string(t.0.join(LOG)).unwrap().contains(&format!(
+        "server version 3 of this vault is damaged: remove or repair data/{hex}/v/000000000003.goyo on the server"
+    )));
+    let again = t.0.join("again.goyo");
+    assert_eq!(fetch_into(&mut local, &log, "my-server", id, 0, &again), OK);
+    assert_eq!(fs::read(&again).unwrap(), v2);
     // A file that appeared in the meantime is never overwritten.
     assert_eq!(
         fetch_into(&mut local, &log, "my-server", id, 0, &first),

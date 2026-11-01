@@ -129,6 +129,7 @@ REPARSE_POINT = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
 # [0-9], not \d: \d also matches non-ASCII digits.
 VERSION_NAME = re.compile(r'[0-9]{12}\.goyo')
 VAULT_NAME = re.compile(r'[0-9a-f]{32}')
+ZERO_VAULT = '0' * 32
 TMP_NAME = re.compile(r'tmp-[0-9]+-[0-9]+-[0-9]+')
 RECORD_NAME = re.compile(r'([0-9]{20})-([0-9]{20})\.rec')
 # k/tombs: the credhashes (16 bytes each, at most TOMB_MAX) of the
@@ -142,11 +143,14 @@ SEQUENCE = itertools.count()
 
 
 class Refused(Exception):
-    """A request answered with an error status; the reason goes to stderr."""
+    """A request answered with an error status; the reason goes to stderr.
+    version is what the reply carries: 0, or for a damaged stored version
+    its number, so the helper can name the file to repair."""
 
-    def __init__(self, status, reason):
+    def __init__(self, status, reason, version=0):
         super().__init__(reason)
         self.status = status
+        self.version = version
 
 
 def plain_dir(info):
@@ -191,34 +195,69 @@ def version_path(versions_dir, number):
     return os.path.join(versions_dir, '%012d.goyo' % number)
 
 
+def is_version(info):
+    """An entry of v/ that counts as a stored version, by its lstat: a plain
+    file of at least MIN_BLOB bytes. A link, a folder, a FIFO or a shorter
+    file (truncated, a hand edit) is no version: it never becomes the head,
+    so it cannot stop GET, and read_blob and put name it as damaged."""
+    return stat.S_ISREG(info.st_mode) and info.st_size >= MIN_BLOB
+
+
 def list_versions(versions_dir):
-    """Version numbers of the plain files in v/, ascending ([] if v/ is missing)."""
+    """Version numbers of the versions in v/ (is_version), ascending ([] if
+    v/ is missing). A file over MAX_BLOB is listed: read_blob names it."""
+    found = []
     try:
         with os.scandir(versions_dir) as entries:
-            found = [int(e.name[:12]) for e in entries
-                     if VERSION_NAME.fullmatch(e.name) and e.is_file(follow_symlinks=False)]
+            for e in entries:
+                if not VERSION_NAME.fullmatch(e.name):
+                    continue
+                try:
+                    if is_version(e.stat(follow_symlinks=False)):
+                        found.append(int(e.name[:12]))
+                except FileNotFoundError:  # removed meanwhile
+                    continue
     except FileNotFoundError:
         return []
     return sorted(n for n in found if n > 0)
 
 
-def read_blob(path):
-    """One stored version. Links and anything over MAX_BLOB are refused, so a
-    planted file cannot make the reply unbounded."""
-    fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC)
+def damaged(number, what):
+    """SERVER_ERROR naming stored version number, so the helper can say
+    which file on the server to remove or repair."""
+    return Refused(SERVER_ERROR, 'version %012d on the server is %s: remove or repair it'
+                   % (number, what), number)
+
+
+def read_blob(path, number):
+    """Stored version number at path. Anything but a plain file of
+    MIN_BLOB..MAX_BLOB bytes is SERVER_ERROR carrying number (damaged), so a
+    planted file cannot make the reply unbounded. The entry is checked
+    before it is opened, and opened with O_NONBLOCK and without following a
+    link, so a FIFO or device put there never blocks this process; the open
+    file must be the entry that was checked."""
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise damaged(number, 'not a plain file')
+    fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BLOB:
-            raise Refused(SERVER_ERROR, 'stored version is not a plain file of at most 8 MiB')
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+            raise damaged(number, 'not a plain file')
+        if info.st_size > MAX_BLOB:
+            raise damaged(number, 'a file of %d bytes, over 8 MiB' % info.st_size)
         parts, size = [], 0
         while True:
             chunk = os.read(fd, 1 << 20)
             if not chunk:
-                return b''.join(parts)
+                break
             size += len(chunk)
             if size > MAX_BLOB:
-                raise Refused(SERVER_ERROR, 'stored version grew over 8 MiB')
+                raise damaged(number, 'a file that grew over 8 MiB')
             parts.append(chunk)
+        if size < MIN_BLOB:
+            raise damaged(number, 'a file of %d bytes, under 96' % size)
+        return b''.join(parts)
     finally:
         os.close(fd)
 
@@ -231,7 +270,7 @@ def read_head(versions_dir):
         if not found:
             return 0, b''
         try:
-            return found[-1], read_blob(version_path(versions_dir, found[-1]))
+            return found[-1], read_blob(version_path(versions_dir, found[-1]), found[-1])
         except FileNotFoundError:
             continue
     raise Refused(SERVER_ERROR, 'head version keeps disappearing')
@@ -247,7 +286,7 @@ def mismatch(versions_dir):
 def version_epoch(path):
     """The key-file epoch in a stored version's header: 0 for GOYOVA02, None
     for anything that is not a plain file starting like GOYOVA02/04."""
-    fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC)
+    fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
@@ -603,10 +642,13 @@ class Store:
         return vault, os.path.join(vault, 'v')
 
     def vault_names(self):
+        """The vault folders. An all-zero name is none: no request may name
+        that ID, so LIST never shows a row nobody could fetch."""
         try:
             with os.scandir(self.root) as entries:
                 return sorted(e.name for e in entries
-                              if VAULT_NAME.fullmatch(e.name) and e.is_dir(follow_symlinks=False))
+                              if VAULT_NAME.fullmatch(e.name) and e.name != ZERO_VAULT
+                              and e.is_dir(follow_symlinks=False))
         except FileNotFoundError:
             return []
 
@@ -676,10 +718,23 @@ class Store:
                     answer = behind()
                     if answer:
                         return answer
+                target = version_path(versions_dir, expected + 1)
                 try:
-                    self.link(tmp, version_path(versions_dir, expected + 1))
+                    self.link(tmp, target)
                 except FileExistsError:
-                    return mismatch(versions_dir)  # another PUT linked this version first
+                    # Another PUT linked this version first, or something
+                    # that is no version (a link, a folder, a FIFO, a short
+                    # file) holds its name: then no PUT can ever commit it,
+                    # so that is named, not answered as a CONFLICT the
+                    # helper would read as a server holding uploads back.
+                    # lstat: a link there is never followed.
+                    try:
+                        held = is_version(os.lstat(target))
+                    except FileNotFoundError:  # removed meanwhile: the head tells
+                        held = True
+                    if not held:
+                        raise damaged(expected + 1, 'a name held by a link, folder or short file')
+                    return mismatch(versions_dir)
         finally:
             remove(tmp)
         fsync_dir(versions_dir)
@@ -743,7 +798,7 @@ class Store:
         if number > MAX_VERSION:
             return NOT_FOUND, 0, b''
         try:
-            return OK, number, read_blob(version_path(versions_dir, number))
+            return OK, number, read_blob(version_path(versions_dir, number), number)
         except FileNotFoundError:
             return NOT_FOUND, 0, b''
 
@@ -1252,7 +1307,7 @@ def serve(inp, out, store, err, deadline=no_deadline, slots=0):
         note = store.note  # at most one line: a refusal's own note replaces it
     except Refused as e:
         note = str(e)
-        status, version, blob = e.status, 0, b''
+        status, version, blob = e.status, e.version, b''
     except Exception as e:  # a traceback would leak paths; the type is enough
         code = e.errno if isinstance(e, OSError) else None
         note = 'internal error (%s%s)' % (type(e).__name__, ' errno %d' % code if code else '')
@@ -1469,6 +1524,70 @@ def selftest_root(root, base):
     check(put(n, 0, keyed(n, 1)) == (OK, 1, b'', 0), 'GOYOVA04 seeds a new vault')
     shutil.rmtree(store.paths(n)[0])
 
+    # An entry at a version name that is no version (a short or empty file,
+    # a folder, a link, a FIFO) never becomes the head, so reads go on, and
+    # the PUT and FETCH that meet it answer SERVER_ERROR carrying its number
+    # (with it in the stderr line): the helper names the file to repair.
+    # An oversize file is the head, named the same way. A FIFO is answered
+    # at once: read_blob checks before it opens and never blocks.
+    shapes = Roomy(os.path.join(base, 'shapes'))
+    seeded = [blob(a, 40 + i) for i in range(3)]
+    for i, data in enumerate(seeded):
+        check(call(shapes, request(PUT, a, i, data)) == (OK, i + 1, b'', 0), 'shapes: seed')
+    slot4 = version_path(shapes.paths(a)[1], 4)
+    named = (SERVER_ERROR, 4, b'', 1)
+
+    def answers(what):
+        notes = []
+        check(call(shapes, request(GET, a)) == (OK, 3, seeded[2], 0), what + ': GET still serves version 3')
+        listed = call(shapes, request(LIST))[2]
+        check(listed.startswith(('%s 3 160 ' % a.hex()).encode('ascii')) and listed.count(b'\n') == 1,
+              what + ': LIST shows version 3')
+        check(call(shapes, request(PUT, a, 3, blob(a, 43)), notes=notes) == named,
+              what + ': PUT onto it is SERVER_ERROR(4), not CONFLICT')
+        check(call(shapes, request(FETCH, a, 4), notes=notes) == named, what + ': FETCH 4 is SERVER_ERROR(4)')
+        check(all('000000000004' in note for note in notes), what + ': the stderr line names version 4')
+        check(list_versions(shapes.paths(a)[1]) == [1, 2, 3], what + ': no version 4 was made')
+
+    for size in (0, 10, MIN_BLOB - 1):
+        with open(slot4, 'wb') as f:
+            f.write(blob(a, 44, MIN_BLOB)[:size])
+        answers('a %d-byte file' % size)
+        os.unlink(slot4)
+    os.mkdir(slot4)
+    answers('a folder')
+    os.rmdir(slot4)
+    try:
+        os.symlink(version_path(shapes.paths(a)[1], 3), slot4)
+    except (OSError, NotImplementedError):  # Windows without the symlink privilege
+        pass
+    else:
+        answers('a link to version 3')
+        os.unlink(slot4)
+    if hasattr(os, 'mkfifo'):
+        os.mkfifo(slot4)
+        done = []
+        worker = threading.Thread(target=lambda: done.append(answers('a FIFO')), daemon=True)
+        worker.start()
+        worker.join(30)
+        if worker.is_alive():  # an open that blocks: a writer releases it
+            os.close(os.open(slot4, os.O_WRONLY | O_NONBLOCK))
+            worker.join(30)
+        check(done == [None], 'a FIFO at a version name is answered at once')
+        os.unlink(slot4)
+    with open(slot4, 'wb') as f:
+        f.write(seeded[2][:MIN_BLOB])
+        f.truncate(MAX_BLOB + 1)
+    notes = []
+    check(call(shapes, request(GET, a), notes=notes) == named
+          and call(shapes, request(PUT, a, 3, blob(a, 43)), notes=notes) == named
+          and call(shapes, request(FETCH, a, 0), notes=notes) == named
+          and call(shapes, request(FETCH, a, 4), notes=notes) == named
+          and all('000000000004' in note for note in notes), 'an oversize head is SERVER_ERROR(4)')
+    check(call(shapes, request(FETCH, a, 3)) == (OK, 3, seeded[2], 0), 'versions below it are served')
+    os.unlink(slot4)
+    check(call(shapes, request(PUT, a, 3, blob(a, 43))) == (OK, 4, b'', 0), 'once removed, version 4 commits')
+
     # EMPTY rules when the versions or the whole folder are gone (a wiped or
     # restored server): only expected 0 seeds again.
     check(put(c, 0, blob(c, 1)) == (OK, 1, b'', 0), 'seed c')
@@ -1609,8 +1728,12 @@ def selftest_root(root, base):
     check(tree(root) == before, 'LIMIT wrote nothing')
     check(put(c, 1, blob(c, 4)) == (OK, 2, b'', 0), 'existing vaults still accept PUT at the limit')
 
-    # LIST: one line per vault, sorted, with head, size and time.
+    # LIST: one line per vault, sorted, with head, size and time. A folder
+    # with the all-zero name (made by hand) is no vault: never listed.
+    os.mkdir(os.path.join(root, ZERO_VAULT))
     status, count, text, code = call(store, request(LIST))
+    os.rmdir(os.path.join(root, ZERO_VAULT))
+    check(ZERO_VAULT.encode('ascii') not in text, 'LIST shows no all-zero vault ID')
     lines = text.decode('ascii').splitlines()
     check((status, count, code) == (OK, MAX_VAULTS, 0) and len(lines) == MAX_VAULTS and text.endswith(b'\n'),
           'LIST counts every vault')

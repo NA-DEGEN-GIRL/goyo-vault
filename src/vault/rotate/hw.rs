@@ -345,8 +345,8 @@ pub(in crate::vault) struct Landing {
     loss: Option<String>,
     exp: Option<u8>,
     clone: Vec<u8>,
-    broken: Vec<([u8; 4], [u8; 4])>,
-    fixed: Vec<([u8; 4], [u8; 4])>,
+    broken: Vec<([u8; 16], [u8; 16])>,
+    fixed: Vec<([u8; 16], [u8; 16])>,
     /// A fork union's option (spec §5.8).
     opt: Option<u8>,
     /// `ks` of this write (spec §7.16 "Which writes set `ks`"); None copies
@@ -433,7 +433,7 @@ impl Landing {
                 .take()
                 .or_else(|| super::super::review::loss_of(&removed, &kh.tombstones));
         }
-        let mut pbad: Vec<([u8; 4], [u8; 4])> = p
+        let mut pbad: Vec<([u8; 16], [u8; 16])> = p
             .state
             .pbad
             .iter()
@@ -519,8 +519,10 @@ fn listed(numbers: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-fn short(credhash: &[u8; 16]) -> [u8; 4] {
-    anchor::prefix(credhash)
+/// A key as `pbad` names it: its whole credhash (a prefix could be ground
+/// to name another key's pair record).
+fn whole(credhash: &[u8; 16]) -> [u8; 16] {
+    *credhash
 }
 /// New keys for a key file whose numbers `used` are taken: distinct
 /// credentials no slot or tombstone of it names, in PIN mode only PIN
@@ -765,7 +767,7 @@ impl Session {
             .filter(|v| v.state.key_state() == self.key_state)
             .map(|v| v.state.pbad.clone())
             .unwrap_or_default();
-        let shorts: Vec<[u8; 4]> = h.slots.iter().map(|s| short(&s.credhash)).collect();
+        let shorts: Vec<[u8; 16]> = h.slots.iter().map(|s| whole(&s.credhash)).collect();
         let broken = |o: usize, t: usize| pbad.contains(&(shorts[o], shorts[t]));
         // Records that deliver: owner → target, not marked broken.
         let delivers = |o: usize, t: usize| {
@@ -975,14 +977,14 @@ impl Session {
             if ik.is_some() {
                 reach.push(target.number);
             } else {
-                bad.push((short(&owner.credhash), short(&target.credhash)));
+                bad.push((whole(&owner.credhash), whole(&target.credhash)));
             }
         }
         reach.sort_unstable();
         if self.restored {
             return reach;
         }
-        let (state, mine) = (self.key_state, short(&owner.credhash));
+        let (state, mine) = (self.key_state, whole(&owner.credhash));
         let _ = self.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
             let Some(v) = lines
                 .vault
@@ -991,7 +993,7 @@ impl Session {
             else {
                 return false;
             };
-            let mut pbad: Vec<([u8; 4], [u8; 4])> = v
+            let mut pbad: Vec<([u8; 16], [u8; 16])> = v
                 .state
                 .pbad
                 .iter()
@@ -1643,7 +1645,7 @@ impl Session {
                         repaired.push((o, tt));
                         continue;
                     }
-                    (None, _, _, None) => landing.broken.push((short(&o), short(&tt))),
+                    (None, _, _, None) => landing.broken.push((whole(&o), whole(&tt))),
                     (Some(v), Some(so), Some(st), Some(h_t)) => {
                         let want = inbox_key(&id, st, h_t, so);
                         if !ct_eq(v.as_slice(), want.as_slice()) {
@@ -1668,7 +1670,7 @@ impl Session {
                         owner: *o,
                         target: *tt,
                     });
-                    landing.fixed.push((short(o), short(tt)));
+                    landing.fixed.push((whole(o), whole(tt)));
                 }
             }
         }
@@ -1912,7 +1914,7 @@ pub(super) enum Join {
 pub(in crate::vault) struct Touched {
     credhash: [u8; 16],
     output: Box<Key>,
-    broken: Vec<([u8; 4], [u8; 4])>,
+    broken: Vec<([u8; 16], [u8; 16])>,
     /// The transport the touch stated (USB or NFC), or None.
     pub(super) transport: Option<u32>,
 }
@@ -1994,7 +1996,7 @@ impl Session {
                     vec![super::super::gate::PAIR_BROKEN.to_owned()],
                 ));
             }
-            broken.push((short(&slot.credhash), short(&target)));
+            broken.push((whole(&slot.credhash), whole(&target)));
         }
         Ok(Touched {
             credhash: slot.credhash,
@@ -2269,7 +2271,7 @@ impl Session {
             match (x, y) {
                 (Some(x), Some(y)) if x == y => pairs.push(x.clone()),
                 (Some(_), Some(y)) => {
-                    if join == Join::TakeOther || pbad.contains(&(short(&k.0), short(&k.1))) {
+                    if join == Join::TakeOther || pbad.contains(&(whole(&k.0), whole(&k.1))) {
                         pairs.push(y.clone());
                     }
                 }
@@ -2312,7 +2314,7 @@ impl Session {
                         owner: *o,
                         target: *x,
                     });
-                    landing.fixed.push((short(o), short(x)));
+                    landing.fixed.push((whole(o), whole(x)));
                 }
             }
         }
@@ -3752,16 +3754,31 @@ mod tests {
     /// suspends key 3 with consent and copies the record, still broken, and
     /// a pairing of keys 2 and 3 rewrites it and brings key 3 back. A
     /// pairing started with key 1 that repairs it is authorized by key 2.
+    /// `pbad` names its keys by whole credhashes: building the line again
+    /// keeps an entry only while both its keys are live, and an entry whose
+    /// key shares all but a byte with a live one is not one of them.
+    #[test]
+    fn a_broken_pair_record_is_named_by_whole_credhashes() {
+        let pc = Pc::new();
+        let (s, _, _) = create(&pc, 3, false, false);
+        drop(s);
+        let h = header(&pc);
+        let near = |mut c: [u8; 16]| {
+            c[15] ^= 1;
+            c
+        };
+        let (c1, c2) = (h.slots[1].credhash, h.slots[2].credhash);
+        let mut old = anchor::line_of(&h, None);
+        old.state.pbad = vec![(c1, c2), (near(c1), c2), (c1, near(c2))];
+        assert_eq!(anchor::line_of(&h, Some(&old)).state.pbad, [(c1, c2)]);
+    }
     #[test]
     fn a_broken_pair_record_is_found_and_repaired() {
         let pc = Pc::new();
         let (s, mut codes, mut keys) = create(&pc, 3, false, false);
         let id = s.id;
         let h = header(&pc);
-        let broken = [(
-            anchor::prefix(&h.slots[1].credhash),
-            anchor::prefix(&h.slots[2].credhash),
-        )];
+        let broken = [(h.slots[1].credhash, h.slots[2].credhash)];
         plant_broken_record(&pc, s, &keys);
         // Unlocked with key 1, the record is not seen; the Reauth with key 2
         // records it, and its reach lacks key 3.

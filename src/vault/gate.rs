@@ -429,7 +429,7 @@ pub(super) fn public_checks(
         // round 4, finding 3): a record this PC found broken; one rewritten
         // with both its keys present by one of them; one its present owner
         // copied with the target absent.
-        let broken = pbad.contains(&(anchor::prefix(&owner), anchor::prefix(&target)));
+        let broken = pbad.contains(&(owner, target));
         let rewritten = authorizer.is_some_and(|a| a == owner || a == target)
             && present(&owner)
             && present(&target);

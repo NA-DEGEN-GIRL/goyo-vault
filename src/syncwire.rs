@@ -602,7 +602,9 @@ pub fn render_list(entries: &[ListEntry]) -> Vec<u8> {
     }
     out.into_bytes()
 }
-/// None unless every line is well formed and LF-terminated.
+/// None unless every line is well formed and LF-terminated, with a vault ID
+/// that is not all zero: no request may name that ID (`--fetch` and the
+/// app's fetch refuse it), so a row of it could only be shown, never used.
 pub fn parse_list(blob: &[u8]) -> Option<Vec<ListEntry>> {
     if blob.len() > MAX_LIST || !blob.is_ascii() {
         return None;
@@ -615,7 +617,7 @@ pub fn parse_list(blob: &[u8]) -> Option<Vec<ListEntry>> {
     for line in text.strip_suffix('\n')?.split('\n') {
         let mut f = line.split(' ');
         out.push(ListEntry {
-            id: parse_hex(f.next()?)?,
+            id: parse_hex(f.next()?).filter(|id| *id != [0; 16])?,
             head: decimal(f.next()?)?,
             size: decimal(f.next()?)?,
             mtime: decimal(f.next()?)?,
@@ -1490,7 +1492,7 @@ mod tests {
                 mtime: 1_792_000_000,
             },
             ListEntry {
-                id: [0; 16],
+                id: [1; 16],
                 head: u64::MAX,
                 size: 0,
                 mtime: 0,
@@ -1515,6 +1517,8 @@ mod tests {
             text.replace("8192", "-1"),
             text.replace("42", "18446744073709551616"),
             text.replace("8192", "\u{c624}"),
+            // An all-zero ID names no vault: no request can take it (SY-6).
+            text.replace(&crate::syncfile::hex(&ID), &"0".repeat(32)),
         ] {
             assert_eq!(parse_list(bad.as_bytes()), None, "{bad:?}");
         }
