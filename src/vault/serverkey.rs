@@ -808,7 +808,7 @@ pub enum RemovalMerge {
 /// is a removal or a merge result that `t` has not merged yet. `hist` is
 /// this PC's confirmed history, the newest first.
 fn one_state_removals(own: &KeyHeader, t: &KeyHeader, hist: &[super::anchor::Hist]) -> bool {
-    let lists = |id: &[u8; 4]| t.key_ids.iter().any(|k| k[..4] == id[..]);
+    let lists = |id: &[u8; 16]| t.key_ids.contains(id);
     match (own.kind, t.kind) {
         (Kind::Remove, Kind::Remove) => {
             own.key_ids.len() > 1 && t.key_ids.get(1) == own.key_ids.get(1)

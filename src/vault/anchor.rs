@@ -37,8 +37,13 @@ use std::{
 
 /// The anchor's file name in its folder.
 const NAME: &str = "goyo-vault.keys";
-/// The first line of a version-3 file.
-const VERSION: &str = "goyo-vault-keys 3";
+/// The first line of a version-4 file. Version 4 states key IDs, `pw_id`s,
+/// tags, credhashes and seed hashes in full where version 3 kept prefixes
+/// (review finding: a 4-byte key ID prefix is cheap to grind). A version-3
+/// file is read with this grammar: its lines with prefixes are unreadable
+/// and count as absent, as any malformed line, until a write of that vault
+/// replaces them.
+const VERSION: &str = "goyo-vault-keys 4";
 /// Largest anchor read or written.
 pub(super) const LIMIT: usize = 1 << 20;
 /// How long a write waits for another process's lock.
@@ -175,31 +180,42 @@ pub(super) enum Origin {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct Tomb {
     pub credhash: [u8; 16],
-    /// The first 4 bytes of the current key ID of the first state on this
-    /// PC that carried it; zero when unknown.
-    pub keyid: [u8; 4],
+    /// The current key ID of the first state on this PC that carried it;
+    /// zero when unknown.
+    pub keyid: [u8; 16],
     pub origin: Origin,
 }
+impl Tomb {
+    /// Whether this removal was made since a fork from a branch whose data
+    /// keys are `ids`: the first state on this PC that carried it holds a
+    /// key that branch never listed. A removal of unknown origin never is.
+    /// Whole key IDs: a prefix would let a forger grind one (review
+    /// finding).
+    pub fn unlisted(&self, ids: &[[u8; 16]]) -> bool {
+        self.keyid != [0; 16] && !ids.contains(&self.keyid)
+    }
+}
 /// A live slot: its number, credhash, registration date (yyyymmdd), the
-/// hash of its record with the number and seed zeroed, and its seed's hash.
+/// hash of its record with the number and seed zeroed, and its seed's hash
+/// (both hashes' first 16 bytes).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct Slot {
     pub number: u8,
     pub credhash: [u8; 16],
     pub date: [u8; 8],
-    pub idhash: [u8; 8],
-    pub seedhash: [u8; 4],
+    pub idhash: [u8; 16],
+    pub seedhash: [u8; 16],
 }
-/// A state this PC installed or wrote: its epoch and prefixes of its tag,
-/// current key ID, `pw_id` and authorizer, and its kind (0 for a 0.8 state
-/// recorded at its conversion).
+/// A state this PC installed or wrote: its epoch, tag, current key ID,
+/// `pw_id` and authorizer's credhash (zero for none), all in full, and its
+/// kind (0 for a 0.8 state recorded at its conversion).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Hist {
     pub epoch: u64,
-    pub tag: [u8; 8],
-    pub keyid: [u8; 4],
-    pub pwid: [u8; 4],
-    pub auth: [u8; 4],
+    pub tag: [u8; 16],
+    pub keyid: [u8; 16],
+    pub pwid: [u8; 16],
+    pub auth: [u8; 16],
     pub kind: u8,
 }
 /// `b`: a key backup was made of this exact state; `t` and `p` belong to
@@ -272,11 +288,19 @@ impl State {
     pub fn hardware(&self) -> bool {
         self.magic.starts_with(b"GOYOKH") || self.magic.starts_with(b"GOYOKS")
     }
-    /// Whether `hist` holds the state (`epoch`, `tag`), by its tag prefix.
+    /// Whether `hist` holds the state (`epoch`, `tag`).
     pub fn had(&self, state: KeyState) -> bool {
         self.hist
             .iter()
-            .any(|h| h.epoch == state.epoch && h.tag == state.tag[..8])
+            .any(|h| h.epoch == state.epoch && h.tag == state.tag)
+    }
+    /// Where in `hist` the state a fork shares with a branch whose data
+    /// keys are `ids` is: the newest state of this PC whose current key
+    /// that branch holds. Whole key IDs: a key ID of a forger's choice that
+    /// shares only a prefix with a newer state's never makes that state the
+    /// shared one (review finding).
+    pub fn shared(&self, ids: &[[u8; 16]]) -> Option<usize> {
+        self.hist.iter().position(|h| ids.contains(&h.keyid))
     }
 }
 /// The confirmed state of a vault: the latest this PC installed, wrote or
@@ -442,7 +466,7 @@ pub(super) struct Lines {
     /// the seed it had then. Every write of the confirmed line drops a flag
     /// whose key is no longer live there or whose seed changed.
     #[cfg(feature = "security-key")]
-    pub clones: Vec<([u8; 16], [u8; 4])>,
+    pub clones: Vec<([u8; 16], [u8; 16])>,
 }
 /// A vault's `review` line (spec §5.13): the post-removal review a removal
 /// for a loss made due on this PC, with its loss date (`yyyymmdd`, or
@@ -740,10 +764,12 @@ pub(super) fn parse_file(bytes: &[u8]) -> Parsed {
                 .and_then(|l| l.strip_prefix("goyo-vault-keys "))
                 .and_then(num)
         {
-            if version > 3 {
+            if version > 4 {
                 return Parsed::Newer;
             }
-            if version == 3 {
+            // A version-3 file reads with this version's grammar (see
+            // VERSION).
+            if version >= 3 {
                 continue;
             }
         }
@@ -936,7 +962,7 @@ fn parse_line(line: &str) -> Option<Line> {
         "clone" => {
             unhex::<16>(f.0.next()?)?;
             if let Some(seed) = f.0.next() {
-                unhex::<4>(seed)?;
+                unhex::<16>(seed)?;
             }
             f.end()?;
             Line::Kept(Kind::Clone, id, line.to_owned())
@@ -1462,7 +1488,7 @@ pub(super) fn update(
     #[cfg(feature = "security-key")]
     {
         let slots = lines.vault.as_ref().map_or(&[][..], |v| &v.state.slots);
-        let live = |(c, s): &([u8; 16], [u8; 4])| {
+        let live = |(c, s): &([u8; 16], [u8; 16])| {
             slots.iter().any(|x| x.credhash == *c && x.seedhash == *s)
         };
         lines.clones.retain(live);
@@ -1792,12 +1818,12 @@ pub(super) fn hist_of(h: &KeyHeader) -> Hist {
     let auth = h
         .authorizer
         .and_then(|a| h.slots.get(usize::from(a)))
-        .map_or([0; 4], |s| prefix(&s.credhash));
+        .map_or([0; 16], |s| s.credhash);
     Hist {
         epoch: h.epoch,
-        tag: prefix(&h.tag),
-        keyid: prefix(&h.current_key_id()),
-        pwid: prefix(&h.pw_id),
+        tag: h.tag,
+        keyid: h.current_key_id(),
+        pwid: h.pw_id,
         auth,
         kind: h.kind as u8,
     }
@@ -1806,10 +1832,10 @@ pub(super) fn hist_of(h: &KeyHeader) -> Hist {
 pub(super) fn legacy_hist(state: KeyState, key_id: &[u8; 16]) -> Hist {
     Hist {
         epoch: state.epoch,
-        tag: prefix(&state.tag),
-        keyid: prefix(key_id),
-        pwid: [0; 4],
-        auth: [0; 4],
+        tag: state.tag,
+        keyid: *key_id,
+        pwid: [0; 16],
+        auth: [0; 16],
         kind: 0,
     }
 }
@@ -1832,9 +1858,9 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
                 credhash: t.credhash,
                 // First seen here; in a first line, its origin is unknown.
                 keyid: if old.is_some() {
-                    prefix(&h.current_key_id())
+                    h.current_key_id()
                 } else {
-                    [0; 4]
+                    [0; 16]
                 },
                 origin: Origin::Taken,
             })
@@ -1844,7 +1870,7 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
     hist.extend(
         old.into_iter()
             .flat_map(|o| o.state.hist.iter().copied())
-            .filter(|e| (e.epoch, e.tag) != (h.epoch, prefix(&h.tag))),
+            .filter(|e| (e.epoch, e.tag) != (h.epoch, h.tag)),
     );
     hist.truncate(HIST_MAX);
     // The default build has no security-key state: its lines list no slot
@@ -1953,7 +1979,7 @@ pub(super) fn legacy_line(
     hist.extend(
         old.into_iter()
             .flat_map(|o| o.state.hist.iter().copied())
-            .filter(|e| (e.epoch, e.tag) != (state.epoch, prefix(&state.tag))),
+            .filter(|e| (e.epoch, e.tag) != (state.epoch, state.tag)),
     );
     hist.truncate(HIST_MAX);
     VaultLine {
@@ -2143,7 +2169,7 @@ pub(super) fn remote(path: &Path) -> bool {
 /// unknown to this PC, neither its last current vault key nor the current
 /// key of a state it had (S23-2 #9).
 pub(super) fn foreign_key(line: &VaultLine, key_id: &[u8; 16]) -> bool {
-    line.vkey.as_ref() != Some(key_id) && !line.state.hist.iter().any(|h| h.keyid == key_id[..4])
+    line.vkey.as_ref() != Some(key_id) && !line.state.hist.iter().any(|h| h.keyid == *key_id)
 }
 
 #[cfg(test)]
@@ -2204,12 +2230,12 @@ mod tests {
             tombs: vec![
                 Tomb {
                     credhash: [1; 16],
-                    keyid: [2; 4],
+                    keyid: [2; 16],
                     origin: Origin::Own,
                 },
                 Tomb {
                     credhash: [3; 16],
-                    keyid: [0; 4],
+                    keyid: [0; 16],
                     origin: Origin::Taken,
                 },
             ],
@@ -2218,32 +2244,32 @@ mod tests {
                     number: 1,
                     credhash: [4; 16],
                     date: *b"20261027",
-                    idhash: [5; 8],
-                    seedhash: [6; 4],
+                    idhash: [5; 16],
+                    seedhash: [6; 16],
                 },
                 Slot {
                     number: 255,
                     credhash: [0x44; 16],
                     date: *b"19700101",
-                    idhash: [0x55; 8],
-                    seedhash: [0x66; 4],
+                    idhash: [0x55; 16],
+                    seedhash: [0x66; 16],
                 },
             ],
             hist: vec![
                 Hist {
                     epoch: 12,
-                    tag: [7; 8],
-                    keyid: [8; 4],
-                    pwid: [9; 4],
-                    auth: [10; 4],
+                    tag: [7; 16],
+                    keyid: [8; 16],
+                    pwid: [9; 16],
+                    auth: [10; 16],
                     kind: 4,
                 },
                 Hist {
                     epoch: 0,
-                    tag: [0x70; 8],
-                    keyid: [0x80; 4],
-                    pwid: [0; 4],
-                    auth: [0; 4],
+                    tag: [0x70; 16],
+                    keyid: [0x80; 16],
+                    pwid: [0; 16],
+                    auth: [0; 16],
                     kind: 0,
                 },
             ],
@@ -2379,6 +2405,7 @@ mod tests {
             format!("review {hex32} loss=unknown epoch=4 state=due"),
             format!("review {hex32} loss=20261020 epoch=4 state=done"),
             format!("clone {hex32} {hex32}"),
+            format!("clone {hex32} {hex32} {hex32}"),
         ] {
             assert!(
                 matches!(parsed(&text), Some(Line::Kept(_, _, t)) if t == text),
@@ -2418,6 +2445,113 @@ mod tests {
             assert_ne!(bad, text);
             assert_eq!(parsed(&bad), None, "{bad}");
         }
+    }
+
+    /// Version 4 states every key ID, `pw_id`, tag, authorizer and hash in
+    /// full (review finding: 4-byte key ID prefixes are cheap to grind):
+    /// they round-trip whole, a version-3 line with prefixes is unreadable
+    /// and counts as absent, and the next write of its vault replaces it
+    /// under this version's first line.
+    #[test]
+    fn ids_round_trip_whole_and_a_version_3_line_is_unreadable() {
+        let id = [0x5e; 16];
+        let seq = |b: u8| -> [u8; 16] { std::array::from_fn(|i| b.wrapping_add(i as u8)) };
+        let mut line = VaultLine {
+            state: full_state(),
+            merged: Vec::new(),
+            vkey: None,
+        };
+        line.state.hist[0] = Hist {
+            epoch: 12,
+            tag: seq(0x10),
+            keyid: seq(0x20),
+            pwid: seq(0x30),
+            auth: seq(0x40),
+            kind: 4,
+        };
+        line.state.tombs[0].keyid = seq(0x50);
+        line.state.slots[0].idhash = seq(0x60);
+        line.state.slots[0].seedhash = seq(0x70);
+        let text = render_vault(&id, &line);
+        let h = line.state.hist[0];
+        let entry = format!(
+            " hist=12:{}:{}:{}:{}:4,",
+            hex(&h.tag),
+            hex(&h.keyid),
+            hex(&h.pwid),
+            hex(&h.auth)
+        );
+        assert!(text.contains(&entry), "{text}");
+        assert!(text.contains(&format!(":{}:o,", hex(&seq(0x50)))), "{text}");
+        assert!(text.contains(&format!(":{}:{},", hex(&seq(0x60)), hex(&seq(0x70)))));
+        assert_eq!(parsed(&text), Some(Line::Vault(id, Box::new(line.clone()))));
+        // Version 3's prefixes: 8 bytes of a tag or a record hash, 4 of a
+        // key ID, `pw_id`, credhash or seed hash.
+        for (whole, kept) in [
+            (seq(0x10), 8),
+            (seq(0x20), 4),
+            (seq(0x30), 4),
+            (seq(0x40), 4),
+            (seq(0x50), 4),
+            (seq(0x60), 8),
+            (seq(0x70), 4),
+        ] {
+            let short = text.replace(&hex(&whole), &hex(&whole[..kept]));
+            assert_ne!(short, text);
+            assert_eq!(parsed(&short), None, "{short}");
+        }
+        let hex32 = "0123456789abcdef0123456789abcdef";
+        assert_eq!(parsed(&format!("clone {hex32} {hex32} 01234567")), None);
+        // A version-3 file: no later version; its line with prefixes is
+        // kept, counts as absent, and goes with the next write of its vault.
+        let v3 = text.replace(&hex(&h.keyid), &hex(&h.keyid[..4]));
+        let Parsed::Doc(doc) = parse_file(format!("goyo-vault-keys 3\n{v3}\n").as_bytes()) else {
+            panic!("newer");
+        };
+        assert!(doc.lines(&id).vault.is_none() && !doc.is_clean());
+        let lines = Lines {
+            vault: Some(line),
+            ..Lines::default()
+        };
+        assert_eq!(
+            doc.render(&id, &lines),
+            format!("{VERSION}\n{text}\n").into_bytes()
+        );
+    }
+
+    /// The anchor's decisions take whole IDs (review finding): a key ID or
+    /// tag that shares all but its last byte with one of `hist`, or with a
+    /// removal's key ID, matches nothing.
+    #[test]
+    fn a_prefix_matches_no_state_no_removal_and_no_key() {
+        let s = full_state();
+        let near = |mut x: [u8; 16]| {
+            x[15] ^= 1;
+            x
+        };
+        let (newer, older) = (s.hist[0], s.hist[1]);
+        // The shared state of a fork.
+        assert_eq!(s.shared(&[older.keyid]), Some(1));
+        assert_eq!(s.shared(&[near(newer.keyid), older.keyid]), Some(1));
+        assert_eq!(s.shared(&[near(newer.keyid), near(older.keyid)]), None);
+        assert_eq!(s.shared(&[newer.keyid]), Some(0));
+        // A state this PC had.
+        let state = |tag| KeyState { epoch: 12, tag };
+        assert!(s.had(state(newer.tag)));
+        assert!(!s.had(state(near(newer.tag))));
+        // A removal made since a fork.
+        let (known, unknown) = (&s.tombs[0], &s.tombs[1]);
+        assert!(!known.unlisted(&[known.keyid]));
+        assert!(known.unlisted(&[near(known.keyid)]));
+        assert!(!unknown.unlisted(&[]));
+        // A vault file's key this PC never had current.
+        let line = VaultLine {
+            state: s.clone(),
+            merged: Vec::new(),
+            vkey: None,
+        };
+        assert!(!foreign_key(&line, &older.keyid));
+        assert!(foreign_key(&line, &near(older.keyid)));
     }
 
     /// A file this version cannot fully read is never thrown away: every
@@ -2499,7 +2633,7 @@ mod tests {
     fn a_later_version_or_a_file_over_1_mib_is_never_rewritten() {
         let d = Dir::new();
         let later = format!(
-            "goyo-vault-keys 4\n{}\n",
+            "goyo-vault-keys 5\n{}\n",
             render_vault(
                 &[1; 16],
                 &VaultLine {
@@ -2551,17 +2685,17 @@ mod tests {
         big.state.tombs = (0..TOMB_MAX)
             .map(|i| Tomb {
                 credhash: [(i % 251) as u8; 16].map(|x| x ^ (i / 251) as u8),
-                keyid: [1; 4],
+                keyid: [1; 16],
                 origin: Origin::Taken,
             })
             .collect();
         big.state.hist = vec![
             Hist {
                 epoch: 1,
-                tag: [1; 8],
-                keyid: [1; 4],
-                pwid: [1; 4],
-                auth: [1; 4],
+                tag: [1; 16],
+                keyid: [1; 16],
+                pwid: [1; 16],
+                auth: [1; 16],
                 kind: 2,
             };
             HIST_MAX
@@ -2666,7 +2800,7 @@ mod tests {
         // A temp file that is not a whole anchor is never taken back.
         fs::write(
             d.0.join(format!("{NAME}.0123456789abcdef.tmp")),
-            b"goyo-vault-keys 3\nvault",
+            format!("{VERSION}\nvault"),
         )
         .unwrap();
         assert_eq!(d.doc(), Anchor::default());
@@ -2829,7 +2963,7 @@ mod tests {
         // A removal recorded here, missing from the key file.
         let k7t = ke03(vid, &[dk(7), dk(5), dk(0)], 7, &[([0x99; 16], 6)], 7);
         let l7 = line_of(&k7t, Some(&l5));
-        assert_eq!(l7.state.tombs[0].keyid, prefix(&k7t.current_key_id()));
+        assert_eq!(l7.state.tombs[0].keyid, k7t.current_key_id());
         assert_eq!(l7.state.tombs[0].origin, Origin::Taken);
         let k8 = ke03(vid, &[dk(8), dk(7), dk(5), dk(0)], 8, &[], 8);
         assert_eq!(compare(&k8, Some(&l7)), Err(Refusal::Relist));

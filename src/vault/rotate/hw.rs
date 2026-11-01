@@ -2088,22 +2088,16 @@ impl Session {
     pub fn fork_hint(&self, other: &KeyFile) -> Option<u8> {
         let theirs = other.header()?;
         let own = self.key_file.header()?;
-        let hist = &self.anchor.lines.vault.as_ref()?.state.hist;
-        let shared = hist
+        let state = &self.anchor.lines.vault.as_ref()?.state;
+        let shared = state.shared(&theirs.key_ids)?;
+        let removed: Vec<[u8; 16]> = theirs.tombstones.iter().map(|t| t.credhash).collect();
+        state.hist[..shared]
             .iter()
-            .position(|e| theirs.key_ids.iter().any(|i| i[..4] == e.keyid))?;
-        let removed: Vec<[u8; 4]> = theirs
-            .tombstones
-            .iter()
-            .map(|t| short(&t.credhash))
-            .collect();
-        hist[..shared]
-            .iter()
-            .filter(|e| e.auth != [0; 4] && removed.contains(&e.auth))
+            .filter(|e| e.auth != [0; 16] && removed.contains(&e.auth))
             .find_map(|e| {
                 own.slots
                     .iter()
-                    .find(|s| short(&s.credhash) == e.auth)
+                    .find(|s| s.credhash == e.auth)
                     .map(|s| s.number)
             })
     }
@@ -2115,12 +2109,8 @@ impl Session {
         let Some(line) = self.anchor.lines.vault.as_ref() else {
             return true;
         };
-        let hist = &line.state.hist;
-        match hist
-            .iter()
-            .position(|e| other.key_ids.iter().any(|i| i[..4] == e.keyid))
-        {
-            Some(shared) => hist[..shared].iter().any(|e| e.kind == 8),
+        match line.state.shared(&other.key_ids) {
+            Some(shared) => line.state.hist[..shared].iter().any(|e| e.kind == 8),
             None => true,
         }
     }
@@ -3031,7 +3021,7 @@ mod tests {
             (tomb.credhash, tomb.origin),
             (old.slots[0].credhash, Origin::Own)
         );
-        assert_eq!(tomb.keyid, anchor::prefix(&h.current_key_id()));
+        assert_eq!(tomb.keyid, h.current_key_id());
         assert!(line.state.flags.t && lines.pending.is_none());
         drop(s);
         for k in [3, 4, 2] {
@@ -3336,7 +3326,7 @@ mod tests {
             [(three, anchor::slot_of(&header(&pc).slots[1]).seedhash)]
         );
         assert_eq!(
-            anchor::prefix::<4>(&crate::vault::sha256(&seed)),
+            anchor::prefix::<16>(&crate::vault::sha256(&seed)),
             flags[0].1
         );
         let mut plan = s.plan_reseed().unwrap();

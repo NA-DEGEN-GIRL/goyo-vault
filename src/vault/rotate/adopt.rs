@@ -495,7 +495,7 @@ impl Session {
         // recorded key ID is not in its list (spec §5.8 "Forks").
         let since_fork = |t: &Tombstone| {
             line.and_then(|l| l.state.tombs.iter().find(|x| x.credhash == t.credhash))
-                .is_some_and(|x| x.keyid != [0; 4] && !theirs.ids.iter().any(|i| i[..4] == x.keyid))
+                .is_some_and(|x| x.unlisted(&theirs.ids))
         };
         if checked.is_none()
             && !own
@@ -568,17 +568,14 @@ impl Session {
         }
         // The shared state of a fork: the newest state of this PC's history
         // whose current key the other file holds. A side changed the
-        // password since when its `pw_id` differs from that state's.
+        // password since when its `pw_id` differs from that state's. Both
+        // by whole IDs: a forger's key ID or `pw_id` that shares only a
+        // prefix decides neither (review finding).
         let changed_pw = fork
             .then(|| {
-                let shared = line?
-                    .state
-                    .hist
-                    .iter()
-                    .find(|h| theirs.ids.iter().any(|i| i[..4] == h.keyid))?;
-                let changed = |pw_id: Option<[u8; 16]>| {
-                    anchor::prefix::<4>(&pw_id.unwrap_or_default()) != shared.pwid
-                };
+                let state = &line?.state;
+                let shared = &state.hist[state.shared(&theirs.ids)?];
+                let changed = |pw_id: Option<[u8; 16]>| pw_id.unwrap_or_default() != shared.pwid;
                 Some((changed(own.pw_id), changed(theirs.pw_id)))
             })
             .flatten();
@@ -2050,6 +2047,59 @@ mod tests {
         });
         assert_eq!(taken.err(), Some(ADOPT_STALE));
         assert_eq!(key_and_anchor(&pc), before);
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+
+    /// The shared state of a fork and the sides that changed the password
+    /// are judged by whole key IDs and `pw_id`s (review finding): a file
+    /// from K1 under the old password, whose data key of the forger's
+    /// choice has a key ID that shares its first 4 bytes with this PC's
+    /// current key (a 2^32 grind, here put into this PC's history entry
+    /// instead), does not make K2 the shared state, so this PC's change of
+    /// the password stays the default. A `pw_id` that shares only a prefix
+    /// with the shared state's is a change.
+    #[test]
+    fn a_key_id_that_shares_only_a_prefix_is_no_shared_state() {
+        let pc = Pc::new();
+        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let id = s.id;
+        let keys1 = s.keys.keys().to_vec();
+        let pw1 = s.key_file.header().unwrap().pw_id;
+        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let forged = [0x63; 32];
+        let spec = Spec {
+            vault_id: id,
+            epoch: 2,
+            kind: Kind::Union,
+            next: 1,
+            pw_id: pw1,
+            loss: 0,
+            tombstones: Vec::new(),
+            resume: [0; 32],
+        };
+        let bundle = Bundle::new(&[&[forged][..], &keys1].concat(), None).unwrap();
+        let (f, _) = keyfile::seal(&spec, &bundle, OLD, Plan::PasswordOnly).unwrap();
+        let check = classify(&s, &f).unwrap();
+        assert_eq!(
+            (check.class, check.fork, check.changed_pw),
+            (AdoptClass::Union, true, Some((true, false)))
+        );
+        let near = key_id(&id, &forged);
+        let line = s.anchor.lines.vault.as_mut().unwrap();
+        let current = &mut line.state.hist[0];
+        assert_eq!(current.keyid, key_id(&id, s.keys.current()));
+        current.keyid[..4].copy_from_slice(&near[..4]);
+        assert_ne!(current.keyid, near);
+        let check = classify(&s, &f).unwrap();
+        assert_eq!(check.changed_pw, Some((true, false)));
+        // The shared state K1 recorded with a `pw_id` that shares only its
+        // first 4 bytes with the file's: both sides changed it.
+        let line = s.anchor.lines.vault.as_mut().unwrap();
+        let shared = &mut line.state.hist[1];
+        assert_eq!(shared.pwid, pw1);
+        shared.pwid[15] ^= 1;
+        let check = classify(&s, &f).unwrap();
+        assert_eq!(check.changed_pw, Some((true, true)));
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 

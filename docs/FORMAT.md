@@ -412,7 +412,7 @@ rejected=<64자리 16진수>|-  마지막으로 거부된 outgoing 파일의 SHA
 
 위치는 `%LOCALAPPDATA%\GoyoVault\goyo-vault.keys`이고(디버그 빌드는 `GoyoVault-debug`), PC마다, Windows 사용자마다 따로 있습니다. 금고 폴더나 열쇠 USB만 바꿀 수 있는 사람에 맞서, 이 PC가 본 열쇠 파일 상태를 비밀번호를 묻기 전에 비교하는 두 번째 기준입니다. **비밀은 없습니다**(데이터 키, 비밀번호, 열쇠 확인 코드, 보안 키 seed 없음). 인증되지 않으므로, 이 폴더에 쓸 수 있는 같은 사용자 권한의 코드로부터는 지키지 못합니다.
 
-**형식.** ASCII(0x20~0x7E), 한 줄에 한 기록, LF. 첫 줄 `goyo-vault-keys 3`. 숫자는 앞자리 0 없는 10진수, 바이트열은 소문자 16진수, 빈 목록과 없는 값은 `-`, 목록은 쉼표로 나눕니다. 금고마다 `vault` 줄 하나(확정 상태)와 `pending` 줄 하나(쓰는 중인 열쇠 변경)까지입니다.
+**형식.** ASCII(0x20~0x7E), 한 줄에 한 기록, LF. 첫 줄 `goyo-vault-keys 4`. 버전 3 파일(0.9.0 개발 중 빌드)도 이 문법으로 읽으므로, 키 ID 등의 앞부분만 적힌 그 줄은 읽을 수 없는 줄이 됩니다(아래 **읽기**). 숫자는 앞자리 0 없는 10진수, 바이트열은 소문자 16진수, 빈 목록과 없는 값은 `-`, 목록은 쉼표로 나눕니다. 금고마다 `vault` 줄 하나(확정 상태)와 `pending` 줄 하나(쓰는 중인 열쇠 변경)까지입니다.
 
 ```
 vault <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hist= merged= pbad= gated= sup= ks= keyid= vkey=
@@ -426,15 +426,15 @@ pending <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hi
 |`magic`|그 열쇠 파일의 매직. `GOYOKH`·`GOYOKS`로 시작하면 이 PC는 그 금고를 보안 키로 연 것으로 보고, 비밀번호만으로 여는 열쇠 파일을 거부합니다|
 |`policy`, `slots`, `pbad`, `sup`, `ks`, `flags`의 `t`·`p`|보안 키 빌드가 씁니다(아래). 기본 빌드는 읽고 그대로 둡니다. `ks`가 없는 줄은 `-`로 읽습니다|
 |`policy`|(보안 키 빌드) 확정 상태의 flags 바이트(OTP, PIN 모드)|
-|`slots`|(보안 키 빌드) 칸마다 `번호:credhash:등록 날짜(yyyymmdd):자격 증명 ID 해시 앞 8바이트:seed 해시 앞 4바이트`. 바뀐 번호나 등록 정보를 알아보는 데 씁니다|
+|`slots`|(보안 키 빌드) 칸마다 `번호:credhash:등록 날짜(yyyymmdd):자격 증명 ID 해시 앞 16바이트:seed 해시 앞 16바이트`. 바뀐 번호나 등록 정보를 알아보는 데 씁니다|
 |`pbad`|(보안 키 빌드) 이 PC가 손상을 확인한 짝 기록, `<주인>><대상>`(credhash 앞 4바이트씩)|
 |`sup`|(보안 키 빌드) 이 PC의 변경이 대신한 서버 상태, `<키 ID>.<수정 번호>.<태그>`|
 |`ks`|(보안 키 빌드) 열쇠 파일 동기화의 의도: `-` 없음, `on.<n>` 켰고 그 업로드가 아직 서버에 보이지 않음(n = 그때 서버 맨 위 기록 번호), `off.<n>` 껐고 기록 n의 세대가 끝나기를 기다림(CUT을 보냄), `off.?` 서버를 본 적 없이 껐음(서버를 처음 볼 때 `off.<n>`으로 정하거나 지움)|
 |`flags`의 `t`, `p`|(보안 키 빌드) `t` 이 상태를 이 PC가 믿음(이 PC가 썼거나 관문을 통과), `p` 이 PC가 `GOYOKS01` 파일을 바꿈|
 |`flags`의 `b`|이 상태의 열쇠 백업을 했음|
 |`consumed`|마지막으로 끝난 열쇠 변경의 `resume`(그 금고 파일이 이미 다시 저장되었음)|
-|`tombs`|제거 기록: credhash(16) : 처음 본 상태의 현재 키 ID 앞 4바이트(모르면 0) : `o`(이 PC에서 뺌) 또는 `t`(받은 파일에 있었음)|
-|`hist`|이 PC가 쓰거나 받은 상태, 최근 64개: epoch : 태그 앞 8바이트 : 현재 키 ID 앞 4바이트 : `pw_id` 앞 4바이트 : 승인 키 : 변경 종류(0 = 0.8 상태)|
+|`tombs`|제거 기록: credhash(16) : 처음 본 상태의 현재 키 ID(16, 모르면 0) : `o`(이 PC에서 뺌) 또는 `t`(받은 파일에 있었음)|
+|`hist`|이 PC가 쓰거나 받은 상태, 최근 64개: epoch : 태그(16) : 현재 키 ID(16) : `pw_id`(16) : 승인 키의 credhash(16, 없으면 0) : 변경 종류(0 = 0.8 상태). 갈라진 파일과 함께 가진 상태, 비밀번호를 바꾼 쪽, 이 PC가 가졌던 상태는 모두 전체 값으로 비교합니다(데이터 키를 고를 수 있는 위조자는 키 ID 앞 4바이트를 쉽게 맞춤)|
 |`merged`|이 PC가 자기 쓰기에 합친 서버 열쇠 파일(최근 16개)|
 |`gated`|이 PC가 쓰거나 확인한 가장 새 상태의 수정 번호. 없으면 `epoch`로 읽음|
 |`keyid`|확정 상태의 현재 키 ID(16바이트). 더 높은 수정 번호의 열쇠 파일은 이 키 ID를 목록에 담아야 이어진 것으로 봅니다|
@@ -450,7 +450,7 @@ pending <금고 ID> epoch= tag= magic= policy= flags= consumed= tombs= slots= hi
 ```
 gate <금고 ID> epoch=<n> tag=<32자리> state=pending|dropped|superseded|none g2=on|off since=<유닉스 초>
 review <금고 ID> loss=<yyyymmdd>|unknown epoch=<n> state=due|done
-clone <금고 ID> <credhash 32자리> <seed 해시 8자리>
+clone <금고 ID> <credhash 32자리> <seed 해시 32자리>
 ```
 
 - `gate`: 관문을 기다리는 서버 열쇠 파일(수정 번호와 태그)과 그 결과(`pending` 기다림, `dropped` 받지 않기, `superseded` 이 PC의 변경이 대신함, `none` 기다리는 것 없음). `g2=off`는 이 금고에서 고르기(G2)가 한 번 틀려 코드(G1)만 남았다는 뜻이고, 관문을 하나 통과하거나 이 PC의 사용자가 열쇠 변경을 하면 다시 켜집니다.

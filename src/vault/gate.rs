@@ -338,7 +338,7 @@ pub(super) fn public_checks(
     let since_fork = |c: &[u8; 16]| {
         fork && line
             .and_then(|l| l.state.tombs.iter().find(|x| x.credhash == *c))
-            .is_some_and(|x| x.keyid != [0; 4] && !t.key_ids.iter().any(|i| i[..4] == x.keyid))
+            .is_some_and(|x| x.unlisted(&t.key_ids))
     };
     let mut checked = Checked::default();
     // P3 (a).

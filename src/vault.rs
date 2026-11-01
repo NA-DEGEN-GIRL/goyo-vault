@@ -1137,7 +1137,7 @@ impl Prepared {
             Decision::Promote { own: true } => {
                 let h = self.key.header()?;
                 let set = pending.state.hist.first()?.pwid;
-                if h.pw_id[..4] != set {
+                if h.pw_id != set {
                     Some(AUTH_LANDED_LATER)
                 } else {
                     match pending.pw? {
