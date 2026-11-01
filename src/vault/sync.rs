@@ -1018,9 +1018,10 @@ impl Session {
         self.local_rollback
     }
 
-    /// Call every 2 s while the vault list is shown and no dialog is open: it
-    /// merges a new server copy (changing `entries`), retries the upload and
-    /// reads the helper's status. None when there is nothing to show.
+    /// Call every 2 s while the vault list (or the Keys screen, with no flow
+    /// running) is shown and no dialog is open: it merges a new server copy
+    /// (changing `entries`), retries the upload and reads the helper's
+    /// status. None when there is nothing to show.
     pub fn poll_sync(&mut self) -> Option<SyncEvent> {
         // The unlock could not save the vault file under the current key.
         if self.resave_due {

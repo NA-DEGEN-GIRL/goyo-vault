@@ -209,7 +209,7 @@ Status-line messages:
 
 ## 7. Edits and deletions on several PCs
 
-- The helper fetches other PCs' changes every interval (60 seconds by default), and the vault app merges them within 2 seconds on the vault screen. While you edit an entry or a dialog is open, it waits and merges afterwards. If the app is closed, it merges at the next unlock, before checking the OTP.
+- The helper fetches other PCs' changes every interval (60 seconds by default), and the vault app merges them within 2 seconds on the vault screen and in 'Key management'. While you edit an entry, a dialog is open or a key change is under way, it waits and merges afterwards. If the app is closed, it merges at the next unlock, before checking the OTP.
 - This PC's changes are saved to the vault file first and uploaded after. The server never holds something this PC's file lacks.
 - **When two PCs edit the same entry, both versions are kept** and you are told. Delete the one you do not need; that deletion syncs too.
 - An edit on one PC and a deletion on another keep the edit. Deleted on both, it is gone.

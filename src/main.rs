@@ -314,6 +314,16 @@ struct App {
     /// The phased flow under way, from its first phase to its end (spec
     /// §9.2a): the idle limits are at least FLOW_IDLE meanwhile.
     flow: Option<FlowId>,
+    /// Raised by every status line set and every build, so that a flow
+    /// finds out whether it told anything (see told_how_it_ended).
+    told: u64,
+    /// The progress line a flow showed last ("touch your key", a
+    /// registration under way): a flow that ends with it still on the
+    /// status line told nothing of how it ended. Public text only.
+    prompt: String,
+    /// What the Keys screen showed of the session at its last build: a
+    /// poll there rebuilds it only when this changed (see refresh_keys).
+    keys_shown: Option<KeysShown>,
     /// Adopt: the other PC's key file the user chose.
     adopt_source: Option<PathBuf>,
     /// The toggles of Create, Keys and Pair in the security-key build.
@@ -381,7 +391,7 @@ impl Flow {
     }
 }
 /// What the Keys screen shows of a session (spec §9.1).
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct KeysView {
     /// A KF2 key file's key code, "E{epoch} · XXXX-XXXX-XXXX-XXXX".
     code: Option<String>,
@@ -392,7 +402,7 @@ struct KeysView {
 }
 /// What holds key changes, as the Keys screen tells it; the first that
 /// applies, in the order the library refuses a change for them.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 enum Hold {
     #[default]
     None,
@@ -451,6 +461,17 @@ impl KeysView {
             keys: s.keys_overview(),
         }
     }
+}
+/// Everything of the session the Keys screen shows (see App::keys_shown):
+/// its view, the key-file sync line and buttons, and the list's leading
+/// texts (S-SUSPENDED-NEAR, S-ROLLOUT).
+#[derive(PartialEq)]
+struct KeysShown {
+    view: KeysView,
+    #[cfg(feature = "security-key")]
+    sync: Option<vault::KeySyncView>,
+    #[cfg(feature = "security-key")]
+    texts: Vec<String>,
 }
 /// What holds key changes while a changed key file waits for its gate
 /// (spec §5.2); never in the default build.
@@ -563,6 +584,11 @@ const LOGIN_PLAIN_NOTE: &str = "열쇠 파일은 비밀번호로 암호화되어
 const OLDER_QUESTION: &str = "이 금고 파일은 이 열쇠 파일의 예전 열쇠로 저장되어 있습니다.\n다른 PC에서 열쇠를 바꾼 뒤 이 PC에서 처음 여는 것이라면 정상입니다(같은 열쇠 파일을 함께 쓰거나 새 열쇠 파일을 옮겨 온 경우).\n그런 일이 없었다면 예전 열쇠를 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 그 경우 '아니요'를 누르고 백업이나 서버 기록을 확인하세요.\n이 파일을 열고 새 열쇠로 다시 저장할까요?";
 /// S-OLDER answered no: not opened, and not a failed attempt.
 const OLDER_DECLINED: &str = "열지 않았습니다. 백업에서 복원이나 서버 기록을 확인하세요.";
+/// A key or password flow that ended at the user's No or Cancel, with no
+/// line of its own (see told_how_it_ended).
+const FLOW_CANCELLED: &str = "취소했습니다. 바뀐 것은 없습니다.";
+/// The same for a flow whose screen changed under it.
+const FLOW_STOPPED: &str = "화면이 바뀌어 작업을 멈췄습니다. 바뀐 것은 없습니다.";
 /// S-ROTATE (spec §9.3), asked before a password change; the synced
 /// paragraph for a vault that syncs.
 const ROTATE_QUESTION: &str = "열쇠를 바꿉니다. 새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다.\n• 바꾼 뒤에는 예전 열쇠 파일과 예전 비밀번호(또는 뺀 보안 키)로 앞으로 저장하는 내용을 열 수 없습니다. 바꾸기 전에 만든 백업과 서버의 예전 버전은 예전 열쇠 사본으로 계속 열립니다.\n• 0.8 이하 버전에서는 이 금고를 열 수 없게 됩니다.\n• 끝나면 새 열쇠 파일을 백업하세요.\n계속할까요?";
@@ -675,6 +701,9 @@ impl App {
             sync_badge: None,
             serial: 0,
             flow: None,
+            told: 0,
+            prompt: String::new(),
+            keys_shown: None,
             adopt_source: None,
             #[cfg(feature = "security-key")]
             toggles: keys_ui::Toggles::default(),
@@ -1176,7 +1205,16 @@ impl App {
             MessageBeep(0x30);
         }
     }
+    /// A flow's progress line (see `prompt`), in the muted tone; only the
+    /// security-key build's ceremonies show one.
+    #[cfg(feature = "security-key")]
+    fn prompt(&mut self, text: &str) {
+        self.set_status(text, TONE_MUTED);
+        self.prompt.clear();
+        self.prompt.push_str(text);
+    }
     fn set_status(&mut self, text: &str, tone: isize) {
+        self.told = self.told.wrapping_add(1);
         // Wipe the line it replaces, before the buffer may grow.
         self.status.zeroize();
         self.status.push_str(text);
@@ -1313,6 +1351,7 @@ impl App {
             .then(|| self.read(keys_ui::GATE_CODE).ok())
             .flatten()
             .filter(|c| !c.is_empty());
+        self.told = self.told.wrapping_add(1);
         self.clear_controls();
         self.input_failed = false;
         match self.screen {
@@ -1883,6 +1922,7 @@ impl App {
     /// and what holds key changes, with the button that acts on it and the
     /// fields its re-authentication reads.
     fn build_keys(&mut self) {
+        self.keys_shown = Some(self.keys_now());
         let (title, small, body) = (
             self.font_of(|t| t.title()),
             self.font_of(|t| t.small()),
@@ -2037,6 +2077,75 @@ impl App {
             return view;
         }
         self.session.as_ref().map(KeysView::of).unwrap_or_default()
+    }
+    /// What the Keys screen would show of the session now.
+    fn keys_now(&self) -> KeysShown {
+        #[cfg(feature = "security-key")]
+        let texts = {
+            let s = self.session.as_ref();
+            let mut texts = s.map(keys_ui::near_texts).unwrap_or_default();
+            texts.extend(s.and_then(keys_ui::rollout_text));
+            texts
+        };
+        KeysShown {
+            view: self.keys_view(),
+            #[cfg(feature = "security-key")]
+            sync: keys_ui::ks_view(self.session.as_ref()),
+            #[cfg(feature = "security-key")]
+            texts,
+        }
+    }
+    /// The Keys screen after a poll there (see timer): rebuilt only when
+    /// what it shows of the session changed (a key view the helper wrote,
+    /// a server key file it fetched, a merge), keeping what was typed, the
+    /// focus with its caret and the list's scroll position. The status
+    /// line stays as it is, in its tone.
+    fn refresh_keys(&mut self) {
+        if self.screen != Screen::Keys {
+            return;
+        }
+        let now = self.keys_now();
+        if self.keys_shown.as_ref() == Some(&now) {
+            return;
+        }
+        let focused = unsafe { GetFocus() };
+        let focus = self
+            .controls
+            .iter()
+            .find(|(_, h)| **h == focused && focused != 0)
+            .map(|(id, _)| *id);
+        let (mut start, mut end) = (0u32, 0u32);
+        // The list's first visible line (EM_GETFIRSTVISIBLELINE).
+        #[cfg(feature = "security-key")]
+        let top = match self.handle(keys_ui::KEY_LIST) {
+            0 => 0,
+            list => unsafe { SendMessageW(list, 0xce, 0, 0) },
+        };
+        unsafe {
+            if focus.is_some() && self.edits.contains(&focused) {
+                SendMessageW(
+                    focused,
+                    0xb0, // EM_GETSEL
+                    &mut start as *mut u32 as usize,
+                    &mut end as *mut u32 as isize,
+                );
+            }
+            self.status_tone = GetWindowLongPtrW(self.handle(STATUS), -21);
+        }
+        self.rebuild_keeping(&[CURRENT_PASS, OTP, PASS, CONFIRM]);
+        unsafe {
+            #[cfg(feature = "security-key")]
+            if top > 0 {
+                SendMessageW(self.handle(keys_ui::KEY_LIST), 0xb6, 0, top); // EM_LINESCROLL
+            }
+            let h = focus.map_or(0, |id| self.handle(id));
+            if h != 0 {
+                SetFocus(h);
+                if self.edits.contains(&h) {
+                    SendMessageW(h, 0xb1, start as usize, end as isize); // EM_SETSEL
+                }
+            }
+        }
     }
     /// "새 열쇠 파일 받기" (spec §9.1): the chosen file, read-only, its
     /// revision, and this PC's password (and OTP) for [열기], which runs the
@@ -3424,14 +3533,24 @@ impl App {
         // Merges wait while an entry is edited, another screen is shown or a
         // dialog runs, so `editing` and `selected` keep pointing at the
         // entry they meant; the first tick back on the list applies them.
+        // The Keys screen polls too, so its key-file sync line and buttons
+        // follow the server (a key view the helper wrote, another PC's key
+        // file it fetched), but never while a flow runs there: a key
+        // change works on the state its first phase read.
         self.sync_ticks = self.sync_ticks.wrapping_add(1);
+        let polled = match self.screen {
+            Screen::Vault => true,
+            Screen::Keys => self.flow.is_none(),
+            _ => false,
+        };
         if self.sync_ticks.is_multiple_of(SYNC_TICKS)
             && self.session.is_some()
-            && self.screen == Screen::Vault
+            && polled
             && !self.closing
             && !in_modal()
         {
             self.poll_sync();
+            self.refresh_keys();
         }
         if ticking && self.screen == Screen::Vault {
             let (x, y, w, h) = HINT;
@@ -3440,12 +3559,14 @@ impl App {
             }
         }
     }
-    /// One look at the sync folder from the vault list (see timer). A merge
-    /// can move or replace entries: the selection follows its entry by ID,
-    /// or the entry that replaced it by an edit on another PC. The 15-second
-    /// view and copy permission end with any change to the list, since a
-    /// merge can also put other text under the same ID. Polling is not use
-    /// (`activity` stays) and its notices never beep.
+    /// One look at the sync folder from the vault list or the Keys screen
+    /// (see timer). A merge can move or replace entries: the selection
+    /// follows its entry by ID, or the entry that replaced it by an edit on
+    /// another PC. The 15-second view and copy permission end with any
+    /// change to the list, since a merge can also put other text under the
+    /// same ID. Only the vault list is rebuilt for it: the Keys screen keeps
+    /// what was typed (see refresh_keys). Polling is not use (`activity`
+    /// stays) and its notices never beep.
     fn poll_sync(&mut self) {
         let Some(s) = self.session.as_mut() else {
             return;
@@ -3483,6 +3604,8 @@ impl App {
             self.reveal_until = None;
             self.page = 0;
             self.reset_copy();
+        }
+        if event.list_changed && self.screen == Screen::Vault {
             if let Some((text, tone)) = line {
                 self.status.zeroize();
                 self.status.push_str(&text);
@@ -4465,6 +4588,16 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
 /// offer itself.
 fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     let screen = APP.with(|cell| cell.try_borrow().ok()?.as_ref().map(|a| a.screen));
+    let start = tells_end(screen)
+        .then(|| {
+            APP.with(|cell| {
+                let mut b = cell.try_borrow_mut().ok()?;
+                let a = b.as_mut()?;
+                a.prompt.clear();
+                Some((a.serial, a.told))
+            })
+        })
+        .flatten();
     #[cfg(feature = "security-key")]
     let theirs = APP.with(|cell| {
         cell.try_borrow()
@@ -4494,11 +4627,55 @@ fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         }
     });
     drain_pending(h);
+    if let (Ok(()), Some(start)) = (&result, start) {
+        told_how_it_ended(start);
+    }
     // Raised only by the unlock just made.
     if APP.with(|cell| cell.try_borrow_mut().is_ok()) && SYNC_OFFER.with(|f| f.replace(false)) {
         offer_sync(h);
     }
     result
+}
+/// The screens whose flows say how they ended (see told_how_it_ended):
+/// the key changes, an adopt and a password change, and the security-key
+/// build's pairing and removals. A login, Create and Restore have lines
+/// of their own.
+fn tells_end(screen: Option<Screen>) -> bool {
+    match screen {
+        Some(Screen::Keys | Screen::Adopt | Screen::Password) => true,
+        #[cfg(feature = "security-key")]
+        Some(Screen::Pair | Screen::LostKey | Screen::KeyRemove) => true,
+        _ => false,
+    }
+}
+/// The status line of a flow that ended with no line of its own: nothing
+/// told since it started (`start`: the serial and `told` then), or only its
+/// last progress line still shown. Every failure, every refusal and every
+/// write tells its own line, and a lock tells its own, so a flow that still
+/// stands ended at the user's No or Cancel (FLOW_CANCELLED); one whose
+/// screen changed under it stopped (FLOW_STOPPED). Neither wrote anything.
+/// A closing window gets no line.
+fn told_how_it_ended(start: (u64, u64)) {
+    let (serial, told) = start;
+    APP.with(|cell| {
+        let Ok(mut b) = cell.try_borrow_mut() else {
+            return;
+        };
+        let Some(a) = b.as_mut() else {
+            return;
+        };
+        let prompted = !a.prompt.is_empty() && a.status.as_str() == a.prompt;
+        a.prompt.clear();
+        if a.closing || quitting() || a.session.is_none() || (a.told != told && !prompted) {
+            return;
+        }
+        let text = if a.serial == serial {
+            FLOW_CANCELLED
+        } else {
+            FLOW_STOPPED
+        };
+        a.set_status(text, TONE_MUTED);
+    });
 }
 /// SUBMIT on Create, Restore and OtpBackup (spec §9.2a, S45-1 #13, S45-2
 /// #17): the same command as before, under one borrow, as a flow; the
@@ -5475,7 +5652,7 @@ fn touch_step_or(
         if a.closing || a.serial != serial || a.screen != screen || quitting() {
             return None;
         }
-        a.status(status);
+        a.prompt(status);
         Some(())
     });
     standing.ok_or(None)?;
@@ -15103,6 +15280,139 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir2);
         }
 
+        /// [키 추가] never ends without a word (spec §9.2a): Windows' cancel
+        /// of the first touch and of the registration each leave their line;
+        /// the user's Cancel of S-REAUTH-AGAIN after an optional pairing
+        /// touch failed says the flow was cancelled, not the touch's failure;
+        /// a lock during S-ADD-PAIR leaves the lock's line. The other key
+        /// changes' No (re-seed, keys off) say so too. Nothing is written.
+        #[test]
+        fn a_key_flow_that_ends_early_says_how() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let dir = test_dir("ceremony-add-ends");
+            let pass = "synthetic add key ends password";
+            let clock = Arc::new(AtomicU64::new(1_000_000));
+            let fake = Arc::new(Fake::new(Some(clock.clone())));
+            let (s, devices) = four_keys(&fake, &dir, pass);
+            let (vault, key) = (s.path.clone(), s.key_path.clone());
+            drop(s);
+            let auth = Scripted::new(fake.clone());
+            let h = window("GoyoCeremonyAddEnds", &vault, &key, auth.clone(), &clock);
+            let guard = Window(h);
+            auth.plan(&[Some(devices[0])]);
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            with_app(|a| {
+                assert!(a.session.is_some(), "{}", *a.status);
+                a.command(CHANGE, 0).unwrap();
+                assert!(a.screen == Screen::Keys);
+            });
+            let before = std::fs::read(&key).unwrap();
+            let unchanged = || {
+                assert_eq!(std::fs::read(&key).unwrap(), before);
+                with_app(|a| {
+                    let o = a.session.as_ref().unwrap().keys_overview();
+                    assert_eq!(numbers(&o), [1, 2, 3, 4]);
+                    assert!(a.screen == Screen::Keys && a.flow.is_none());
+                });
+            };
+            let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+
+            // Windows cancels the first touch.
+            set(h, CURRENT_PASS, pass);
+            auth.plan(&[None]);
+            press(h, keys_ui::KEY_ADD);
+            assert!(status().starts_with(fido::CANCELLED), "{}", status());
+            unchanged();
+
+            // Windows cancels the registration, after the touch.
+            set(h, CURRENT_PASS, pass);
+            auth.plan(&[Some(devices[0]), None]);
+            press(h, keys_ui::KEY_ADD);
+            assert!(status().starts_with(fido::CANCELLED), "{}", status());
+            assert_eq!(auth.left(), 0);
+            unchanged();
+
+            // The new key registers; the first pairing touch meets no key,
+            // its line shows; the second S-ADD-PAIR comes after the Reauth's
+            // life, and S-REAUTH-AGAIN is cancelled.
+            let k5 = fake.plug(Device::default());
+            set(h, CURRENT_PASS, pass);
+            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), Some(k5), None]);
+            let pairs = std::rc::Rc::new(Cell::new(0));
+            let late = clock.clone();
+            let counted = pairs.clone();
+            every_answer(&asked, move |text| {
+                if text == keys_ui::ADD_PAIR {
+                    counted.set(counted.get() + 1);
+                    if counted.get() == 2 {
+                        late.fetch_add(
+                            vault::REAUTH_MAX.as_millis() as u64 + 1000,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                    return true;
+                }
+                false
+            });
+            let inputs = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let record = inputs.clone();
+            every_input(move |_, text, _| {
+                record.borrow_mut().push(text.to_owned());
+                InputAnswer::Cancel(2)
+            });
+            press(h, keys_ui::KEY_ADD);
+            stop_answers();
+            assert_eq!(pairs.get(), 2, "{}", status());
+            assert_eq!(
+                *inputs.borrow(),
+                [fill(keys_ui::REAUTH_AGAIN_TOUCH, &[&1])],
+                "{}",
+                status()
+            );
+            assert_eq!(status(), FLOW_CANCELLED);
+            unchanged();
+
+            // A lock while S-ADD-PAIR is open: the lock's line stays.
+            let k6 = fake.plug(Device::default());
+            set(h, CURRENT_PASS, pass);
+            auth.plan(&[Some(devices[0]), Some(k6), Some(k6), Some(k6)]);
+            every_answer(&asked, |text| {
+                if text == keys_ui::ADD_PAIR {
+                    with_app(|a| a.lock("synthetic lock", true));
+                }
+                false
+            });
+            press(h, keys_ui::KEY_ADD);
+            stop_answers();
+            assert_eq!(status(), "synthetic lock");
+            assert_eq!(std::fs::read(&key).unwrap(), before);
+            auth.plan(&[Some(devices[0])]);
+            set(h, PASS, pass);
+            press(h, SUBMIT);
+            with_app(|a| a.command(CHANGE, 0).unwrap());
+
+            // A No to S-RESEED, and to S-OFF: nothing is touched.
+            for (id, question) in [
+                (keys_ui::KEY_RESEED, keys_ui::RESEED),
+                (keys_ui::KEY_OFF, keys_ui::OFF),
+            ] {
+                asked.borrow_mut().clear();
+                set(h, CURRENT_PASS, pass);
+                every_answer(&asked, |_| false);
+                let seen = fake.seen().len();
+                press(h, id);
+                stop_answers();
+                assert_eq!(*asked.borrow(), [question]);
+                assert_eq!(fake.seen().len(), seen);
+                assert_eq!(status(), FLOW_CANCELLED);
+                unchanged();
+            }
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
         /// Marks, in this PC's anchor (`pbad`), the pair records of `pairs`
         /// (owner, target) broken, as a Reauth that could not open them
         /// would have.
@@ -16332,6 +16642,122 @@ mod tests {
             with_app(|a| {
                 assert!(!a.session.as_ref().unwrap().auto_apply());
                 assert_eq!(*a.status, keys_ui::AUTO_OFF_DONE);
+            });
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir_a);
+            let _ = std::fs::remove_dir_all(&dir_b);
+        }
+        /// The Keys screen follows the server while it is shown (spec §9.1):
+        /// A adds a key, and B's next poll there offers [받기…] in place of
+        /// [열쇠 파일 동기화 끄기…], keeping the password typed, the focus and
+        /// its caret. A poll that changes nothing rebuilds nothing; a flow
+        /// under way or an open dialog holds the poll back, and the next
+        /// tick after it shows the change (here the server refusing this
+        /// PC's line).
+        #[test]
+        fn the_keys_screen_follows_the_server_and_keeps_what_was_typed() {
+            let _korean = KoreanAfter::hold();
+            crypto::set_kdf_profile(crypto::KdfProfile::Test);
+            let (dir_a, dir_b, fake, devices, mut a, (_va, ka), (vb, _kb), auth, guard, _clock) =
+                two_on_window("keys-poll", 2, true);
+            let h = guard.0;
+            login_b(h, &dir_b, &auth, devices[1]);
+            with_app(|b| {
+                assert!(b.session.is_some(), "{}", *b.status);
+                b.show(Screen::Keys);
+                b.build();
+                assert_ne!(b.handle(keys_ui::KEYSYNC_OFF), 0);
+                assert_eq!(b.handle(keys_ui::KEY_ACCEPT), 0);
+            });
+            let typed = "typed while the server changes";
+            set(h, CURRENT_PASS, typed);
+            with_app(|b| unsafe {
+                SetFocus(b.handle(CURRENT_PASS));
+                SendMessageW(b.handle(CURRENT_PASS), 0xb1, 2, 5); // EM_SETSEL
+            });
+            // A adds key 3, and B's helper fetched A's key file.
+            vault::set_anchor_dir(Some(dir_a.join("anchor")));
+            let id = vault::keyfile::parse(&std::fs::read(&ka).unwrap())
+                .unwrap()
+                .vault_id;
+            let d3 = fake.plug(Device::with_pin());
+            fake.touch(Some(d3));
+            let key3 = register(&*fake, &id, 3, 0, true, Vec::new()).unwrap();
+            let t = touched(&fake, devices[0], &a, 1);
+            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            assert_eq!(
+                a.rekey(
+                    r,
+                    Vec::new(),
+                    vault::Change::AddKey(key3),
+                    vault::Consent::default(),
+                    true
+                ),
+                Ok(vault::Rekeyed::Done)
+            );
+            let a_key = std::fs::read(&ka).unwrap();
+            key_view(&vb, 2, &a_key);
+            vault::set_anchor_dir(Some(dir_b.join("anchor")));
+            let sel = |b: &App| unsafe {
+                let (mut start, mut end) = (0u32, 0u32);
+                SendMessageW(
+                    b.handle(CURRENT_PASS),
+                    0xb0, // EM_GETSEL
+                    &mut start as *mut u32 as usize,
+                    &mut end as *mut u32 as isize,
+                );
+                (start, end)
+            };
+            let field = with_app(|b| {
+                b.sync_ticks = 0;
+                tick(b, SYNC_TICKS);
+                assert!(b.screen == Screen::Keys, "{}", *b.status);
+                assert_ne!(b.handle(keys_ui::KEY_ACCEPT), 0, "{}", *b.status);
+                assert_eq!(b.handle(keys_ui::KEYSYNC_OFF), 0);
+                assert_eq!(*b.read(CURRENT_PASS).unwrap(), typed);
+                assert_eq!(unsafe { GetFocus() }, b.handle(CURRENT_PASS));
+                assert_eq!(sel(b), (2, 5));
+                b.handle(CURRENT_PASS)
+            });
+            // Nothing changed: nothing is rebuilt.
+            with_app(|b| {
+                tick(b, SYNC_TICKS);
+                assert_eq!(b.handle(CURRENT_PASS), field);
+            });
+            // The server stops serving this PC's key line: held back during
+            // a flow and while a dialog is open, shown at the next tick.
+            let dir = syncfile::sync_dir(&vb).unwrap();
+            let h3 = vault::keyfile::parse(&a_key).unwrap();
+            let mut view = syncfile::KeyView {
+                line: 1,
+                seq: 2,
+                ..Default::default()
+            };
+            view.record =
+                syncfile::render_record_header(syncfile::RecordKind::Key, false, 0, h3.epoch)
+                    .to_vec();
+            view.record.extend_from_slice(&a_key);
+            syncfile::replace_file(
+                &dir.join(syncfile::KEY_VIEW),
+                &syncfile::render_key_view(&view),
+            )
+            .unwrap();
+            let shown = |b: &App| keys_ui::ks_view(b.session.as_ref()).unwrap();
+            with_app(|b| {
+                assert!(!shown(b).no_key_ops);
+                b.flow = Some(keys_ui::KEY_ADD);
+                tick(b, 2 * SYNC_TICKS);
+                assert!(!shown(b).no_key_ops);
+                assert_eq!(b.handle(CURRENT_PASS), field);
+                b.flow = None;
+                modal(|| tick(b, 2 * SYNC_TICKS));
+                assert!(!shown(b).no_key_ops);
+                assert_eq!(b.handle(CURRENT_PASS), field);
+                tick(b, SYNC_TICKS);
+                assert!(shown(b).no_key_ops);
+                assert_ne!(b.handle(CURRENT_PASS), field);
+                assert_eq!(*b.read(CURRENT_PASS).unwrap(), typed);
+                assert!(b.screen == Screen::Keys && b.session.is_some());
             });
             drop(guard);
             let _ = std::fs::remove_dir_all(&dir_a);

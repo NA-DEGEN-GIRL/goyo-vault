@@ -317,8 +317,15 @@ impl Session {
         self.key_file.magic()
     }
     /// §7.9's preconditions of turning key-file sync on (or of the
-    /// re-upload) that the session decides, before any question.
-    pub fn keysync_ready(&self) -> Result<()> {
+    /// re-upload) that the session decides, before any question. The key
+    /// view is read again first: the last poll may be up to 2 s old (and
+    /// none runs while a dialog is open), so it may still hold an answer
+    /// the server has since changed (a --key-sync line just added).
+    pub fn keysync_ready(&mut self) -> Result<()> {
+        if let Some(mut link) = self.sync.take() {
+            self.read_keys(&mut link);
+            self.sync = Some(link);
+        }
         self.keysync_on_check().map(|_| ())
     }
     /// [받지 않기…] after S-GATE-DROP's yes (spec §7.15a): the pending

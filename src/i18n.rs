@@ -610,6 +610,14 @@ pub const EN: &[(&str, &str)] = &[
         "Not opened. Restore from a backup or check the server history.",
     ),
     (
+        "취소했습니다. 바뀐 것은 없습니다.",
+        "Cancelled. Nothing was changed.",
+    ),
+    (
+        "화면이 바뀌어 작업을 멈췄습니다. 바뀐 것은 없습니다.",
+        "Stopped because the screen changed. Nothing was changed.",
+    ),
+    (
         "예비 기기에 등록한 뒤 '닫기'를 누르세요.",
         "Enroll the spare device, then press 'Close'.",
     ),

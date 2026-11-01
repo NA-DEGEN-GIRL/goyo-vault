@@ -2006,7 +2006,7 @@ fn renewed(
         };
         match ask_input(h, InputKind::Code(""), &text, &[ok, CANCEL_BUTTON]) {
             InputAnswer::Code(typed) => code = Some((typed, otp::now()?)),
-            _ => return Ok(None),
+            _ => return Ok(cancelled(t)),
         }
     } else if let Some(n) = key {
         let text = fill(REAUTH_AGAIN_TOUCH, &[&n]);
@@ -2015,7 +2015,7 @@ fn renewed(
             ask_input(h, kind, &text, &[ok, CANCEL_BUTTON]),
             InputAnswer::Accept { .. }
         ) {
-            return Ok(None);
+            return Ok(cancelled(t));
         }
     }
     if !standing(t.screen, t.serial) {
@@ -2034,14 +2034,31 @@ fn renewed(
     };
     reauth_as(h, t, otp, touch.as_ref())
 }
+/// The user's Cancel ended the flow, which writes nothing: the status line
+/// says so, also over a line an earlier step told (an optional touch that
+/// failed), which must not read as how the flow ended. A flow that no
+/// longer stands keeps its line (a lock's). Always None.
+fn cancelled<T>(t: &Typed) -> Option<T> {
+    APP.with(|cell| {
+        if let Ok(mut b) = cell.try_borrow_mut()
+            && let Some(a) = b.as_mut()
+            && !a.closing
+            && (a.screen, a.serial) == (t.screen, t.serial)
+        {
+            a.set_status(super::FLOW_CANCELLED, TONE_MUTED);
+        }
+    });
+    None
+}
 /// Shows `text` on the status line of a flow that still stands, before a
-/// ceremony.
+/// ceremony: a progress line, which a flow that ends with it still shown
+/// replaces by how it ended (see told_how_it_ended).
 fn say(h: Hwnd, text: &str) {
     APP.with(|cell| {
         if let Ok(mut b) = cell.try_borrow_mut()
             && let Some(a) = b.as_mut()
         {
-            a.status(text);
+            a.prompt(text);
         }
     });
     unsafe {
@@ -4258,7 +4275,7 @@ fn touch_by_plan(
         match answer {
             Suspend::Continue => consent.extend(&named),
             Suspend::TouchToo => planned.extend(&named),
-            Suspend::Back => return Ok(None),
+            Suspend::Back => return Ok(cancelled(t)),
         }
         if !standing(t.screen, t.serial) {
             return Ok(None);
@@ -4292,7 +4309,7 @@ fn touch_by_plan(
         match ask_suspend(h, keys, &lacking, &full, true) {
             Suspend::Continue => consent.extend(&lacking),
             Suspend::TouchToo => planned.extend(&lacking),
-            Suspend::Back => return Ok(None),
+            Suspend::Back => return Ok(cancelled(t)),
         }
     }
     // The planned extra touches, one ceremony each. The repair's own touch
@@ -4338,7 +4355,7 @@ fn touch_by_plan(
             }
             match ask_suspend(h, keys, &lacking, &full, true) {
                 Suspend::Continue => consent.extend(&lacking),
-                _ => return Ok(None),
+                _ => return Ok(cancelled(t)),
             }
         }
     }
@@ -6165,7 +6182,7 @@ fn keysync_on_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     let (t, ()) = take_with(h, id, &change, |a, t| {
         t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
         transport_reported()?;
-        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        let s = a.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
         s.keysync_ready()
     })?;
     let question = if id == KEY_REUPLOAD {
