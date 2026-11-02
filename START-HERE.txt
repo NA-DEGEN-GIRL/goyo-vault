@@ -1,4 +1,4 @@
-Goyo Vault 0.9.0
+Goyo Vault 0.10.0
 
 1. Extract the whole ZIP to a folder only you use that is not synced
    (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
