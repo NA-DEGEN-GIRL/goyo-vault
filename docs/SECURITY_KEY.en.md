@@ -40,7 +40,7 @@ To switch to a keyless build, first use **Turn off keys** in the security-key bu
 - **NFC:** unplug a key you will hold to an NFC reader **before** the Windows window opens. If it is plugged into USB when the window opens, Windows uses that connection and the reader gets no answer. Over NFC too, type the PIN on screen first, then hold the key to the reader.
 - **Register 2 or more, together, on one PC.** Keys registered together **pair** with each other (below). With only one key, every unlock shows a red warning.
 - **Give every key its own PIN.** With one PIN on every key, whoever holds a lost key and its PIN can clone another key just by getting hold of it briefly.
-- **Write the key number on each key.** The app calls them only 'security key 1, 2, …'.
+- **Write the key number on each key.** The app calls them only 'security key 1, 2, …'. Numbers are never reused, except that turning keys off and on again starts over at 1 (after an off, no earlier registration opens anything, so relabel the keys).
 - After registering, make a **Back up key**. If the key file is lost, the vault does not open even with the security keys and the password.
 
 ### Turning keys on later, for a vault made without them

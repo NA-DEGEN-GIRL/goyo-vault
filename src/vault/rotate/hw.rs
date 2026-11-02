@@ -503,6 +503,14 @@ fn slot_of(key: &NewKey, number: u8, epoch: u64, added_by: [u8; 16]) -> SlotPubl
         key.cred_id.clone(),
     )
 }
+/// Where the numbers of keys added now start: the key file's `next`, or 1
+/// when it has no live key (password-only, keys turned off). No
+/// registration of a key file without keys opens anything any more, and
+/// tombstones name credentials, not numbers, so after an off the numbering
+/// starts over at 1.
+fn first_number(h: Option<&KeyHeader>) -> u8 {
+    h.filter(|h| !h.slots.is_empty()).map_or(1, |h| h.next)
+}
 /// The number of a key added now (spec §5.5 R1): `next`, or once numbers
 /// would pass 255 the lowest free one; and `next` after it.
 fn new_number(next: u8, used: &[u8]) -> Option<(u8, u8)> {
@@ -536,7 +544,7 @@ fn new_slots(
     let mut used: Vec<u8> = h
         .map(|h| h.slots.iter().map(|s| s.number).collect())
         .unwrap_or_default();
-    let mut next = h.map_or(1, |h| h.next);
+    let mut next = first_number(h);
     let mut out: Vec<SlotPublic> = Vec::with_capacity(keys.len());
     for key in keys {
         let (number, after) = new_number(next, &used).ok_or(NOT_PLANNED)?;
@@ -831,7 +839,7 @@ impl Session {
         let mut used: Vec<u8> = h
             .map(|h| h.slots.iter().map(|s| s.number).collect())
             .unwrap_or_default();
-        let mut next = h.map_or(1, |h| h.next);
+        let mut next = first_number(h);
         let mut numbers = Vec::with_capacity(n);
         for _ in 0..n {
             let (number, after) = new_number(next, &used).ok_or(NOT_PLANNED)?;
@@ -3628,6 +3636,24 @@ mod tests {
         drop(s);
         // The key file from before keys on opens nothing keys off wrote.
         assert!(!old_opens(&fs::read(pc.vault()).unwrap()), "{case}");
+        // Keys on again with new keys: the numbering starts over at 1.
+        let mut s = login(&pc, right).unwrap();
+        assert_eq!(s.add_plan(2).unwrap().0, [1, 2], "{case}");
+        let new: Vec<NewKey> = (3..=4).map(|k| keys.register(&id, k, false)).collect();
+        let r = s.reauth(right, None).unwrap();
+        let change = Change::KeysOn {
+            pin: false,
+            keys: new,
+            new_password: None,
+        };
+        assert_eq!(
+            s.rekey(r, Vec::new(), change, Consent::default(), false),
+            Ok(Rekeyed::Done),
+            "{case}"
+        );
+        let again = header(&pc);
+        assert_eq!((numbers(&again), again.next), (vec![1, 2], 3), "{case}");
+        assert_eq!(again.tombstones.len(), 2, "{case}");
     }
 
     /// Plants in place of `s`'s key file (three keys) one at the next epoch
