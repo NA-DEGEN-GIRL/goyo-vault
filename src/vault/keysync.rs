@@ -481,10 +481,8 @@ impl Session {
         {
             return KeyClass::Refused(USER_DROPPED);
         }
-        // E1.
-        if t.otp() != own.otp() {
-            return KeyClass::Refused(gate::UNEXPLAINED);
-        }
+        // No E1: an old OTP vault's flag decides nothing since the OTP was
+        // removed, and every key change clears it (gate.rs, OTP_BIT).
         let superseded = self.anchor.lines.gate.as_ref().is_some_and(|g| {
             g.state == GateState::Superseded && (g.epoch, g.tag) == (state.epoch, state.tag)
         });
@@ -777,7 +775,7 @@ impl Session {
         if self.anchor.lines.gate.as_ref().is_some_and(named) {
             return;
         }
-        let Ok(now) = crate::otp::now() else {
+        let Ok(now) = crate::clock::now() else {
             return;
         };
         let _ = self.anchor_strict(&mut |lines| {
@@ -1634,7 +1632,7 @@ pub enum Rollout {
 }
 /// A helper with `features=keys` wrote its status within 10 minutes.
 fn helper_fresh(link: &SyncLink) -> bool {
-    let now = crate::otp::now().unwrap_or(0);
+    let now = crate::clock::now().unwrap_or(0);
     link.status.is_some_and(|s| {
         s.keys
             && s.heartbeat.saturating_add(HELPER_FRESH) >= now

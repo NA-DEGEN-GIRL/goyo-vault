@@ -115,27 +115,21 @@ fn ks_of(pc: &Pc, id: &[u8; 16]) -> Ks {
 }
 /// A second PC of `a`'s vault (its first unlock confirmed with the code)
 /// that syncs: its folder, with a helper status that does key-file sync.
-fn synced_pc(a: &Pc, codes: &mut Codes, keys: &Keys, number: u8) -> Pc {
-    let b = second_pc(a, codes, keys, number);
+fn synced_pc(a: &Pc, keys: &Keys, number: u8) -> Pc {
+    let b = second_pc(a, keys, number);
     fs::create_dir(dir(&b)).unwrap();
     status(&b);
     b
 }
 /// A fresh helper status with `features=keys` in `pc`'s sync folder.
 fn status(pc: &Pc) {
-    let now = otp::now().unwrap();
+    let now = crate::clock::now().unwrap();
     let bytes = syncfile::render_status(now, now, syncfile::SyncState::Ok);
     syncfile::replace_file(&dir(pc).join(syncfile::STATUS), &bytes).unwrap();
 }
 /// `change` with a Reauth touched with key `number`, any gate answered.
-fn rekey(
-    s: &mut Session,
-    codes: &mut Codes,
-    keys: &Keys,
-    number: u8,
-    change: Change,
-) -> Result<Rekeyed> {
-    let r = reauth(s, OLD, codes, keys, number)?;
+fn rekey(s: &mut Session, keys: &Keys, number: u8, change: Change) -> Result<Rekeyed> {
+    let r = reauth(s, OLD, keys, number)?;
     s.rekey(r, Vec::new(), change, Consent::default(), true)
 }
 /// Polls until nothing changes, and every notice on the way.
@@ -154,14 +148,13 @@ fn polls(s: &mut Session) -> Vec<SyncNotice> {
 /// write.
 fn take_server(
     s: &mut Session,
-    codes: &mut Codes,
     keys: &Keys,
     number: u8,
     gate: impl FnOnce(&AdoptCheck, &Session) -> GatePass,
 ) -> Result<Adopted> {
     let (f, seq) = s.server_key_file().unwrap();
     let check = s.adopt_check(&f, Source::Server { seq })?;
-    let r = reauth(s, OLD, codes, keys, number)?;
+    let r = reauth(s, OLD, keys, number)?;
     let t = touch_other(&f, keys, number);
     let opened = s.adopt_open_with(&r, &f, None, Some(&t))?;
     let pass = gate(&check, s);
@@ -186,22 +179,22 @@ fn uploads(pc: &Pc, s: &mut Session, title: &str) -> bool {
 #[test]
 fn key_file_sync_goes_on_and_off_between_two_pcs() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     // goyo-sync has not looked at the server yet.
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn).err(),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn).err(),
         Some(KEYSYNC_ASKING)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     let before = header(&a);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     let on = header(&a);
@@ -223,7 +216,7 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
 
     // B: another PC's "on" is a policy change, behind G1.
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     let told = polls(&mut sb);
     assert!(told.contains(&SyncNotice::GatePending), "{told:?}");
     assert_eq!(
@@ -241,11 +234,11 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
     assert!(kreq(&b).is_none());
     // A wrong code takes nothing; A's code takes the file.
     assert_eq!(
-        take_server(&mut sb, &mut codes, &keys, 2, code(Code([7; 8]))).err(),
+        take_server(&mut sb, &keys, 2, code(Code([7; 8]))).err(),
         Some(GATE_CODE_WRONG)
     );
     let shown = code_of(&sa);
-    take_server(&mut sb, &mut codes, &keys, 2, code(shown)).unwrap();
+    take_server(&mut sb, &keys, 2, code(shown)).unwrap();
     assert_eq!(header(&b).state(), on.state());
     assert!(b.lines(&id).gate.is_none());
     assert_eq!(ks_of(&b, &id), Ks::None);
@@ -257,10 +250,7 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
     // A's password change: a GOYOKS01 result, uploaded over the server's
     // file of A's own history (Stale), with that record as its base.
     a.here();
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     let changed = header(&a);
     assert_eq!(sa.server_class(), Some(KeyClass::Stale));
     let bytes = kreq(&a).unwrap();
@@ -294,7 +284,7 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
     let (f, seq) = sb.server_key_file().unwrap();
     let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
     assert_eq!(check.class, AdoptClass::Successor);
-    let r = reauth(&mut sb, OLD, &mut codes, &keys, 2).unwrap();
+    let r = reauth(&mut sb, OLD, &keys, 2).unwrap();
     let t = touch_other(&f, &keys, 2);
     let opened = sb.adopt_open_with(&r, &f, Some(NEW), Some(&t)).unwrap();
     let plan = sb
@@ -319,7 +309,7 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
     // recorded, the CUT names the record A saw.
     a.here();
     assert_eq!(
-        rekey_new(&mut sa, &mut codes, &keys, Change::KeySyncOff),
+        rekey_new(&mut sa, &keys, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     let off = header(&a);
@@ -355,8 +345,8 @@ fn key_file_sync_goes_on_and_off_between_two_pcs() {
     set_kdf_profile(KdfProfile::Real);
 }
 /// `change` with A's new password (after its password change).
-fn rekey_new(s: &mut Session, codes: &mut Codes, keys: &Keys, change: Change) -> Result<Rekeyed> {
-    let r = reauth(s, NEW, codes, keys, 1)?;
+fn rekey_new(s: &mut Session, keys: &Keys, change: Change) -> Result<Rekeyed> {
+    let r = reauth(s, NEW, keys, 1)?;
     s.rekey(r, Vec::new(), change, Consent::default(), true)
 }
 
@@ -368,7 +358,7 @@ fn rekey_new(s: &mut Session, codes: &mut Codes, keys: &Keys, change: Change) ->
 #[test]
 fn the_request_table_writes_only_what_it_derives() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
     let mut server = KeyServer::default();
     server.pass(&a, &id);
@@ -378,7 +368,7 @@ fn the_request_table_writes_only_what_it_derives() {
     polls(&mut sa);
     assert!(kreq(&a).is_none(), "row 2");
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     let put = kreq(&a).unwrap();
@@ -413,13 +403,13 @@ fn the_request_table_writes_only_what_it_derives() {
 #[test]
 fn an_off_with_no_view_waits_for_its_pin() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -429,14 +419,14 @@ fn an_off_with_no_view_waits_for_its_pin() {
     fs::remove_file(dir(&a).join(KEY_VIEW)).unwrap();
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOff),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     assert_eq!(ks_of(&a, &id), Ks::OffUnknown);
     assert!(kreq(&a).is_none());
     // Turning it on again waits for the off.
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn).err(),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn).err(),
         Some(KEYSYNC_OFF_PENDING)
     );
     // The first view pins it to the record on top: here a top the server
@@ -457,7 +447,7 @@ fn an_off_with_no_view_waits_for_its_pin() {
     assert!(kreq(&a).is_none());
     // On again: above the cut's floor (the ended record's epoch).
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     let again = header(&a);
@@ -477,7 +467,7 @@ fn an_off_with_no_view_waits_for_its_pin() {
 #[test]
 fn a_cut_floor_counts_only_within_its_bound() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
     let epoch = sa.key_state().epoch;
     let plant = |floor: u64| {
@@ -491,13 +481,13 @@ fn a_cut_floor_counts_only_within_its_bound() {
     plant(epoch + EPOCH_SILENT + 1);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn).err(),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn).err(),
         Some(KEYSYNC_FLOOR)
     );
     plant(epoch + EPOCH_SILENT);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     assert_eq!(header(&a).epoch, epoch + EPOCH_SILENT + 1);
@@ -514,36 +504,30 @@ fn a_cut_floor_counts_only_within_its_bound() {
 #[test]
 fn two_changes_apart_fork_on_the_server() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     let mut server = KeyServer::default();
     a.here();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
     let shown = code_of(&sa);
-    take_server(&mut sb, &mut codes, &keys, 2, code(shown)).unwrap();
+    take_server(&mut sb, &keys, 2, code(shown)).unwrap();
     polls(&mut sb);
     // Both change the password from the same state.
     a.here();
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     b.here();
-    assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, password(THIRD)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sb, &keys, 2, password(THIRD)), Ok(Rekeyed::Done));
     server.pass(&a, &id);
     server.pass(&b, &id);
     assert_eq!(kview(&b, &id).unwrap().outcome, KeyOutcome::Conflict);
@@ -556,7 +540,7 @@ fn two_changes_apart_fork_on_the_server() {
         Some(super::super::super::super::Gate::KeyFork)
     );
     // The fork's way out on this PC: turn key-file sync off.
-    let r = reauth(&mut sb, THIRD, &mut codes, &keys, 2).unwrap();
+    let r = reauth(&mut sb, THIRD, &keys, 2).unwrap();
     assert_eq!(
         sb.rekey(r, Vec::new(), Change::KeySyncOff, Consent::default(), true),
         Ok(Rekeyed::Done)
@@ -567,29 +551,29 @@ fn two_changes_apart_fork_on_the_server() {
 
 /// A and B both GOYOKS01 at A's "on" (B took it with A's code).
 #[allow(clippy::type_complexity)]
-fn both_on(n: u8) -> (Pc, Session, Pc, Session, Codes, Keys, KeyServer, [u8; 16]) {
+fn both_on(n: u8) -> (Pc, Session, Pc, Session, Keys, KeyServer, [u8; 16]) {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, n, false, true, true);
+    let (mut sa, keys) = create_with(&a, n, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
     let shown = code_of(&sa);
-    take_server(&mut sb, &mut codes, &keys, 2, code(shown)).unwrap();
+    take_server(&mut sb, &keys, 2, code(shown)).unwrap();
     polls(&mut sb);
     assert_eq!(sb.server_class(), Some(KeyClass::Equal));
-    (a, sa, b, sb, codes, keys, server, id)
+    (a, sa, b, sb, keys, server, id)
 }
 fn has(s: &Session, secret: &str) -> bool {
     secrets(s).iter().any(|t| t == secret)
@@ -601,9 +585,9 @@ fn has(s: &Session, secret: &str) -> bool {
 #[test]
 fn a_gated_candidate_holds_the_copy_from_the_unlock_on() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
@@ -613,7 +597,7 @@ fn a_gated_candidate_holds_the_copy_from_the_unlock_on() {
     let out = fs::read(dir(&a).join(OUTGOING)).unwrap();
     let (_, copy) = syncfile::parse_outgoing(&out).unwrap();
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -622,7 +606,7 @@ fn a_gated_candidate_holds_the_copy_from_the_unlock_on() {
     server.pass(&b, &id);
     let incoming = syncfile::render_incoming(1, copy).unwrap();
     syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     assert!(b.lines(&id).gate.is_none(), "no line stored yet");
     assert!(!has(&sb, "from a"), "merged at the unlock");
     let told = polls(&mut sb);
@@ -638,14 +622,13 @@ fn a_gated_candidate_holds_the_copy_from_the_unlock_on() {
 /// so it holds merges and uploads and is told.
 #[test]
 fn a_failed_pick_then_the_same_file_from_the_server_is_pending() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(3);
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     let removal = fs::read(a.key()).unwrap();
     b.here();
     let taken = take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &removal,
@@ -676,13 +659,13 @@ fn a_failed_pick_then_the_same_file_from_the_server_is_pending() {
 /// from one state: A lands, B's PUT meets A's record (CONFLICT) and B is
 /// KeyFork-held.
 #[allow(clippy::type_complexity)]
-fn two_ons() -> (Pc, Session, Pc, Session, Codes, Keys, KeyServer, [u8; 16]) {
+fn two_ons() -> (Pc, Session, Pc, Session, Keys, KeyServer, [u8; 16]) {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 3, false, true, true);
+    let (mut sa, keys) = create_with(&a, 3, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -694,10 +677,9 @@ fn two_ons() -> (Pc, Session, Pc, Session, Codes, Keys, KeyServer, [u8; 16]) {
         Ok(Rekeyed::Done)
     );
     let retired = fs::read(a.key()).unwrap();
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &retired,
@@ -713,12 +695,12 @@ fn two_ons() -> (Pc, Session, Pc, Session, Codes, Keys, KeyServer, [u8; 16]) {
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     b.here();
     assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, Change::KeySyncOn),
+        rekey(&mut sb, &keys, 2, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     a.here();
@@ -729,7 +711,7 @@ fn two_ons() -> (Pc, Session, Pc, Session, Codes, Keys, KeyServer, [u8; 16]) {
     polls(&mut sb);
     assert_eq!(sb.server_class(), Some(KeyClass::KeyFork));
     assert!(!uploads(&b, &mut sb, "held by the fork"));
-    (a, sa, b, sb, codes, keys, server, id)
+    (a, sa, b, sb, keys, server, id)
 }
 /// After the join: B's union lands on the server's record and nothing
 /// holds B.
@@ -750,8 +732,8 @@ fn joined(b: &Pc, sb: &mut Session, server: &mut KeyServer, id: &[u8; 16]) {
 /// before.
 #[test]
 fn two_ons_at_once_are_joined_and_ask_no_prune() {
-    let (_a, _sa, b, mut sb, mut codes, keys, mut server, id) = two_ons();
-    take_server(&mut sb, &mut codes, &keys, 2, none).unwrap();
+    let (_a, _sa, b, mut sb, keys, mut server, id) = two_ons();
+    take_server(&mut sb, &keys, 2, none).unwrap();
     joined(&b, &mut sb, &mut server, &id);
     set_kdf_profile(KdfProfile::Real);
 }
@@ -760,11 +742,10 @@ fn two_ons_at_once_are_joined_and_ask_no_prune() {
 /// "새 열쇠 파일 받기"): not Contained, a union above both.
 #[test]
 fn two_ons_at_once_are_joined_by_usb_too() {
-    let (a, _sa, b, mut sb, mut codes, keys, mut server, id) = two_ons();
+    let (a, _sa, b, mut sb, keys, mut server, id) = two_ons();
     let winner = fs::read(a.key()).unwrap();
     take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &winner,
@@ -783,13 +764,13 @@ fn two_ons_at_once_are_joined_by_usb_too() {
 #[test]
 fn the_self_heal_ends_this_pcs_own_record() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -804,7 +785,7 @@ fn the_self_heal_ends_this_pcs_own_record() {
     fs::write(dir(&a).join(KEY_VIEW), render_key_view(&stale)).unwrap();
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOff),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     assert_eq!(ks_of(&a, &id), Ks::None);
@@ -825,9 +806,9 @@ fn the_self_heal_ends_this_pcs_own_record() {
 /// CUT lands nothing holds this PC.
 #[test]
 fn an_off_from_gate_pending_clears_the_gate() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(3);
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     server.pass(&a, &id);
     polls(&mut sa);
     b.here();
@@ -835,7 +816,7 @@ fn an_off_from_gate_pending_clears_the_gate() {
     let told = polls(&mut sb);
     assert!(told.contains(&SyncNotice::GatePending), "{told:?}");
     assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, Change::KeySyncOff),
+        rekey(&mut sb, &keys, 2, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     assert!(
@@ -857,13 +838,13 @@ fn an_off_from_gate_pending_clears_the_gate() {
 #[test]
 fn a_failed_kreq_write_is_retried_at_the_next_poll() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     let blocker = dir(&a).join(KEY_REQUEST);
@@ -885,10 +866,10 @@ fn a_failed_kreq_write_is_retried_at_the_next_poll() {
 /// deliberate re-enable.
 #[test]
 fn a_lagging_join_leaves_another_pcs_re_enable() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(2);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(2);
     a.here();
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOff),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     let off = fs::read(a.key()).unwrap();
@@ -896,7 +877,7 @@ fn a_lagging_join_leaves_another_pcs_re_enable() {
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -907,7 +888,6 @@ fn a_lagging_join_leaves_another_pcs_re_enable() {
     polls(&mut sb);
     take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &off,
@@ -933,35 +913,34 @@ fn a_lagging_join_leaves_another_pcs_re_enable() {
 #[test]
 fn a_join_that_clears_a_gate_names_its_candidate() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     let on = header(&a).state();
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
     assert_eq!(b.lines(&id).gate.unwrap().state, GateState::Pending);
     // A turns it off; its CUT has not gone out.
     a.here();
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOff),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOff),
         Ok(Rekeyed::Done)
     );
     let off = fs::read(a.key()).unwrap();
     b.here();
     take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &off,
@@ -988,22 +967,22 @@ fn a_join_that_clears_a_gate_names_its_candidate() {
 #[test]
 fn a_pending_gate_without_its_candidate_can_be_dropped() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     let on = header(&a);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
     server.records.clear();
     server.pass(&b, &id);
@@ -1025,7 +1004,6 @@ fn a_pending_gate_without_its_candidate_can_be_dropped() {
 fn login_proved(
     pc: &Pc,
     password: &str,
-    codes: &mut Codes,
     keys: &Keys,
     number: u8,
 ) -> (
@@ -1034,58 +1012,52 @@ fn login_proved(
 ) {
     pc.here();
     let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
-    let (code, typed) = codes.next();
     let t = keys
         .touch(number, &prepared.unlock_request(0).unwrap())
         .unwrap();
-    let result = Session::login_proved(prepared, password, &code, typed, None, &t);
+    let result = Session::login_proved(prepared, password, None, &t);
     (result, t)
 }
 /// A and B both GOYOKS01 (B took A's "on" with its code), and A's password
-/// changed to NEW on top, landed and fetched by B's helper. With an OTP,
-/// one step is left for one login.
+/// changed to NEW on top, landed and fetched by B's helper.
 #[allow(clippy::type_complexity)]
-fn new_password_waiting(with_otp: bool) -> (Pc, Session, Pc, Codes, Keys, KeyServer, [u8; 16]) {
+fn new_password_waiting() -> (Pc, Session, Pc, Keys, KeyServer, [u8; 16]) {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, with_otp, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
-    take_server(&mut sb, &mut codes, &keys, 2, code(code_of(&sa))).unwrap();
+    take_server(&mut sb, &keys, 2, code(code_of(&sa))).unwrap();
     polls(&mut sb);
     drop(sb);
     a.here();
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    (a, sa, b, codes, keys, server, id)
+    (a, sa, b, keys, server, id)
 }
 
 /// Spec §5.2 step 9(b), §5.3, §7.15 at login (§14.10 walkthrough 2): the
 /// server's successor is taken inside the login, with the unlock's touch
-/// and the login's own Reauth, on an OTP vault with no second code; the
-/// proof serves its own session only and only the snapshot the login read.
+/// and the login's own Reauth, with no second password; the proof serves its own session only and only the snapshot the login read.
 #[test]
 fn the_server_key_file_is_taken_at_login_with_the_unlocks_touch() {
-    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(true);
+    let (a, _sa, b, keys, _server, _id) = new_password_waiting();
     let changed = header(&a);
-    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, OLD, &keys, 2);
     let (mut sb, proof) = result.ok().unwrap();
     let (f, seq) = sb.login_candidate(&proof).unwrap();
     let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
@@ -1093,7 +1065,6 @@ fn the_server_key_file_is_taken_at_login_with_the_unlocks_touch() {
         (check.class, check.keys.gate),
         (AdoptClass::Successor, None)
     );
-    // No code is taken from `codes` here: the login's step serves.
     let r = sb.reauth_from_unlock(proof, &t).unwrap();
     let opened = sb.adopt_open_with(&r, &f, Some(NEW), Some(&t)).unwrap();
     let plan = sb
@@ -1122,14 +1093,14 @@ fn the_server_key_file_is_taken_at_login_with_the_unlocks_touch() {
 /// nothing.
 #[test]
 fn the_new_password_at_login_takes_the_server_key_file() {
-    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(false);
+    let (a, _sa, b, keys, _server, _id) = new_password_waiting();
     let changed = header(&a);
     let before = fs::read(b.key()).unwrap();
     // A proof serves its own session only (spec §5.3).
-    let (result, _) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (result, _) = login_proved(&b, OLD, &keys, 2);
     let (s1, stale) = result.ok().unwrap();
     drop(s1);
-    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, OLD, &keys, 2);
     let (mut s2, _) = result.ok().unwrap();
     assert_eq!(
         s2.reauth_from_unlock(stale, &t).err(),
@@ -1137,7 +1108,7 @@ fn the_new_password_at_login_takes_the_server_key_file() {
     );
     drop(s2);
     // Neither file opens.
-    let (result, t) = login_proved(&b, "wrong-password-1", &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, "wrong-password-1", &keys, 2);
     let failed = result.err().unwrap();
     assert_eq!(failed.error, AUTH_ERROR);
     let mut entry = failed.entry.unwrap();
@@ -1148,7 +1119,7 @@ fn the_new_password_at_login_takes_the_server_key_file() {
     );
     assert_eq!(fs::read(b.key()).unwrap(), before);
     // The new password.
-    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, NEW, &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
     let (mut s, adopted) = Session::login_via_server(&mut entry, &t, None, false).unwrap();
     assert_eq!(adopted.state, changed.state());
@@ -1171,7 +1142,7 @@ fn the_new_password_at_login_takes_the_server_key_file() {
     assert!(b.lines(&s.id).vault.unwrap().state.flags.t);
     assert!(has(&s, "one"));
     drop(s);
-    let s = open(&b, NEW, &mut codes, &keys, 2).unwrap();
+    let s = open(&b, NEW, &keys, 2).unwrap();
     assert!(!s.tofu() && !s.gate_pending());
     set_kdf_profile(KdfProfile::Real);
 }
@@ -1184,10 +1155,10 @@ fn the_new_password_at_login_takes_the_server_key_file() {
 /// login asks G1, and the other PC's code takes the removal.
 #[test]
 fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
-    let (a, mut sa, b, sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, sb, keys, mut server, id) = both_on(3);
     drop(sb);
     a.here();
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     let change = remove(&[3], Some(lost()), Some(NEW));
     assert_eq!(
         sa.rekey(r, Vec::new(), change, Consent::default(), false),
@@ -1200,7 +1171,7 @@ fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
     let three = credhash(&parse(&before).unwrap(), 3);
     let one = credhash(&parse(&before).unwrap(), 1);
     // A pick with a password that opens nothing: discarded unseen.
-    let (result, t) = login_proved(&b, "wrong-password-1", &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, "wrong-password-1", &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
     let (kind, choices, touched, _) = entry.gate().unwrap();
     assert_eq!((kind, touched), (GateKind::G2, Some(2)));
@@ -1212,7 +1183,7 @@ fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
     );
     assert!(b.lines(&id).gate.is_none_or(|g| g.g2));
     // The right password, a wrong pick: G2 off, nothing installed.
-    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, NEW, &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
     assert_eq!(
         Session::login_via_server(&mut entry, &t, wrong, false).err(),
@@ -1221,7 +1192,7 @@ fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
     assert!(!b.lines(&id).gate.unwrap().g2);
     assert_eq!(fs::read(b.key()).unwrap(), before);
     // The next login asks G1; a wrong code may be typed again.
-    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, NEW, &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
     assert_eq!(entry.gate().unwrap().0, GateKind::G1);
     let bad = Some(GateAnswer::Code(Code([7; 8])));
@@ -1249,11 +1220,11 @@ fn the_failed_unlock_entry_judges_its_gate_after_the_open() {
 /// touch takes the file behind G1 (the key is new to this PC).
 #[test]
 fn a_key_only_the_server_file_lists_opens_after_a_cancel() {
-    let (a, mut sa, b, sb, mut codes, mut keys, mut server, id) = both_on(2);
+    let (a, mut sa, b, sb, mut keys, mut server, id) = both_on(2);
     drop(sb);
     a.here();
     let key3 = keys.register(&id, 3, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1280,8 +1251,7 @@ fn a_key_only_the_server_file_lists_opens_after_a_cancel() {
     let unlock = prepared.unlock_request(0).unwrap();
     assert!(!unlock.allow.iter().any(|(c, ..)| *c == cred3));
     assert!(prepared.offers_other_key());
-    let (otp, typed) = codes.next();
-    let mut entry = prepared.other_key_entry(OLD, &otp, typed, None).unwrap();
+    let mut entry = prepared.other_key_entry(OLD, None).unwrap();
     assert!(!entry.own_tried());
     assert_eq!(entry.other_numbers(), [3]);
     let request = entry.other_request(0).unwrap();
@@ -1298,52 +1268,38 @@ fn a_key_only_the_server_file_lists_opens_after_a_cancel() {
     assert_eq!(s.key_state(), header(&a).state());
     drop(s);
     // Key 3 now opens B's own key file.
-    open(&b, OLD, &mut codes, &keys, 3).unwrap();
+    open(&b, OLD, &keys, 3).unwrap();
     set_kdf_profile(KdfProfile::Real);
 }
 
-/// Moves the OTP clock `secs` forward and `codes` with it: codes typed from
-/// now on fall inside the three minutes again.
-fn later(codes: &mut Codes, secs: u64) {
-    otp::shift(secs);
-    codes.at = codes.at.max(otp::now().unwrap() - 150);
-}
-
-/// Spec §5.2, §7.15 step 4 (final review findings 1 and 3): on an OTP vault
-/// the failed-unlock entry checks the code's three minutes once, when it
-/// starts; a wrong G1 code typed again after more than three minutes at
-/// the other PC still takes the same OTP code (its own call saved that
-/// step), and a stale start is OTP_STALE, not a wrong password.
+/// Spec §5.2, §7.15 step 4 (final review finding 3): the failed-unlock
+/// entry takes a wrong G1 code, writes nothing, and takes the right one
+/// typed again in the same entry.
 #[test]
-fn an_otp_vaults_failed_unlock_entry_takes_its_code_for_every_try() {
+fn a_failed_unlock_entry_takes_the_code_again_after_a_wrong_one() {
     let a = Pc::new();
-    let (mut sa, mut codes, mut keys) = create_with(&a, 2, true, true, true);
+    let (mut sa, mut keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
-    later(&mut codes, 300);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
-    take_server(&mut sb, &mut codes, &keys, 2, code(code_of(&sa))).unwrap();
+    take_server(&mut sb, &keys, 2, code(code_of(&sa))).unwrap();
     drop(sb);
-    later(&mut codes, 300);
     a.here();
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     let key3 = keys.register(&id, 3, true);
-    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, NEW, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1358,19 +1314,9 @@ fn an_otp_vaults_failed_unlock_entry_takes_its_code_for_every_try() {
     polls(&mut sa);
     server.pass(&b, &id);
     let before = fs::read(b.key()).unwrap();
-    // A start more than three minutes after the code was typed.
-    let (result, _) = login_proved(&b, NEW, &mut codes, &keys, 2);
-    let mut stale = result.err().unwrap().entry.unwrap();
-    otp::shift(200);
-    assert_eq!(stale.start().err(), Some(crate::vault::OTP_STALE));
-    drop(stale);
-    later(&mut codes, 0);
-    // In time at the start; then more than three minutes at the other PC.
-    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, NEW, &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
-    entry.start().unwrap();
     assert_eq!(entry.gate().unwrap().0, GateKind::G1);
-    otp::shift(200);
     let bad = Some(GateAnswer::Code(Code([7; 8])));
     assert_eq!(
         Session::login_via_server(&mut entry, &t, bad, false).err(),
@@ -1381,47 +1327,37 @@ fn an_otp_vaults_failed_unlock_entry_takes_its_code_for_every_try() {
     let (s, _) = Session::login_via_server(&mut entry, &t, good, false).unwrap();
     assert_eq!(s.key_state(), header(&a).state());
     drop(s);
-    // The step stays spent: that entry is gone, and a new login needs a
-    // new code.
-    later(&mut codes, 0);
-    open(&b, NEW, &mut codes, &keys, 3).unwrap();
+    open(&b, NEW, &keys, 3).unwrap();
     set_kdf_profile(KdfProfile::Real);
 }
 
 /// The same for S-KEYSYNC-ON's second call (final review finding 1): a
 /// GOYOKH01 PC opens with the new password on top of another PC's "on";
-/// the gate passes, S-KEYSYNC-ON is asked, and the yes takes it with the
-/// same OTP code more than three minutes later.
+/// the gate passes, S-KEYSYNC-ON is asked, and the yes takes it in the
+/// same entry.
 #[test]
-fn an_otp_vaults_keysync_consent_takes_the_same_code() {
+fn a_keysync_consent_takes_the_same_entry_again() {
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, true, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
-    later(&mut codes, 300);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
     polls(&mut sa);
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     server.pass(&a, &id);
     polls(&mut sa);
     server.pass(&b, &id);
-    later(&mut codes, 0);
-    let (result, t) = login_proved(&b, NEW, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, NEW, &keys, 2);
     let mut entry = result.err().unwrap().entry.unwrap();
-    entry.start().unwrap();
     assert_eq!(entry.gate().unwrap().0, GateKind::G1);
-    otp::shift(200);
     let good = Some(GateAnswer::Code(code_of(&sa)));
     assert_eq!(
         Session::login_via_server(&mut entry, &t, good.clone(), false).err(),
@@ -1438,14 +1374,14 @@ fn an_otp_vaults_keysync_consent_takes_the_same_code() {
 /// server's key file is no snapshot: nothing is offered or taken at login.
 #[test]
 fn a_bootstrap_takes_nothing_from_the_server_at_login() {
-    let (a, _sa, b, mut codes, keys, _server, _id) = new_password_waiting(false);
+    let (a, _sa, b, keys, _server, _id) = new_password_waiting();
     let c = Pc::new();
     carry(&b, &c);
     fs::create_dir(dir(&c)).unwrap();
     fs::copy(dir(&b).join(KEY_VIEW), dir(&c).join(KEY_VIEW)).unwrap();
-    let (result, _) = login_proved(&c, NEW, &mut codes, &keys, 2);
+    let (result, _) = login_proved(&c, NEW, &keys, 2);
     assert!(result.err().unwrap().entry.is_none());
-    let (result, _) = login_proved(&c, OLD, &mut codes, &keys, 2);
+    let (result, _) = login_proved(&c, OLD, &keys, 2);
     let (s, proof) = result.ok().unwrap();
     assert!(s.tofu());
     assert!(s.login_candidate(&proof).is_none());
@@ -1458,18 +1394,13 @@ fn a_bootstrap_takes_nothing_from_the_server_at_login() {
 /// not taken there (it waits for [받기…]).
 #[test]
 fn a_key_view_swapped_during_the_login_is_not_taken() {
-    let (a, mut sa, b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    let (a, mut sa, b, keys, mut server, id) = new_password_waiting();
     b.here();
     let prepared = prepare(&b.vault(), &b.key()).unwrap();
     // A changes the password again; B's helper writes that file meanwhile.
     a.here();
     assert_eq!(
-        rekey_new(
-            &mut sa,
-            &mut codes,
-            &keys,
-            password("third synthetic password")
-        ),
+        rekey_new(&mut sa, &keys, password("third synthetic password")),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -1477,10 +1408,7 @@ fn a_key_view_swapped_during_the_login_is_not_taken() {
     server.pass(&b, &id);
     b.here();
     let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
-    let (code, typed) = codes.next();
-    let (sb, proof) = Session::login_proved(prepared, OLD, &code, typed, None, &t)
-        .ok()
-        .unwrap();
+    let (sb, proof) = Session::login_proved(prepared, OLD, None, &t).ok().unwrap();
     assert!(matches!(
         sb.server_class(),
         Some(KeyClass::Successor { .. })
@@ -1494,7 +1422,6 @@ fn restore_fetched(
     pc: &Pc,
     dest: &Path,
     password: &str,
-    codes: &mut Codes,
     keys: &Keys,
     number: u8,
 ) -> Result<Session> {
@@ -1503,8 +1430,7 @@ fn restore_fetched(
     let t = keys
         .touch(number, &prepared.unlock_request(0).unwrap())
         .unwrap();
-    let (code, typed) = codes.next();
-    Session::restore_with(prepared, dest, password, &code, typed, &t)
+    Session::restore_with(prepared, dest, password, &t)
 }
 
 /// Spec §7.17 (§14.10 walkthrough 4, a new PC from the server): the vault
@@ -1516,7 +1442,7 @@ fn restore_fetched(
 /// and the pair opens as a login with no gate.
 #[test]
 fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
-    let (a, sa, _b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    let (a, sa, _b, keys, mut server, id) = new_password_waiting();
     let shown = code_of(&sa);
     // PC C: the vault file fetched next to its own sync folder and the
     // server's key file in its view.
@@ -1529,7 +1455,7 @@ fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
         Some(dir(&c).join(KEY_VIEW))
     );
     let dest = c.file("restored.goyo");
-    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    let mut s = restore_fetched(&c, &dest, NEW, &keys, 1).unwrap();
     assert!(s.tofu() && s.fetched_unsaved());
     assert!(!dest.exists() && !c.key().exists() && c.anchor().is_empty());
     assert_eq!(
@@ -1570,8 +1496,7 @@ fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
     c.here();
     let prepared = prepare(&dest, &c.key()).unwrap();
     let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
-    let (otp, typed) = codes.next();
-    let s = Session::login_with(prepared, NEW, &otp, typed, None, &t).unwrap();
+    let s = Session::login_with(prepared, NEW, None, &t).unwrap();
     assert!(!s.tofu() && !s.gate_pending());
     assert!(has(&s, "three"));
     set_kdf_profile(KdfProfile::Real);
@@ -1586,11 +1511,11 @@ fn a_new_pc_starts_from_the_server_key_file_behind_its_code() {
 /// of any other file onto itself is still refused.
 #[test]
 fn a_fetched_vault_is_restored_in_place_behind_its_code() {
-    let (a, sa, _b, mut codes, keys, mut server, id) = new_password_waiting(false);
+    let (a, sa, _b, keys, mut server, id) = new_password_waiting();
     let shown = code_of(&sa);
     let c = c_with_view(&a, &id, &mut server);
     let fetched = fs::read(c.vault()).unwrap();
-    let mut s = restore_fetched(&c, &c.vault(), NEW, &mut codes, &keys, 1).unwrap();
+    let mut s = restore_fetched(&c, &c.vault(), NEW, &keys, 1).unwrap();
     assert!(s.tofu() && s.fetched_unsaved());
     assert_eq!(fs::read(c.vault()).unwrap(), fetched);
     assert!(!c.key().exists() && c.anchor().is_empty());
@@ -1608,17 +1533,15 @@ fn a_fetched_vault_is_restored_in_place_behind_its_code() {
     c.here();
     let prepared = prepare(&c.vault(), &c.key()).unwrap();
     let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
-    let (otp, typed) = codes.next();
-    let s = Session::login_with(prepared, NEW, &otp, typed, None, &t).unwrap();
+    let s = Session::login_with(prepared, NEW, None, &t).unwrap();
     assert!(!s.tofu() && !s.gate_pending());
     assert!(has(&s, "in place"));
     drop(s);
     // An ordinary Restore never writes over its own backup.
     let prepared = crate::vault::prepare_restore(&c.vault(), &c.key()).unwrap();
     let t = keys.touch(2, &prepared.unlock_request(0).unwrap()).unwrap();
-    let (otp, typed) = codes.next();
     assert_eq!(
-        Session::restore_with(prepared, &c.vault(), NEW, &otp, typed, &t).err(),
+        Session::restore_with(prepared, &c.vault(), NEW, &t).err(),
         Some(crate::vault::NOT_DISTINCT)
     );
     set_kdf_profile(KdfProfile::Real);
@@ -1630,12 +1553,12 @@ fn a_fetched_vault_is_restored_in_place_behind_its_code() {
 /// server key file older than it is refused.
 #[test]
 fn a_lost_key_file_comes_back_from_the_server_once_and_not_older() {
-    let (a, mut sa, b, mut codes, mut keys, mut server, id) = new_password_waiting(false);
+    let (a, mut sa, b, mut keys, mut server, id) = new_password_waiting();
     let shown = code_of(&sa);
     // The save is cut off after its pending entry, in the key file's write.
     let c = c_with_view(&b, &id, &mut server);
     let dest = c.file("restored.goyo");
-    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    let mut s = restore_fetched(&c, &dest, NEW, &keys, 1).unwrap();
     CRASH.with(|x| x.set(Some("tmp_synced")));
     assert!(s.tofu_save(Some(&shown), &c.key()).is_err());
     assert!(!c.key().exists());
@@ -1649,7 +1572,7 @@ fn a_lost_key_file_comes_back_from_the_server_once_and_not_older() {
     // pending entry's own name is taken only when it holds exactly the key
     // file (a cut after its write, final review finding 10).
     fs::write(c.key(), b"taken").unwrap();
-    let mut s = restore_fetched(&c, &dest, NEW, &mut codes, &keys, 1).unwrap();
+    let mut s = restore_fetched(&c, &dest, NEW, &keys, 1).unwrap();
     assert!(!s.tofu() && s.fetched_unsaved());
     assert_eq!(
         s.put(None, entry("x")).err(),
@@ -1669,7 +1592,7 @@ fn a_lost_key_file_comes_back_from_the_server_once_and_not_older() {
     // the server's key file, which is refused as a rollback.
     a.here();
     let key3 = keys.register(&id, 3, true);
-    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, NEW, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1682,7 +1605,7 @@ fn a_lost_key_file_comes_back_from_the_server_once_and_not_older() {
     );
     let older = c_with_view(&a, &id, &mut server);
     assert_eq!(
-        restore_fetched(&older, &older.file("x.goyo"), NEW, &mut codes, &keys, 1).err(),
+        restore_fetched(&older, &older.file("x.goyo"), NEW, &keys, 1).err(),
         Some(crate::vault::FETCHED_OLDER)
     );
     set_kdf_profile(KdfProfile::Real);
@@ -1706,10 +1629,10 @@ fn c_with_view(from: &Pc, id: &[u8; 16], server: &mut KeyServer) -> Pc {
 /// over at the next poll and at every later unlock.
 #[test]
 fn a_change_whose_pc_is_gone_is_superseded() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(2);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(2);
     a.here();
     let key3 = keys.register(&id, 3, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1722,10 +1645,7 @@ fn a_change_whose_pc_is_gone_is_superseded() {
     );
     server.pass(&a, &id);
     polls(&mut sa);
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     server.pass(&a, &id);
     polls(&mut sa);
     let gone = header(&a);
@@ -1751,7 +1671,7 @@ fn a_change_whose_pc_is_gone_is_superseded() {
         tag: [9; 16],
     };
     assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, wrong).err(),
+        rekey(&mut sb, &keys, 2, wrong).err(),
         Some(crate::vault::NOT_SUPERSEDABLE)
     );
     let change = Change::Supersede {
@@ -1759,10 +1679,7 @@ fn a_change_whose_pc_is_gone_is_superseded() {
         tag: gone.state().tag,
     };
     assert_eq!(sb.change_gate(&change), Ok(None));
-    assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, change),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sb, &keys, 2, change), Ok(Rekeyed::Done));
     let up = header(&b);
     assert_eq!((up.magic, up.kind), (Magic::Ks01, keyfile::Kind::SyncOn));
     assert_eq!(up.epoch, gone.epoch + 1);
@@ -1806,7 +1723,7 @@ fn a_change_whose_pc_is_gone_is_superseded() {
     // At the next unlock `sup` still pushes that head over.
     let _ = fs::remove_file(dir(&b).join(OUTGOING));
     syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     let told = polls(&mut sb);
     assert!(
         !told.iter().any(|n| matches!(
@@ -1825,9 +1742,9 @@ fn a_change_whose_pc_is_gone_is_superseded() {
 /// itself.
 #[test]
 fn a_removal_is_never_superseded_and_an_on_is() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(3);
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     server.pass(&a, &id);
     polls(&mut sa);
     b.here();
@@ -1838,7 +1755,7 @@ fn a_removal_is_never_superseded_and_an_on_is() {
     // never superseded.
     a.here();
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1868,22 +1785,22 @@ fn a_removal_is_never_superseded_and_an_on_is() {
         tag: removal.state().tag,
     };
     assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, change).err(),
+        rekey(&mut sb, &keys, 2, change).err(),
         Some(crate::vault::NOT_SUPERSEDABLE)
     );
     drop((sa, sb));
 
     // A GOYOKH01 PC and another PC's "on".
     let a = Pc::new();
-    let (mut sa, mut codes, keys) = create_with(&a, 2, false, true, true);
+    let (mut sa, keys) = create_with(&a, 2, true, true);
     let id = sa.id;
-    let b = synced_pc(&a, &mut codes, &keys, 2);
+    let b = synced_pc(&a, &keys, 2);
     a.here();
     let mut server = KeyServer::default();
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done)
     );
     server.pass(&a, &id);
@@ -1891,7 +1808,7 @@ fn a_removal_is_never_superseded_and_an_on_is() {
     let on = header(&a);
     drop(sa);
     server.pass(&b, &id);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     polls(&mut sb);
     assert_eq!(header(&b).magic, Magic::Kh01);
     assert!(sb.key_sync_view().unwrap().waiting.unwrap().supersede);
@@ -1899,10 +1816,7 @@ fn a_removal_is_never_superseded_and_an_on_is() {
         epoch: on.epoch,
         tag: on.state().tag,
     };
-    assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, change),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sb, &keys, 2, change), Ok(Rekeyed::Done));
     let up = header(&b);
     assert_eq!((up.magic, up.epoch), (Magic::Ks01, on.epoch + 1));
     polls(&mut sb);
@@ -1920,7 +1834,7 @@ fn a_removal_is_never_superseded_and_an_on_is() {
 /// unlock, worded per change, until [모든 PC 확인 완료].
 #[test]
 fn the_rollout_reminder_stays_until_every_pc_is_confirmed() {
-    let (a, sa, b, sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, sa, b, sb, mut keys, mut server, id) = both_on(3);
     a.here();
     // The "on" asks a code only of a PC that keeps its key file to itself.
     let code = sa.key_code().unwrap();
@@ -1929,19 +1843,16 @@ fn the_rollout_reminder_stays_until_every_pc_is_confirmed() {
     b.here();
     assert_eq!(sb.rollout(), None);
     drop((sa, sb));
-    let mut sa = open(&a, OLD, &mut codes, &keys, 1).unwrap();
+    let mut sa = open(&a, OLD, &keys, 1).unwrap();
     assert!(sa.rollout().is_some(), "at every unlock");
     sa.rollout_done().unwrap();
     assert_eq!(sa.rollout(), None);
     assert!(!a.lines(&id).vault.unwrap().state.flags.p);
-    assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, password(NEW)),
-        Ok(Rekeyed::Done)
-    );
+    assert_eq!(rekey(&mut sa, &keys, 1, password(NEW)), Ok(Rekeyed::Done));
     assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Plain));
     server.pass(&a, &id);
     polls(&mut sa);
-    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, NEW, &keys, 1).unwrap();
     let change = remove(&[3], Some(lost()), None);
     assert_eq!(
         sa.rekey(r, Vec::new(), change, Consent::default(), false),
@@ -1951,7 +1862,7 @@ fn the_rollout_reminder_stays_until_every_pc_is_confirmed() {
     assert_eq!(sa.rollout(), Some(crate::vault::Rollout::Remove(code)));
     // An added key: always the code.
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, NEW, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, NEW, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -1996,15 +1907,15 @@ fn merge_at_login(
 /// successor with no gate, taken at A's next unlock.
 #[test]
 fn two_removals_from_one_state_merge_at_the_next_unlock() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(3);
     let three = credhash(&header(&a), 3);
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     server.pass(&a, &id);
     polls(&mut sa);
     let ka = header(&a);
     b.here();
-    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    remove_lost(&mut sb, &keys, 3, 2);
     let kb = header(&b);
     server.pass(&b, &id);
     assert_eq!(kview(&b, &id).unwrap().outcome, KeyOutcome::Conflict);
@@ -2016,7 +1927,7 @@ fn two_removals_from_one_state_merge_at_the_next_unlock() {
     assert_eq!(sb.removal_merge(), Some(crate::vault::RemovalMerge::Auto));
     drop(sb);
     // The next unlock.
-    let (result, t) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (result, t) = login_proved(&b, OLD, &keys, 2);
     let (mut sb, proof) = result.ok().unwrap();
     assert!(sb.login_candidate(&proof).is_none());
     let (f, seq) = sb.login_merge(&proof).unwrap();
@@ -2045,7 +1956,7 @@ fn two_removals_from_one_state_merge_at_the_next_unlock() {
         })
     );
     drop(sa);
-    let (result, t) = login_proved(&a, OLD, &mut codes, &keys, 1);
+    let (result, t) = login_proved(&a, OLD, &keys, 1);
     let (mut sa, proof) = result.ok().unwrap();
     assert!(sa.login_merge(&proof).is_none(), "the head never merges");
     let (f, seq) = sa.login_candidate(&proof).unwrap();
@@ -2060,9 +1971,9 @@ fn two_removals_from_one_state_merge_at_the_next_unlock() {
 /// file is then Refused{"위조된 연결"} with no merge offered.
 #[test]
 fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(3);
     a.here();
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     let change = remove(&[3], Some(lost()), Some(NEW));
     assert_eq!(
         sa.rekey(r, Vec::new(), change, Consent::default(), false),
@@ -2071,7 +1982,7 @@ fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
     server.pass(&a, &id);
     polls(&mut sa);
     b.here();
-    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    remove_lost(&mut sb, &keys, 3, 2);
     server.pass(&b, &id);
     let told = polls(&mut sb);
     assert!(
@@ -2079,7 +1990,7 @@ fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
         "{told:?}"
     );
     drop(sb);
-    let (result, _) = login_proved(&b, OLD, &mut codes, &keys, 2);
+    let (result, _) = login_proved(&b, OLD, &keys, 2);
     let (mut sb, proof) = result.ok().unwrap();
     assert!(sb.login_merge(&proof).is_none());
     let (f, _) = sb.server_key_file().unwrap();
@@ -2105,10 +2016,10 @@ fn a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused() {
 /// nothing written; its code still takes it.
 #[test]
 fn a_take_without_a_code_is_only_for_a_pc_without_keys() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(3);
     a.here();
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -2128,8 +2039,8 @@ fn a_take_without_a_code_is_only_for_a_pc_without_keys() {
     assert_eq!(check.keys.gate, Some(GateKind::G1));
     assert!(!sb.trusts_without_code(&check));
     let before = fs::read(b.key()).unwrap();
-    let take = |sb: &mut Session, codes: &mut Codes, pass: GatePass| {
-        let r = reauth(sb, OLD, codes, &keys, 2).unwrap();
+    let take = |sb: &mut Session, pass: GatePass| {
+        let r = reauth(sb, OLD, &keys, 2).unwrap();
         let t = touch_other(&served, &keys, 2);
         let opened = sb.adopt_open_with(&r, &served, None, Some(&t)).unwrap();
         let planned = sb.adopt_preview_with(&r, &served, opened, &check, pass, ForkOption::Both);
@@ -2139,7 +2050,7 @@ fn a_take_without_a_code_is_only_for_a_pc_without_keys() {
         epoch: check.other.epoch,
         tag: check.other.tag,
     };
-    let (_, planned) = take(&mut sb, &mut codes, nocode);
+    let (_, planned) = take(&mut sb, nocode);
     assert_eq!(planned.err(), Some(NOT_TRUSTED));
     assert_eq!(fs::read(b.key()).unwrap(), before);
     let code = GatePass::G1Passed {
@@ -2147,7 +2058,7 @@ fn a_take_without_a_code_is_only_for_a_pc_without_keys() {
         epoch: check.other.epoch,
         tag: check.other.tag,
     };
-    let (r, planned) = take(&mut sb, &mut codes, code);
+    let (r, planned) = take(&mut sb, code);
     let planned = planned.unwrap();
     let acked = acks(planned.preview(), ForkOption::Both);
     sb.adopt(r, planned, Vec::new(), acked, Consent::default(), false)
@@ -2182,10 +2093,10 @@ fn fetch(pc: &Pc, s: &mut Session, server: &mut KeyServer, id: &[u8; 16]) -> Vec
 /// server is not taken. Off asks nothing; a bootstrap cannot turn it on.
 #[test]
 fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(3);
     let shared = fs::read(a.key()).unwrap();
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     fetch(&a, &mut sa, &mut server, &id);
     let told = fetch(&b, &mut sb, &mut server, &id);
     assert!(told.contains(&SyncNotice::GatePending), "{told:?}");
@@ -2196,12 +2107,12 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     assert!(!sb.trusts(&check));
     assert_eq!(check.keys.gate, Some(GateKind::G2));
     let before = fs::read(b.key()).unwrap();
-    let taken = take_server(&mut sb, &mut codes, &keys, 2, trusted);
+    let taken = take_server(&mut sb, &keys, 2, trusted);
     assert_eq!(taken.err(), Some(NOT_TRUSTED));
     assert_eq!(fs::read(b.key()).unwrap(), before);
     // A wrong pick turns G2 off for B (as before); the trusted take below
     // never turns it back on.
-    let picked = take_server(&mut sb, &mut codes, &keys, 2, pick(&[1]));
+    let picked = take_server(&mut sb, &keys, 2, pick(&[1]));
     assert_eq!(picked.err(), Some(GATE_G2FAIL));
     assert!(!b.lines(&id).gate.unwrap().g2);
     // On: in the anchor, and a server change is taken with no answer.
@@ -2212,7 +2123,6 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     // Never a USB file.
     let usb = take(
         &mut sb,
-        &mut codes,
         &keys,
         (OLD, 2),
         &removal,
@@ -2224,7 +2134,7 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     assert_eq!(fs::read(b.key()).unwrap(), before);
     let (f, seq) = sb.server_key_file().unwrap();
     assert!(sb.trusts(&sb.adopt_check(&f, Source::Server { seq }).unwrap()));
-    let adopted = take_server(&mut sb, &mut codes, &keys, 2, trusted).unwrap();
+    let adopted = take_server(&mut sb, &keys, 2, trusted).unwrap();
     assert!(adopted.trusted);
     assert_eq!(
         adopted.change,
@@ -2244,7 +2154,7 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     // A adds key 4 with key 1: G1 before, none asked now.
     a.here();
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -2265,7 +2175,7 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     let (f, seq) = sb.server_key_file().unwrap();
     let check = sb.adopt_check(&f, Source::Server { seq }).unwrap();
     assert_eq!(check.keys.gate, Some(GateKind::G1));
-    let adopted = take_server(&mut sb, &mut codes, &keys, 2, trusted).unwrap();
+    let adopted = take_server(&mut sb, &keys, 2, trusted).unwrap();
     assert_eq!(
         adopted.change,
         KeyChange {
@@ -2289,11 +2199,11 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     ));
     let (f, seq) = sb.server_key_file().unwrap();
     assert!(sb.adopt_check(&f, Source::Server { seq }).is_err());
-    assert!(take_server(&mut sb, &mut codes, &keys, 2, trusted).is_err());
+    assert!(take_server(&mut sb, &keys, 2, trusted).is_err());
     assert_eq!(fs::read(b.key()).unwrap(), after);
     // Read again by the next session; off asks nothing and writes it.
     drop(sb);
-    let mut sb = open(&b, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sb = open(&b, OLD, &keys, 2).unwrap();
     assert!(sb.auto_apply());
     sb.set_auto_apply(false).unwrap();
     assert!(!sb.auto_apply() && !b.lines(&id).vault.unwrap().state.auto);
@@ -2301,7 +2211,7 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
     // A bootstrap (a new PC with B's files) cannot turn it on.
     let c = Pc::new();
     carry(&b, &c);
-    let mut sc = open(&c, OLD, &mut codes, &keys, 2).unwrap();
+    let mut sc = open(&c, OLD, &keys, 2).unwrap();
     assert!(sc.tofu());
     assert_eq!(sc.set_auto_apply(true).err(), Some(AUTO_NOT_SYNCED));
     set_kdf_profile(KdfProfile::Real);
@@ -2313,11 +2223,11 @@ fn auto_apply_takes_server_changes_with_no_gate_and_only_those() {
 /// never serves either).
 #[test]
 fn auto_apply_still_refuses_a_file_of_a_removed_key() {
-    let (_a, _sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (_a, _sa, b, mut sb, keys, mut server, id) = both_on(3);
     let shared = fs::read(b.key()).unwrap();
     b.here();
     sb.set_auto_apply(true).unwrap();
-    remove_lost(&mut sb, &mut codes, &keys, 3, 2);
+    remove_lost(&mut sb, &keys, 3, 2);
     fetch(&b, &mut sb, &mut server, &id);
     assert_eq!(sb.server_class(), Some(KeyClass::Equal));
     let mine = fs::read(b.key()).unwrap();
@@ -2339,7 +2249,7 @@ fn auto_apply_still_refuses_a_file_of_a_removed_key() {
         "{told:?}"
     );
     let (derived, seen) = (derive_count(), keys.fake.seen().len());
-    let taken = take_server(&mut sb, &mut codes, &keys, 1, trusted);
+    let taken = take_server(&mut sb, &keys, 1, trusted);
     assert_eq!(taken.err(), Some(ADOPT_REFUSED));
     assert_eq!(
         refusal_values(ADOPT_REFUSED),
@@ -2358,10 +2268,10 @@ fn auto_apply_still_refuses_a_file_of_a_removed_key() {
 /// advice of KeyChanged. Told once per halt.
 #[test]
 fn a_copy_under_another_pcs_new_key_points_to_the_server_key_file() {
-    let (a, mut sa, b, mut sb, mut codes, keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, keys, mut server, id) = both_on(3);
     a.here();
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, remove(&[3], None, None)),
+        rekey(&mut sa, &keys, 1, remove(&[3], None, None)),
         Ok(Rekeyed::Done)
     );
     fetch(&a, &mut sa, &mut server, &id);
@@ -2390,12 +2300,12 @@ fn a_copy_under_another_pcs_new_key_points_to_the_server_key_file() {
 /// on, a take that trusts the server is refused and nothing is written.
 #[test]
 fn auto_apply_never_joins_a_fork() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(3);
     b.here();
     sb.set_auto_apply(true).unwrap();
     a.here();
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -2409,7 +2319,7 @@ fn auto_apply_never_joins_a_fork() {
     fetch(&a, &mut sa, &mut server, &id);
     b.here();
     assert_eq!(
-        rekey(&mut sb, &mut codes, &keys, 2, remove(&[3], None, None)),
+        rekey(&mut sb, &keys, 2, remove(&[3], None, None)),
         Ok(Rekeyed::Done)
     );
     fetch(&b, &mut sb, &mut server, &id);
@@ -2419,7 +2329,7 @@ fn auto_apply_never_joins_a_fork() {
     assert!(check.fork && check.keys.gate.is_some(), "{check:?}");
     assert!(!sb.trusts(&check));
     let mine = fs::read(b.key()).unwrap();
-    let taken = take_server(&mut sb, &mut codes, &keys, 2, trusted);
+    let taken = take_server(&mut sb, &keys, 2, trusted);
     assert_eq!(taken.err(), Some(NOT_TRUSTED));
     assert_eq!(fs::read(b.key()).unwrap(), mine);
     set_kdf_profile(KdfProfile::Real);
@@ -2436,17 +2346,17 @@ fn auto_apply_never_joins_a_fork() {
 /// setting on again the same take lands.
 #[test]
 fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
-    let (a, mut sa, b, mut sb, mut codes, mut keys, mut server, id) = both_on(3);
+    let (a, mut sa, b, mut sb, mut keys, mut server, id) = both_on(3);
     b.here();
     sb.set_auto_apply(true).unwrap();
     a.here();
-    remove_lost(&mut sa, &mut codes, &keys, 3, 1);
+    remove_lost(&mut sa, &keys, 3, 1);
     fetch(&a, &mut sa, &mut server, &id);
     // A adds key 4 on top; goyo-sync on A does not run, so the server
     // keeps the removal.
     a.here();
     let key4 = keys.register(&id, 4, true);
-    let r = reauth(&mut sa, OLD, &mut codes, &keys, 1).unwrap();
+    let r = reauth(&mut sa, OLD, &keys, 1).unwrap();
     assert_eq!(
         sa.rekey(
             r,
@@ -2469,7 +2379,7 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
     assert_eq!(check.class, AdoptClass::Successor);
     assert!(!check.fork && check.keys.gate.is_some(), "{check:?}");
     assert!(!sb.trusts(&check));
-    let r = reauth(&mut sb, OLD, &mut codes, &keys, 2).unwrap();
+    let r = reauth(&mut sb, OLD, &keys, 2).unwrap();
     let t = touch_other(&f, &keys, 2);
     let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
     let pass = trusted(&check, &sb);
@@ -2481,8 +2391,8 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
     // before the write: nothing is written.
     let check = sb.adopt_check(&served, Source::Server { seq }).unwrap();
     assert!(sb.trusts(&check));
-    let plan = |sb: &mut Session, codes: &mut Codes| {
-        let r = reauth(sb, OLD, codes, &keys, 2).unwrap();
+    let plan = |sb: &mut Session| {
+        let r = reauth(sb, OLD, &keys, 2).unwrap();
         let t = touch_other(&served, &keys, 2);
         let opened = sb.adopt_open_with(&r, &served, None, Some(&t)).unwrap();
         let pass = trusted(&check, sb);
@@ -2491,7 +2401,7 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
             .unwrap();
         (r, plan)
     };
-    let (r, planned) = plan(&mut sb, &mut codes);
+    let (r, planned) = plan(&mut sb);
     let acked = acks(planned.preview(), ForkOption::Both);
     sb.set_auto_apply(false).unwrap();
     let written = sb.adopt(r, planned, Vec::new(), acked, Consent::default(), false);
@@ -2499,7 +2409,7 @@ fn auto_apply_trusts_only_the_servers_own_file_and_judges_again_at_the_write() {
     assert_eq!(fs::read(b.key()).unwrap(), before);
     // On again: the same take lands.
     sb.set_auto_apply(true).unwrap();
-    let (r, planned) = plan(&mut sb, &mut codes);
+    let (r, planned) = plan(&mut sb);
     let acked = acks(planned.preview(), ForkOption::Both);
     let adopted = sb
         .adopt(r, planned, Vec::new(), acked, Consent::default(), false)
@@ -2542,14 +2452,14 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     let usb = took == Took::Usb;
     let case = format!("kf2={kf2} took={took:?}");
     let a = Pc::new();
-    let (mut sa, mut codes) = setup(&a, kf2, false, true);
+    let mut sa = setup(&a, kf2, false, true);
     let id = sa.id;
     // B: copies of A's pair, syncing with a helper that does key-file sync.
     let b = Pc::new();
     carry(&a, &b);
     fs::create_dir(dir(&b)).unwrap();
     status(&b);
-    let mut sb = login(&b, OLD, &mut codes).unwrap();
+    let mut sb = login(&b, OLD).unwrap();
     sb.enable_sync().unwrap();
     polls(&mut sb);
     drop(sb);
@@ -2559,8 +2469,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     a.here();
     let mut keys = Keys::new();
     let new_keys = vec![keys.register(&id, 1, true), keys.register(&id, 2, true)];
-    let (otp, typed) = codes.next();
-    let r = sa.reauth(OLD, Some((&otp, typed)), None).unwrap();
+    let r = sa.reauth(OLD, None).unwrap();
     let on = Change::KeysOn {
         pin: true,
         keys: new_keys,
@@ -2575,7 +2484,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     server.pass(&a, &id);
     polls(&mut sa);
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeySyncOn),
+        rekey(&mut sa, &keys, 1, Change::KeySyncOn),
         Ok(Rekeyed::Done),
         "{case}"
     );
@@ -2592,7 +2501,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     b.here();
     server.pass(&b, &id);
     syncfile::replace_file(&dir(&b).join(syncfile::INCOMING), &incoming).unwrap();
-    let mut sb = login(&b, OLD, &mut codes).unwrap();
+    let mut sb = login(&b, OLD).unwrap();
     let mut told: Vec<SyncNotice> = sb.take_unlock_notice().into_iter().collect();
     told.extend(polls(&mut sb));
     assert!(
@@ -2655,9 +2564,8 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
         },
     };
     let before = fs::read(b.key()).unwrap();
-    let plan = |sb: &mut Session, codes: &mut Codes, pass: GatePass| {
-        let (otp, typed) = codes.next();
-        let r = sb.reauth(OLD, Some((&otp, typed)), None).unwrap();
+    let plan = |sb: &mut Session, pass: GatePass| {
+        let r = sb.reauth(OLD, None).unwrap();
         let t = touch_other(&f, &keys, 2);
         let opened = sb.adopt_open_with(&r, &f, None, Some(&t)).unwrap();
         let plan = sb.adopt_preview_with(&r, &f, opened, &check, pass, ForkOption::Both);
@@ -2665,14 +2573,14 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     };
     // A USB file is never taken without the code.
     if usb {
-        let (_, planned) = plan(&mut sb, &mut codes, nocode.clone());
+        let (_, planned) = plan(&mut sb, nocode.clone());
         assert_eq!(planned.err(), Some(NOT_TRUSTED), "{case}");
         assert_eq!(fs::read(b.key()).unwrap(), before, "{case}");
     }
     // Without the code, judged again at the write: the server's view gone
     // since the preview writes nothing; back again, the same take lands.
     if took == Took::ServerNoCode {
-        let (r, planned) = plan(&mut sb, &mut codes, pass.clone());
+        let (r, planned) = plan(&mut sb, pass.clone());
         let planned = planned.unwrap();
         let acked = acks(planned.preview(), ForkOption::Both);
         let view = fs::read(dir(&b).join(KEY_VIEW)).unwrap();
@@ -2686,7 +2594,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
         sb.poll_sync();
         assert!(sb.trusts_without_code(&check), "{case}");
     }
-    let (r, planned) = plan(&mut sb, &mut codes, pass);
+    let (r, planned) = plan(&mut sb, pass);
     let planned = planned.unwrap();
     let acks = acks(planned.preview(), ForkOption::Both);
     let adopted = sb
@@ -2719,7 +2627,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     assert_eq!(sa.check_code(), sb.check_code(), "{case}");
     drop(sb);
     // B's pair now opens with a key.
-    let s = open(&b, OLD, &mut codes, &keys, 1).unwrap();
+    let s = open(&b, OLD, &keys, 1).unwrap();
     assert!(has(&s, "from b"), "{case}");
     drop(s);
     // A turns keys off: its key file has no keys again. A view whose top
@@ -2728,7 +2636,7 @@ fn keys_on_then_key_file_sync(kf2: bool, took: Took) {
     a.here();
     let on = fs::read(a.key()).unwrap();
     assert_eq!(
-        rekey(&mut sa, &mut codes, &keys, 1, Change::KeysOff),
+        rekey(&mut sa, &keys, 1, Change::KeysOff),
         Ok(Rekeyed::Done),
         "{case}"
     );

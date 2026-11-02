@@ -1,6 +1,6 @@
 //! Merging a synced copy of the vault into this one. It is a join: the live
 //! entries are both sides' minus both sides' tombstones, the tombstones are
-//! the union and the OTP watermark is the larger one. A replayed, old, forked
+//! the union and the old OTP watermark is this PC's own. A replayed, old, forked
 //! or duplicated copy can therefore delay changes but never delete or roll
 //! back anything here: only a tombstone removes an entry, and only a user's
 //! delete or edit makes one. Every PC gets the same result, whichever side is
@@ -48,20 +48,18 @@ pub(crate) enum MergeError {
 }
 
 /// Merges the authenticated `remote` copy into `local`. `remote.seen` is
-/// ignored: it is the other PC's. `now_step` is the current OTP time step.
-/// `id_key` is the vault's ID key, which derives the IDs of moved texts on
-/// every PC alike; `overhead` is what the session's vault file adds to the
+/// ignored: it is the other PC's, and so is `remote.last`, the watermark of
+/// the removed OTP: the result keeps this PC's. `id_key` is the vault's ID
+/// key, which derives the IDs of moved texts on every PC alike; `overhead` is what the session's vault file adds to the
 /// plaintext (LEGACY_OVERHEAD or KEYED_OVERHEAD), so a result that would
 /// not fit its file is refused here and not when it is saved.
 pub(crate) fn merge(
     id_key: &[u8; 32],
     local: DataRef,
     remote: Contents,
-    now_step: u64,
     overhead: usize,
 ) -> Result<(Contents, MergeReport), MergeError> {
     let Contents {
-        last: remote_last,
         generation: remote_generation,
         entries: remote_entries,
         tombstones: remote_tombstones,
@@ -179,10 +177,6 @@ pub(crate) fn merge(
         .filter(|(live, new)| *live >= 2 && *new)
         .count();
 
-    // A replay never lowers the watermark; a PC with a fast clock cannot
-    // lock the others out.
-    let last = local.last.max(remote_last.min(now_step.saturating_add(1)));
-    // The watermark alone is never uploaded: unlock times stay off the server.
     let needs_push = remote_replaced || out_ids != remote_ids || dead != remote_dead;
     let highest = local.generation.max(remote_generation);
     // An upload always counts above the copy it replaces, so a lower count
@@ -195,7 +189,6 @@ pub(crate) fn merge(
     let changed = local_replaced
         || out_ids != local_ids
         || dead != local_dead
-        || last != local.last
         || generation != local.generation;
     let report = MergeReport {
         added: arrived.len(),
@@ -206,7 +199,7 @@ pub(crate) fn merge(
         needs_push,
     };
     let merged = Contents {
-        last,
+        last: local.last,
         generation,
         // Rides along; a higher `seen` alone never makes a save.
         seen: local.seen.max(remote_generation),
@@ -221,8 +214,8 @@ pub(crate) fn merge(
 /// show the same code only for the same entries, text included, and the
 /// same deletions; a fork shows different ones. It is keyed with the data
 /// key, so it reveals nothing about the entries, and 64 bits, so not even a
-/// key holder can make other contents match a given code. The OTP watermark
-/// is left out because OTP-only changes are not synced. `id_key` is the
+/// key holder can make other contents match a given code. The old OTP
+/// watermark is left out: it is never synced. `id_key` is the
 /// vault's ID key, the same on every PC whatever key changes it saw. A KF2
 /// session also covers its key file's state (`state`, spec v3 §4.8): a PC
 /// that is behind on its key file, or on a fork, shows another code. None
@@ -270,7 +263,6 @@ mod tests {
     use crate::vault::{LEGACY_OVERHEAD, MAX_TEXT};
 
     const KEY: [u8; 32] = [7; 32];
-    const NOW: u64 = 1_000_000;
 
     fn view(c: &Contents) -> DataRef<'_> {
         DataRef {
@@ -306,7 +298,7 @@ mod tests {
         (ids(c), dead(c))
     }
     fn run(local: &Contents, remote: &Contents) -> (Contents, MergeReport) {
-        merge(&KEY, view(local), remote.clone(), NOW, LEGACY_OVERHEAD).unwrap()
+        merge(&KEY, view(local), remote.clone(), LEGACY_OVERHEAD).unwrap()
     }
     fn text(c: &Contents, id: EntryId) -> Option<String> {
         let e = c.entries.iter().find(|e| e.id() == id)?;
@@ -537,27 +529,21 @@ mod tests {
         commutes(&junk, &m);
     }
 
+    /// The watermark of the removed OTP: this PC's stays as it was read,
+    /// the remote's counts for nothing, and it alone is neither a save nor
+    /// an upload.
     #[test]
-    fn otp_watermark_rules() {
+    fn the_old_otp_watermark_stays_this_pcs() {
         let x = [1; 16];
         let at = |last: u64| Contents {
             last,
             ..contents(vec![entry(x, NO_ID, "x", "1")], vec![], 1)
         };
-        // Never lowered, and a lower remote is nothing to upload.
-        let (m, r) = run(&at(100), &at(50));
-        assert_eq!(m.last, 100);
-        assert!(!r.changed && !r.needs_push);
-        // A higher remote is taken, and is still nothing to upload.
-        let (m, r) = run(&at(100), &at(200));
-        assert_eq!(m.last, 200);
-        assert!(r.changed && !r.needs_push);
-        assert_eq!(m.generation, 1);
-        // A remote clock far ahead is clamped to the next step.
-        let (m, _) = run(&at(100), &at(NOW + 1000));
-        assert_eq!(m.last, NOW + 1);
-        let (m, _) = run(&at(NOW + 5), &at(NOW + 1000));
-        assert_eq!(m.last, NOW + 5);
+        for (mine, theirs) in [(100, 50), (100, 200), (0, u64::MAX), (7, 0)] {
+            let (m, r) = run(&at(mine), &at(theirs));
+            assert_eq!((m.last, m.generation), (mine, 1));
+            assert!(!r.changed && !r.needs_push);
+        }
     }
 
     #[test]
@@ -606,7 +592,7 @@ mod tests {
         let check = |local: Contents, remote: Contents| {
             let before = (state(&local), local.generation, local.last);
             assert_eq!(
-                merge(&KEY, view(&local), remote, NOW, LEGACY_OVERHEAD).err(),
+                merge(&KEY, view(&local), remote, LEGACY_OVERHEAD).err(),
                 Some(MergeError::TooLarge)
             );
             assert_eq!((state(&local), local.generation, local.last), before);
@@ -662,7 +648,7 @@ mod tests {
                 1,
             )
         };
-        // Order, the OTP watermark and the counters do not count.
+        // Order, the old OTP watermark and the counters do not count.
         let b = Contents {
             last: 9,
             ..contents(
@@ -759,7 +745,7 @@ mod tests {
         older: &Contents,
         deleted: &BTreeSet<EntryId>,
     ) -> Contents {
-        let (m, r) = merge(&KEY, view(local), remote.clone(), NOW, LEGACY_OVERHEAD).unwrap();
+        let (m, r) = merge(&KEY, view(local), remote.clone(), LEGACY_OVERHEAD).unwrap();
         let (mine, theirs, merged) = (state(local), state(remote), state(&m));
         // Tombstones are the union; live entries all others of both sides.
         let all_dead: BTreeSet<EntryId> = mine.1.union(&theirs.1).copied().collect();
@@ -778,14 +764,14 @@ mod tests {
             let id = e.id();
             assert!(text(local, id).or(text(remote, id)) == Some(e.fields().concat()));
         }
-        assert!(m.last >= local.last);
+        assert_eq!(m.last, local.last);
         assert!(m.generation >= m.seen && m.generation >= local.generation);
         assert!(!r.needs_push || m.generation > remote.generation);
         assert_eq!(r.rollback, remote.generation < local.seen);
         assert_eq!(r.needs_push, merged != theirs);
         assert_eq!(
             r.changed,
-            merged != mine || m.last != local.last || m.generation != local.generation
+            merged != mine || m.generation != local.generation
         );
         // Commutative.
         assert_eq!(state(&run(remote, local).0), merged);
@@ -854,7 +840,8 @@ mod tests {
                         deleted.insert(old);
                         c.generation += 1;
                     }
-                    // An unlock with an OTP code.
+                    // A vault file whose old OTP watermark another
+                    // version moved: a local value only.
                     62..67 => c.last = c.last.max(step),
                     // Merge a random earlier copy of a random replica.
                     _ => {

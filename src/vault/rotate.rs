@@ -14,19 +14,15 @@
 //! finishes the change (`resume`) or drops it.
 use super::{
     AtomicError, DataRef, FileLock, Format, GAP_KEPT, GAP_NOT_CHANGED, HaltedHead, Header,
-    KEY_FILE_LIMIT, KeyFile, KeyNotice, LOCAL_ROLLBACK, OTP_TYPED_MAX, PENDING_ELSEWHERE,
-    RESTORE_KEYS, RESTORE_OLDKEY, RESTORE_PENDING, Session, anchor, atomic_write, decode_data,
-    encode_data,
+    KEY_FILE_LIMIT, KeyFile, KeyNotice, LOCAL_ROLLBACK, PENDING_ELSEWHERE, RESTORE_KEYS,
+    RESTORE_OLDKEY, RESTORE_PENDING, Session, anchor, atomic_write, decode_data, encode_data,
     keyfile::{
         self, Bundle, EPOCH_LIMIT, EPOCH_MAX, Kind, MAX_KEYS, Plan, Spec, Touch, WriterSecrets,
         key_id,
     },
-    otp_format, password_policy, read_bounded, recover, refuse, sha256,
+    password_policy, read_bounded, recover, refuse, sha256,
 };
-use crate::{
-    crypto::{self, AUTH_ERROR, Key, Result, ct_eq},
-    otp,
-};
+use crate::crypto::{self, AUTH_ERROR, Key, Result, ct_eq};
 use std::{
     fs,
     io::Read,
@@ -114,8 +110,8 @@ const HEAD_CHANGED: &str =
 /// is nothing to confirm or discard.
 pub const NOTHING_HELD: &str = "확인하거나 버릴 열쇠 기록이 없습니다.";
 
-/// A re-authentication (spec §5.3): the password (and OTP code) checked
-/// again for one flow, which holds the key file's lock until its key change.
+/// A re-authentication (spec §5.3): the password (and a security key)
+/// checked again for one flow, which holds the key file's lock until its key change.
 /// Single-use (a key change consumes it), bound to its session, and usable
 /// for REAUTH_MAX. Zeroized on drop.
 pub struct Reauth {
@@ -127,8 +123,6 @@ pub struct Reauth {
     /// the clock a test moves.
     created: u64,
     password: Zeroizing<String>,
-    /// The OTP step verified and saved; None without an OTP code.
-    otp_step: Option<u64>,
     /// The touched key of a key file with security keys: S, its output and
     /// what its pair records reach.
     #[cfg(feature = "security-key")]
@@ -153,14 +147,6 @@ impl Reauth {
     fn age(&self) -> Duration {
         Duration::from_millis(crate::crypto::now_ms().saturating_sub(self.created))
     }
-}
-/// The OTP step of a Reauth: a code typed at a time, the step the login
-/// verified and saved (`reauth_from_unlock`), or none (the OTP backup).
-enum Otp<'a> {
-    Typed(&'a str, u64),
-    #[cfg(feature = "security-key")]
-    Proven(Option<u64>),
-    None,
 }
 /// What a key change does (spec §5.5).
 pub enum Change {
@@ -375,28 +361,14 @@ impl Session {
     /// Re-authenticates for one key change (spec §5.3): takes the key file's
     /// lock, requires the key file on disk to be this session's, and opens
     /// it with `password` (and for a key file with security keys `touch`) to
-    /// this session's keys. A key change of an OTP vault passes the code and
-    /// when it was typed: it is checked against the watermark and saved at
-    /// once. The default build has no security key, so `touch` is None.
-    pub fn reauth(
-        &mut self,
-        password: &str,
-        otp: Option<(&str, u64)>,
-        touch: Option<&Touch>,
-    ) -> Result<Reauth> {
-        if self.uses_otp() && otp.is_some_and(|(code, _)| !otp_format(code)) {
-            return Err(AUTH_ERROR);
-        }
-        self.reauth_with(
-            password,
-            otp.map_or(Otp::None, |(c, t)| Otp::Typed(c, t)),
-            touch,
-        )
+    /// this session's keys. The default build has no security key, so
+    /// `touch` is None.
+    pub fn reauth(&mut self, password: &str, touch: Option<&Touch>) -> Result<Reauth> {
+        self.reauth_with(password, touch)
     }
     /// The login's own Reauth (spec §5.3): the key file opened again with
-    /// the unlock's password and touch, the OTP step the unlock verified
-    /// and saved taken as it is, so an OTP vault asks no second code. Only
-    /// for the session the proof came from.
+    /// the unlock's password and touch. Only for the session the proof came
+    /// from.
     #[cfg(feature = "security-key")]
     pub fn reauth_from_unlock(
         &mut self,
@@ -406,7 +378,7 @@ impl Session {
         if proof.session != self.serial {
             return Err(REAUTH_STALE);
         }
-        self.reauth_with(&proof.password, Otp::Proven(proof.otp_step), Some(touch))
+        self.reauth_with(&proof.password, Some(touch))
     }
     /// The Reauth of the second entry point (spec §5.2, §7.15 step 4): this
     /// session was built from the server's key file `password` opened, so
@@ -424,14 +396,13 @@ impl Session {
             app_serial: 0,
             created: crate::crypto::now_ms(),
             password: Zeroizing::new(password.to_owned()),
-            otp_step: self.uses_otp().then_some(self.last),
             keys: None,
             own_password: false,
             bare_transport: touch.transport,
             _lock: lock,
         })
     }
-    fn reauth_with(&mut self, password: &str, otp: Otp, touch: Option<&Touch>) -> Result<Reauth> {
+    fn reauth_with(&mut self, password: &str, touch: Option<&Touch>) -> Result<Reauth> {
         if password.len() > 1024 {
             return Err(AUTH_ERROR);
         }
@@ -449,33 +420,11 @@ impl Session {
         #[cfg(feature = "security-key")]
         let keys = self.authorizer(&opened, touch)?;
         drop(opened);
-        let otp_step = match (self.keys.otp(), otp) {
-            #[cfg(feature = "security-key")]
-            (Some(_), Otp::Proven(step)) => step,
-            (Some(secret), Otp::Typed(code, typed)) => {
-                let now = otp::now()?;
-                if now.saturating_sub(typed) > OTP_TYPED_MAX || typed > now.saturating_add(5) {
-                    return Err(AUTH_ERROR);
-                }
-                let step =
-                    otp::verify(secret, code, typed, Some(self.last)).map_err(|_| AUTH_ERROR)?;
-                // The step is spent at once (spec §5.3 step 4); the content
-                // counter stays, as an OTP step is never synced.
-                let previous = std::mem::replace(&mut self.last, step);
-                if let Err(e) = self.save() {
-                    self.last = previous;
-                    return Err(e);
-                }
-                Some(step)
-            }
-            _ => None,
-        };
         Ok(Reauth {
             session: self.serial,
             app_serial: 0,
             created: crate::crypto::now_ms(),
             password: Zeroizing::new(password.to_owned()),
-            otp_step,
             #[cfg(feature = "security-key")]
             keys,
             own_password: true,
@@ -614,11 +563,7 @@ impl Session {
         override_gate: bool,
     ) -> Result<Rekeyed> {
         // R0. The Reauth of the second entry point serves only its accept.
-        if r.session != self.serial
-            || r.age() > REAUTH_MAX
-            || (self.uses_otp() && r.otp_step.is_none())
-            || !r.own_password
-        {
+        if r.session != self.serial || r.age() > REAUTH_MAX || !r.own_password {
             return Err(REAUTH_STALE);
         }
         let gate = self.change_gate(&change)?;
@@ -666,7 +611,7 @@ impl Session {
         let mut dk: Box<Key> = Box::default();
         crypto::random_into(dk.as_mut_slice())?;
         let keys = rotated(&dk, self.keys.keys());
-        let bundle = Bundle::new(&keys, self.keys.otp()).ok_or(AUTH_ERROR)?;
+        let bundle = Bundle::new(&keys).ok_or(AUTH_ERROR)?;
         let h = self.key_file.header();
         let spec = Spec {
             vault_id: self.id,
@@ -679,7 +624,7 @@ impl Session {
             resume,
         };
         let (bytes, writer) = keyfile::seal(&spec, &bundle, password, Plan::PasswordOnly)?;
-        let built = self.built(bytes, &writer, &spec, &bundle, Some(probe))?;
+        let built = self.built(bytes, &writer, &spec, &bundle, Some(probe), None)?;
         drop(writer);
         self.land(built, anchor::Src::Other, Some(anchor::Pw::New))
     }
@@ -687,7 +632,9 @@ impl Session {
     /// sealed from `spec` and `bundle`, as any reader parses and opens it,
     /// and the vault file under the key it holds, decoded back. Anything
     /// but what was meant is NOT_VERIFIED, with nothing written. `probe`:
-    /// V_probe of a change of the data key, which `spec` names.
+    /// V_probe of a change of the data key, which `spec` names. `reseal`:
+    /// the same-epoch re-seal of another file, which keeps its `[0, W)` and
+    /// so an old OTP vault's flag; no other write has the flag.
     fn built(
         &self,
         bytes: Vec<u8>,
@@ -695,6 +642,7 @@ impl Session {
         spec: &Spec,
         bundle: &Bundle,
         probe: Option<Vec<u8>>,
+        reseal: Option<&keyfile::KeyHeader>,
     ) -> Result<Built> {
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut bytes = bytes;
@@ -714,7 +662,8 @@ impl Session {
                     ..spec.clone()
                 })
             || kh.key_ids != ids
-            || kh.otp() != self.uses_otp()
+            // No new key file holds a TOTP secret (the OTP was removed).
+            || (kh.otp_secret() && !reseal.is_some_and(|h| h.otp_secret()))
             || !opened.bundle.same(bundle)
             || kh.key_ids.last() != Some(&key_id(&self.id, self.keys.id_key()))
         {
@@ -1171,10 +1120,7 @@ impl Session {
     /// hold lifts and every verdict is derived again; a later key change of
     /// this PC that the confirmed line held is forgotten. Not for a Restore.
     pub fn confirm_key_file(&mut self, r: Reauth) -> Result<()> {
-        if r.session != self.serial
-            || r.age() > REAUTH_MAX
-            || (self.uses_otp() && r.otp_step.is_none())
-        {
+        if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
         if !self.local_rollback || self.restore_held {
@@ -1183,7 +1129,7 @@ impl Session {
         let state = self.key_state;
         let current = key_id(&self.id, self.keys.current());
         let (header, magic) = (self.key_file.header().cloned(), self.key_file.magic());
-        let otp = self.uses_otp();
+        let otp = self.key_file.otp_secret();
         // The vault file is under that key now, as its unlock left it.
         let vkey = (header.is_none() || self.current()).then_some(current);
         self.anchor_update(anchor::LOCK_WAIT, &mut |lines| {
@@ -1222,10 +1168,7 @@ impl Session {
     /// Reauth, the pending line whose key file could not be read is removed
     /// as one that never landed, if it is still the one this session found.
     pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {
-        if r.session != self.serial
-            || r.age() > REAUTH_MAX
-            || (self.uses_otp() && r.otp_step.is_none())
-        {
+        if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
         if self.pending_elsewhere.is_none() {
@@ -1260,10 +1203,7 @@ impl Session {
     /// this PC's state is pushed over that server version. Nothing is
     /// persisted: a later unlock, or any other head, is judged again.
     pub fn override_head(&mut self, r: Reauth, head: &HaltedHead) -> Result<()> {
-        if r.session != self.serial
-            || r.age() > REAUTH_MAX
-            || (self.uses_otp() && r.otp_step.is_none())
-        {
+        if r.session != self.serial || r.age() > REAUTH_MAX {
             return Err(REAUTH_STALE);
         }
         // Nothing reaches the server that no vault file on disk holds.
@@ -1329,8 +1269,9 @@ fn rotated(fresh: &[u8; 32], keys: &[[u8; 32]]) -> Zeroizing<Vec<[u8; 32]>> {
     }
     out
 }
-/// The same contents in `format`: the OTP watermark and the entries' text,
-/// and for V2 also their IDs and parents, the tombstones and the counters.
+/// The same contents in `format`: the old OTP watermark (kept as it is) and
+/// the entries' text, and for V2 also their IDs and parents, the tombstones
+/// and the counters.
 /// A V1 file stores no IDs: they are derived when it is read.
 fn same(format: Format, a: DataRef, b: DataRef) -> bool {
     let v2 = format == Format::V2;
@@ -1418,30 +1359,6 @@ mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-    /// OTP codes typed at increasing times inside the three minutes an
-    /// unlock accepts; empty without an OTP.
-    pub(super) struct Codes {
-        pub(super) secret: Option<[u8; 20]>,
-        pub(super) at: u64,
-    }
-    impl Codes {
-        pub(super) fn next(&mut self) -> (String, u64) {
-            let now = otp::now().unwrap();
-            match self.secret {
-                None => (String::new(), now),
-                Some(secret) => {
-                    let t = self.at;
-                    self.at += 30;
-                    assert!(t <= now + 5, "no OTP step left in the window");
-                    (format!("{:06}", otp::code(&secret, t / 30, 6)), t)
-                }
-            }
-        }
-        /// A code of the right form for an attempt that fails before it.
-        pub(super) fn any(&self) -> &'static str {
-            if self.secret.is_some() { "000000" } else { "" }
-        }
-    }
     pub(super) fn entry(secret: &str) -> Entry {
         Entry::new("item".into(), "kind".into(), secret.into(), String::new()).unwrap()
     }
@@ -1451,32 +1368,24 @@ mod tests {
             .map(|e| e.secret.as_str().to_owned())
             .collect()
     }
-    pub(super) fn login(pc: &Pc, password: &str, codes: &mut Codes) -> Result<Session> {
+    pub(super) fn login(pc: &Pc, password: &str) -> Result<Session> {
         pc.here();
         let prepared = prepare(&pc.vault(), &pc.key())?;
-        let (code, typed) = codes.next();
-        Session::login(prepared, password, &code, typed, None)
+        Session::login(prepared, password, None)
     }
     /// A failed login: what the app then says instead of AUTH_ERROR.
-    pub(super) fn refused(pc: &Pc, password: &str, codes: &Codes) -> Option<&'static str> {
+    pub(super) fn refused(pc: &Pc, password: &str) -> Option<&'static str> {
         pc.here();
         let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
         let said = prepared.auth_failure();
-        let now = otp::now().unwrap();
         assert_eq!(
-            Session::login(prepared, password, codes.any(), now, None).err(),
+            Session::login(prepared, password, None).err(),
             Some(AUTH_ERROR)
         );
         said
     }
-    pub(super) fn change(
-        s: &mut Session,
-        codes: &mut Codes,
-        from: &str,
-        to: &str,
-    ) -> Result<Rekeyed> {
-        let (code, typed) = codes.next();
-        let r = s.reauth(from, Some((&code, typed)), None)?;
+    pub(super) fn change(s: &mut Session, from: &str, to: &str) -> Result<Rekeyed> {
+        let r = s.reauth(from, None)?;
         let to = Change::Password(Zeroizing::new(to.to_owned()));
         s.rekey(r, Vec::new(), to, Consent::default(), true)
     }
@@ -1504,40 +1413,35 @@ mod tests {
     /// A vault of `pc` with two entries and the password OLD: a 0.8 one, or
     /// one whose password changed once already (`kf2`: GOYOKE03, with this
     /// PC's anchor line); with `sync`, linked to a sync folder the helper
-    /// made.
-    pub(super) fn setup(pc: &Pc, kf2: bool, with_otp: bool, sync: bool) -> (Session, Codes) {
+    /// made. `with_otp`: made with the removed OTP, so its 0.8 key file is
+    /// GOYOKE01 with a TOTP secret, which no key change keeps.
+    pub(super) fn setup(pc: &Pc, kf2: bool, with_otp: bool, sync: bool) -> Session {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let p = Provision::new().unwrap();
-        let code = with_otp.then(|| {
-            let now = otp::now().unwrap();
-            format!("{:06}", otp::code(p.otp.as_slice(), now / 30, 6))
-        });
         let first = if kf2 { FIRST } else { OLD };
-        let mut s = p
-            .finish(&pc.vault(), &pc.key(), first, code.as_deref())
-            .unwrap();
-        // As if made minutes ago, so that every step of the window is left.
-        s.last = 0;
-        s.save().unwrap();
+        let mut s = p.finish(&pc.vault(), &pc.key(), first).unwrap();
+        if with_otp {
+            drop(s);
+            let old = keyfile::encode_key_otp(&p.id, &p.key, &[0x77; 20], first).unwrap();
+            fs::write(pc.key(), old).unwrap();
+            s = login(pc, first).unwrap();
+            assert!(s.key_file.otp_secret());
+        }
         s.put(None, entry("one")).unwrap();
         s.put(None, entry("two")).unwrap();
         if sync {
             let dir = syncfile::sync_dir(&pc.vault()).unwrap();
             fs::create_dir(&dir).unwrap();
-            let now = otp::now().unwrap();
+            let now = crate::clock::now().unwrap();
             let status = syncfile::render_status(now, now, syncfile::SyncState::Ok);
             syncfile::replace_file(&dir.join(syncfile::STATUS), &status).unwrap();
             s.enable_sync().unwrap();
         }
-        let mut codes = Codes {
-            secret: with_otp.then(|| **p.otp),
-            at: otp::now().unwrap() - 150,
-        };
         if kf2 {
-            assert_eq!(change(&mut s, &mut codes, FIRST, OLD), Ok(Rekeyed::Done));
+            assert_eq!(change(&mut s, FIRST, OLD), Ok(Rekeyed::Done));
             s.take_key_notices();
         }
-        (s, codes)
+        s
     }
     /// The vault file's header and the key file's current key and state
     /// agree, and the vault file decodes under it (I3).
@@ -1602,9 +1506,9 @@ mod tests {
     }
     /// Another PC's key file of `s`'s vault, sealed with NEW: a later state
     /// that holds this PC's current key (a successor), or one at this PC's
-    /// epoch that split from the 0.8 state (a fork, joined in a union).
+    /// epoch that split from the 0.8 state (a fork, joined in a union). It
+    /// holds no TOTP secret, whatever this PC's key file holds.
     pub(super) fn other_of(s: &Session, what: What) -> Vec<u8> {
-        let otp = s.keys.otp().copied();
         let epoch = s.key_state().epoch;
         let keys = match what {
             What::Union => vec![[0x43; 32], *s.keys.id_key()],
@@ -1615,7 +1519,7 @@ mod tests {
         } else {
             epoch + 1
         };
-        sealed_with(s.id, &keys, otp.as_ref(), epoch, &[], NEW).0
+        sealed(s.id, &keys, epoch, &[], NEW).0
     }
     /// The plan of an adopt of `other`, opened with `password`, as the flow
     /// makes it: checked (its class must be `class`), opened and previewed.
@@ -1653,7 +1557,7 @@ mod tests {
     fn crash(what: What, point: &'static str, kf2: bool, with_otp: bool, sync: bool) {
         let case = format!("{what:?} {point} kf2={kf2} otp={with_otp} sync={sync}");
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, kf2, with_otp, sync);
+        let mut s = setup(&pc, kf2, with_otp, sync);
         let id = s.id;
         let other = (what != What::Password).then(|| other_of(&s, what));
         let before = secrets(&s);
@@ -1669,8 +1573,7 @@ mod tests {
                 Box::new(move || *held.borrow_mut() = fs::read(&vault).ok()),
             ))
         });
-        let (code, typed) = codes.next();
-        let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         let last = s.last;
         let gap = GAPS
             .iter()
@@ -1708,7 +1611,7 @@ mod tests {
         let pending_seen = point != "S0.tmp_synced" || !had_anchor;
         // I1 and the hints: the other factors fail, and the app says which
         // password the key file now takes (§5.12).
-        let hint = refused(&pc, wrong, &codes);
+        let hint = refused(&pc, wrong);
         // Once promoted (S5) the change is plainly complete: no pending
         // line names its password any more.
         let want = if point == "S5" {
@@ -1728,7 +1631,7 @@ mod tests {
         assert_eq!(hint, want, "{case}");
         // The recovery unlock: a change that never landed is dropped and
         // said once; a landed one completes silently.
-        let mut s = login(&pc, right, &mut codes).unwrap_or_else(|e| panic!("{case}: {e}"));
+        let mut s = login(&pc, right).unwrap_or_else(|e| panic!("{case}: {e}"));
         let said = notices(&mut s);
         let unfinished = said
             .iter()
@@ -1751,9 +1654,9 @@ mod tests {
             matches!(point, "S1.gap" | "S3.gap"),
             "{case}"
         );
-        // I2: the contents, and the OTP watermark never back.
+        // I2: the contents, and the old OTP watermark as it was.
         assert_eq!(secrets(&s), before, "{case}");
-        assert!(s.last >= last, "{case}");
+        assert_eq!(s.last, last, "{case}");
         // I3: the vault file under the key file's current key and state, no
         // key file temp left, nor a vault file temp with what it holds.
         consistent(&pc, &s);
@@ -1805,16 +1708,19 @@ mod tests {
             }
         }
         drop(s);
-        // I6: a second unlock writes nothing but, with an OTP, the code's
-        // step into the vault file.
+        // I6: a second unlock writes nothing, also for a vault made with
+        // the removed OTP; its key file holds no TOTP secret once the
+        // change landed.
         let files = (fs::read(pc.key()).unwrap(), pc.anchor());
         let v = fs::read(pc.vault()).unwrap();
-        let mut s = login(&pc, right, &mut codes).unwrap();
+        let mut s = login(&pc, right).unwrap();
         assert!(notices(&mut s).is_empty(), "{case}");
         assert_eq!((fs::read(pc.key()).unwrap(), pc.anchor()), files, "{case}");
-        if !with_otp {
-            assert_eq!(fs::read(pc.vault()).unwrap(), v, "{case}");
-        }
+        assert_eq!(fs::read(pc.vault()).unwrap(), v, "{case}");
+        assert!(
+            !s.key_file.otp_secret() || s.key_file.bytes() == old_key.as_slice(),
+            "{case}"
+        );
         assert_eq!(secrets(&s), before, "{case}");
         drop(s);
         // I11: the change completed, so its probe restored in place of the
@@ -1844,7 +1750,8 @@ mod tests {
 
     /// Every crash point of a password change from a 0.8 key file and from
     /// a GOYOKE03 one, the replace gaps each followed by a crash included,
-    /// with and without an OTP and vault sync (spec §14.5).
+    /// for a 0.8 vault made with the removed OTP too, with and without
+    /// vault sync (spec §14.5).
     #[test]
     fn every_crash_point_leaves_a_pair_that_opens() {
         for kf2 in [false, true] {
@@ -1903,19 +1810,19 @@ mod tests {
     #[test]
     fn a_gap_at_s1_changes_nothing() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let key = fs::read(pc.key()).unwrap();
         CRASH.with(|c| c.set(Some("S1.gap")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(GAP_NOT_CHANGED));
+        assert_eq!(change(&mut s, OLD, NEW), Err(GAP_NOT_CHANGED));
         assert!(s.gap_kept() && !pc.vault().exists());
         assert_eq!(pc.temps(&pc.vault()).len(), 1);
         assert_eq!(fs::read(pc.key()).unwrap(), key);
         assert!(pc.lines(&id).pending.is_none());
         assert_eq!(s.put(None, entry("lost")), Err(GAP_KEPT));
         drop(s);
-        assert_eq!(refused(&pc, NEW, &codes), None);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        assert_eq!(refused(&pc, NEW), None);
+        let mut s = login(&pc, OLD).unwrap();
         assert!(s.take_recovery().vault);
         assert_eq!(notices(&mut s), []);
         assert_eq!(secrets(&s), ["one", "two"]);
@@ -1929,7 +1836,7 @@ mod tests {
     #[test]
     fn a_key_file_that_cannot_be_replaced_changes_nothing() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let key = pc.key();
         let locked = key.clone();
@@ -1938,7 +1845,7 @@ mod tests {
             p.set_readonly(true);
             fs::set_permissions(&locked, p).unwrap();
         });
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(KEY_NOT_SAVED));
+        assert_eq!(change(&mut s, OLD, NEW), Err(KEY_NOT_SAVED));
         let mut p = fs::metadata(&key).unwrap().permissions();
         #[allow(clippy::permissions_set_readonly_false)]
         p.set_readonly(false);
@@ -1946,8 +1853,8 @@ mod tests {
         assert!(pc.lines(&id).pending.is_none());
         s.put(None, entry("three")).unwrap();
         drop(s);
-        assert_eq!(refused(&pc, NEW, &codes), None);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        assert_eq!(refused(&pc, NEW), None);
+        let mut s = login(&pc, OLD).unwrap();
         assert_eq!(notices(&mut s), []);
         assert_eq!(secrets(&s), ["one", "two", "three"]);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -1963,9 +1870,9 @@ mod tests {
     fn a_gap_at_s2_commits_from_the_kept_temp_file() {
         for crash_after in [false, true] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             CRASH.with(|c| c.set(Some("S2.gap")));
-            assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+            assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
             assert!(s.key_temp() && !pc.key().exists());
             assert_eq!(s.take_key_notices(), [KeyNotice::KeyTemp]);
             let temp = pc.temps(&pc.key());
@@ -1976,8 +1883,8 @@ mod tests {
             assert!(KeyFile::read(&backup).unwrap().open(NEW, None).is_ok());
             if crash_after {
                 drop(s);
-                assert_eq!(refused(&pc, OLD, &codes), Some(CHANGE_DONE_NEWPASS));
-                let mut s = login(&pc, NEW, &mut codes).unwrap();
+                assert_eq!(refused(&pc, OLD), Some(CHANGE_DONE_NEWPASS));
+                let mut s = login(&pc, NEW).unwrap();
                 assert_eq!(notices(&mut s), []);
                 assert!(pc.key().exists() && pc.temps(&pc.key()).is_empty());
                 consistent(&pc, &s);
@@ -1987,7 +1894,7 @@ mod tests {
                 assert!(pc.temps(&pc.key()).is_empty());
                 consistent(&pc, &s);
                 drop(s);
-                drop(login(&pc, NEW, &mut codes).unwrap());
+                drop(login(&pc, NEW).unwrap());
             }
         }
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -2000,15 +1907,15 @@ mod tests {
     #[test]
     fn a_landed_key_file_left_as_a_temp_file_completes() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
         let mut name = pc.key().into_os_string();
         name.push(format!(".{:032x}.goyotmp", 0x5eu8));
         fs::rename(pc.key(), &name).unwrap();
-        assert_eq!(refused(&pc, OLD, &codes), Some(CHANGE_DONE_NEWPASS));
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        assert_eq!(refused(&pc, OLD), Some(CHANGE_DONE_NEWPASS));
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::Resumed]);
         assert!(pc.key().exists() && !Path::new(&name).exists());
         consistent(&pc, &s);
@@ -2016,19 +1923,19 @@ mod tests {
         // An older key file's temp, below the state this PC confirmed, is
         // only the rename advice: here with the vault file of its time.
         let pc = Pc::new();
-        let (s, _) = setup(&pc, true, false, false);
+        let s = setup(&pc, true, false, false);
         let older = s.key_file.bytes().to_vec();
         let vault = fs::read(pc.vault()).unwrap();
         drop(s);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
-        change(&mut s, &mut codes, OLD, NEW).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
+        change(&mut s, OLD, NEW).unwrap();
         drop(s);
         fs::write(pc.vault(), vault).unwrap();
         fs::remove_file(pc.key()).unwrap();
         let mut name = pc.key().into_os_string();
         name.push(format!(".{:032x}.goyotmp", 0x6fu8));
         fs::write(&name, older).unwrap();
-        assert_eq!(refused(&pc, NEW, &codes), Some(LEFTOVER_TEMP));
+        assert_eq!(refused(&pc, NEW), Some(LEFTOVER_TEMP));
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -2045,15 +1952,11 @@ mod tests {
         let key = keys.join("vault.goyokey");
         let mut s = Provision::new()
             .unwrap()
-            .finish(&pc.vault(), &key, OLD, None)
+            .finish(&pc.vault(), &key, OLD)
             .unwrap();
         s.put(None, entry("one")).unwrap();
-        let mut codes = Codes {
-            secret: None,
-            at: 0,
-        };
         CRASH.with(|c| c.set(Some("S2.gap")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         assert!(s.key_temp());
         s.take_key_notices();
         // The stick is pulled: nothing is decided.
@@ -2064,7 +1967,7 @@ mod tests {
         assert_eq!(s.take_key_notices(), []);
         // A second change before it is back: refused for the missing key
         // file, with nothing written.
-        assert!(change(&mut s, &mut codes, NEW, THIRD).is_err());
+        assert!(change(&mut s, NEW, THIRD).is_err());
         // Back: the rename happens.
         fs::rename(&away, &keys).unwrap();
         s.before_lock();
@@ -2072,10 +1975,10 @@ mod tests {
         assert_eq!(fs::read(&key).unwrap(), s.key_file.bytes());
         drop(s);
         // Both names read and gone: a key backup from memory, which opens.
-        let mut s = Session::unlock(&pc.vault(), &key, NEW, "").unwrap();
+        let mut s = Session::unlock(&pc.vault(), &key, NEW).unwrap();
         s.take_key_notices();
         CRASH.with(|c| c.set(Some("S2.gap")));
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         s.take_key_notices();
         for temp in pc.temps(&key) {
             fs::remove_file(temp).unwrap();
@@ -2087,7 +1990,7 @@ mod tests {
         s.backup_key(&backup).unwrap();
         drop(s);
         fs::copy(&backup, &key).unwrap();
-        drop(Session::unlock(&pc.vault(), &key, THIRD, "").unwrap());
+        drop(Session::unlock(&pc.vault(), &key, THIRD).unwrap());
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -2120,9 +2023,9 @@ mod tests {
             ) -> i32;
         }
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         CRASH.with(|c| c.set(Some("S2.gap")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         assert!(s.key_temp());
         s.take_key_notices();
         for temp in pc.temps(&pc.key()) {
@@ -2158,12 +2061,12 @@ mod tests {
     #[test]
     fn a_gap_at_s3_keeps_the_change() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, true);
+        let mut s = setup(&pc, true, false, true);
         let id = s.id;
         let dir = syncfile::sync_dir(&pc.vault()).unwrap();
         let outgoing = fs::read(dir.join(syncfile::OUTGOING)).ok();
         CRASH.with(|c| c.set(Some("S3.gap")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::GapKept));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::GapKept));
         assert!(s.gap_kept() && !pc.vault().exists());
         assert!(KeyFile::read(&pc.key()).unwrap().open(NEW, None).is_ok());
         let resume = s.key_file.header().unwrap().resume;
@@ -2174,8 +2077,8 @@ mod tests {
         assert!(pc.lines(&id).pending.is_none());
         assert_eq!(fs::read(dir.join(syncfile::OUTGOING)).ok(), outgoing);
         drop(s);
-        assert_eq!(refused(&pc, OLD, &codes), None);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        assert_eq!(refused(&pc, OLD), None);
+        let mut s = login(&pc, NEW).unwrap();
         assert!(s.take_recovery().vault);
         assert_eq!(secrets(&s), ["one", "two"]);
         let line = pc.lines(&id).vault.unwrap();
@@ -2191,14 +2094,14 @@ mod tests {
     #[test]
     fn a_key_file_of_unknown_state_is_kept_for_a_backup() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let key = pc.key();
         let gone = key.clone();
         set_before("S2", move || {
             fs::remove_file(&gone).unwrap();
             fs::create_dir(&gone).unwrap();
         });
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(KEY_DAMAGED));
+        assert_eq!(change(&mut s, OLD, NEW), Err(KEY_DAMAGED));
         assert!(s.key_unsaved());
         assert_eq!(s.password_change(), Err(KEY_DAMAGED));
         assert_eq!(s.put(None, entry("x")), Err(KEY_DAMAGED));
@@ -2207,7 +2110,7 @@ mod tests {
         drop(s);
         fs::remove_dir(&key).unwrap();
         fs::copy(&backup, &key).unwrap();
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::Resumed]);
         assert_eq!(secrets(&s), ["one", "two"]);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -2220,7 +2123,7 @@ mod tests {
     #[test]
     fn a_vault_file_saved_later_still_completes_the_change() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, true);
+        let mut s = setup(&pc, true, false, true);
         let id = s.id;
         let held = Rc::new(RefCell::new(None));
         let hold = held.clone();
@@ -2228,10 +2131,7 @@ mod tests {
         set_before("S3", move || {
             *hold.borrow_mut() = Some(fs::File::open(&vault).unwrap())
         });
-        assert_eq!(
-            change(&mut s, &mut codes, OLD, NEW),
-            Ok(Rekeyed::VaultPending)
-        );
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::VaultPending));
         assert!(s.resave_due);
         let probe = fs::read(pc.vault()).unwrap();
         let line = pc.lines(&id).vault.unwrap();
@@ -2257,9 +2157,9 @@ mod tests {
             line.state.consumed,
             Some(s.key_file.header().unwrap().resume)
         );
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         drop(s);
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert_eq!(notices(&mut s), []);
         drop(s);
         fs::write(pc.vault(), probe).unwrap();
@@ -2276,16 +2176,16 @@ mod tests {
     #[test]
     fn an_anchor_that_cannot_be_written_is_kept_in_memory() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let anchor = pc.anchor();
         let blocker = pc.file("blocker");
         fs::write(&blocker, b"no folder").unwrap();
         let real = s.anchor.dir.replace(blocker.join("anchor"));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         assert_eq!(s.take_key_notices(), [KeyNotice::SidecarFailed]);
         assert_eq!(pc.anchor(), anchor);
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         assert_eq!(s.take_key_notices(), []);
         s.anchor.dir = real;
         s.put(None, entry("three")).unwrap();
@@ -2294,7 +2194,7 @@ mod tests {
         assert_eq!(lines.vault.unwrap().state.key_state(), s.key_state());
         assert!(lines.pending.is_none());
         drop(s);
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert_eq!(notices(&mut s), []);
         // Only S5 fails: the lock is held while S3 runs, and released after.
         let lock = Rc::new(RefCell::new(None));
@@ -2303,7 +2203,7 @@ mod tests {
         set_before("S3", move || {
             *hold.borrow_mut() = Some(anchor::hold_lock(&dir))
         });
-        assert_eq!(change(&mut s, &mut codes, THIRD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, THIRD, NEW), Ok(Rekeyed::Done));
         assert_eq!(s.take_key_notices(), [KeyNotice::SidecarFailed]);
         let lines = pc.lines(&id);
         assert_eq!(lines.pending.unwrap().state.key_state(), s.key_state());
@@ -2321,10 +2221,10 @@ mod tests {
     fn a_new_file_that_does_not_verify_is_never_written() {
         for which in ["K", "V"] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             let before = files(&pc);
             CORRUPT.with(|c| c.set(Some(which)));
-            assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(NOT_VERIFIED));
+            assert_eq!(change(&mut s, OLD, NEW), Err(NOT_VERIFIED));
             assert_eq!(CORRUPT.with(|c| c.get()), None);
             assert_eq!(files(&pc), before, "{which}");
         }
@@ -2333,8 +2233,7 @@ mod tests {
 
     /// R0 (spec §5.5): what refuses a password change before anything is
     /// written: the same password, a weak one, a Reauth of another session
-    /// or older than REAUTH_MAX, an OTP vault's Reauth without its code, a
-    /// key file changed on disk, an unanswered gate and the last epoch.
+    /// or older than REAUTH_MAX, a key file changed on disk, an unanswered gate and the last epoch.
     #[test]
     fn a_password_change_is_refused_before_anything_is_written() {
         let rekey = |s: &mut Session, r: Reauth, to: &str, gate: bool| {
@@ -2342,12 +2241,9 @@ mod tests {
             s.rekey(r, Vec::new(), to, Consent::default(), gate)
         };
         let pc = Pc::new();
-        let (mut s, _) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let before = files(&pc);
-        let reauth = |s: &mut Session| {
-            s.reauth(OLD, Some(("", otp::now().unwrap())), None)
-                .unwrap()
-        };
+        let reauth = |s: &mut Session| s.reauth(OLD, None).unwrap();
         let r = reauth(&mut s);
         assert_eq!(rekey(&mut s, r, OLD, true), Err(SAMEPASS));
         let r = reauth(&mut s);
@@ -2385,13 +2281,6 @@ mod tests {
         fs::write(pc.key(), &other).unwrap();
         assert_eq!(rekey(&mut s, r, NEW, true), Err(KEY_CHANGED));
         drop(s);
-        // An OTP vault's key change takes a Reauth that checked a code.
-        let pc = Pc::new();
-        let (mut s, _) = setup(&pc, true, true, false);
-        let r = s.reauth(OLD, None, None).unwrap();
-        let before = files(&pc);
-        assert_eq!(rekey(&mut s, r, NEW, true), Err(REAUTH_STALE));
-        assert_eq!(files(&pc), before);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -2402,7 +2291,7 @@ mod tests {
     #[test]
     fn seventy_changes_keep_the_newest_keys_and_the_id_key() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, false, false, true);
+        let mut s = setup(&pc, false, false, true);
         let backup = pc.file("backup-08.goyo");
         s.backup(&backup).unwrap();
         let ids: Vec<EntryIdOf> = s.entries.iter().map(|e| e.id()).collect();
@@ -2411,10 +2300,7 @@ mod tests {
         let mut previous = *s.keys.current();
         for n in 0..70 {
             let next = format!("synthetic password number {n}");
-            assert_eq!(
-                change(&mut s, &mut codes, &password, &next),
-                Ok(Rekeyed::Done)
-            );
+            assert_eq!(change(&mut s, &password, &next), Ok(Rekeyed::Done));
             assert_eq!(s.keys.keys()[1], previous);
             previous = *s.keys.current();
             password = next;
@@ -2425,7 +2311,7 @@ mod tests {
         assert_eq!(s.entries.iter().map(|e| e.id()).collect::<Vec<_>>(), ids);
         let restored = pc.file("restored.goyo");
         drop(s);
-        let r = Session::restore(&backup, &pc.key(), &restored, &password, "").unwrap();
+        let r = Session::restore(&backup, &pc.key(), &restored, &password).unwrap();
         assert_eq!(secrets(&r), ["one", "two"]);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -2443,7 +2329,8 @@ mod tests {
     ) -> (Vec<u8>, keyfile::KeyState) {
         sealed_with(id, keys, None, epoch, tombs, password)
     }
-    /// The same with the TOTP secret `otp` of an OTP vault.
+    /// The same with the TOTP secret `otp` of a vault made with the removed
+    /// OTP: an old file, which no writer makes now.
     pub(super) fn sealed_with(
         id: [u8; 16],
         keys: &[[u8; 32]],
@@ -2470,8 +2357,15 @@ mod tests {
                 .collect(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(keys, otp).unwrap();
-        let (bytes, _) = keyfile::seal(&spec, &bundle, password, Plan::PasswordOnly).unwrap();
+        let bundle = Bundle::new(keys).unwrap();
+        let bytes = match otp {
+            Some(otp) => keyfile::seal_old_otp(&spec, &bundle, password, otp),
+            None => {
+                keyfile::seal(&spec, &bundle, password, Plan::PasswordOnly)
+                    .unwrap()
+                    .0
+            }
+        };
         let state = keyfile::parse(&bytes).unwrap().state();
         (bytes, state)
     }
@@ -2507,7 +2401,7 @@ mod tests {
     #[test]
     fn an_older_pair_put_back_is_held_until_confirmed() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, true);
+        let mut s = setup(&pc, true, false, true);
         let id = s.id;
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
         let dk1 = *s.keys.current();
@@ -2531,7 +2425,7 @@ mod tests {
             };
             encode_data(&id, &dk1, &header, Format::V2, d).unwrap()
         };
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         s.put(None, entry("three")).unwrap();
         drop(s);
         fs::write(pc.key(), &k1).unwrap();
@@ -2540,7 +2434,7 @@ mod tests {
         let incoming = syncfile::render_incoming(7, &copy).unwrap();
         syncfile::replace_file(&dir.join(syncfile::INCOMING), &incoming).unwrap();
         let outgoing = fs::read(dir.join(syncfile::OUTGOING)).ok();
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert_eq!(
             notices(&mut s),
             [KeyNotice::LocalRollback { old: 2, new: 1 }]
@@ -2559,9 +2453,7 @@ mod tests {
         assert_eq!(fs::read(dir.join(syncfile::OUTGOING)).ok(), outgoing);
         assert_eq!(pc.lines(&id).vault.unwrap().state.epoch, 2);
         // [이 열쇠 파일이 맞습니다] after a Reauth.
-        let r = s
-            .reauth(OLD, Some(("", otp::now().unwrap())), None)
-            .unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         s.confirm_key_file(r).unwrap();
         assert!(!s.local_rollback());
         let line = pc.lines(&id).vault.unwrap();
@@ -2572,9 +2464,9 @@ mod tests {
         let _ = s.poll_sync();
         assert!(secrets(&s).contains(&"planted".to_owned()));
         assert_ne!(fs::read(dir.join(syncfile::OUTGOING)).ok(), outgoing);
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -2588,14 +2480,14 @@ mod tests {
     #[test]
     fn the_08_pair_from_before_the_first_change_is_a_rollback() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, false, false, false);
+        let mut s = setup(&pc, false, false, false);
         let id = s.id;
         let (k0, v0) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
         assert!(pc.anchor().is_empty());
         // The turn-on-sync question asks for 0.8 or later only before the
         // first change, and for 0.9.0 everywhere after it.
         assert!(!s.needs_0_9());
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         assert!(s.needs_0_9());
         let line = pc.lines(&id).vault.unwrap();
         assert_eq!(line.state.hist.len(), 2);
@@ -2608,38 +2500,33 @@ mod tests {
             prepare(&pc.vault(), &pc.key()).unwrap().check().anchor,
             AnchorClass::Legacy
         );
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert_eq!(
             notices(&mut s),
             [KeyNotice::LocalRollback { old: 1, new: 0 }]
         );
-        let r = s
-            .reauth(OLD, Some(("", otp::now().unwrap())), None)
-            .unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         s.confirm_key_file(r).unwrap();
         let line = pc.lines(&id).vault.unwrap();
         assert_eq!(line.state.key_state(), s.key_state());
         assert_eq!(&line.state.magic, &k0[..8]);
         drop(s);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert_eq!(notices(&mut s), []);
         // A change from that 0.8 pair cut off before its key file was
         // written: the new password is told that the old one still opens it
         // (S-HINT-INTERRUPTED), and the old one drops the change, said once.
         CRASH.with(|c| c.set(Some("S1.done")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
-        assert_eq!(
-            refused(&pc, NEW, &codes),
-            Some(super::super::AUTH_HINT_INTERRUPTED)
-        );
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        assert_eq!(refused(&pc, NEW), Some(super::super::AUTH_HINT_INTERRUPTED));
+        let mut s = login(&pc, OLD).unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::NotFinished]);
         assert!(pc.lines(&id).pending.is_none());
         drop(s);
         // Another 0.8 key of the same vault ID, with its vault file.
         let other = Provision::new().unwrap();
-        let key = super::super::encode_key(&id, &other.key, None, OLD).unwrap();
+        let key = super::super::encode_key(&id, &other.key, OLD).unwrap();
         let vault = encode_data(
             &id,
             &other.key,
@@ -2657,11 +2544,7 @@ mod tests {
         fs::write(pc.key(), &key).unwrap();
         fs::write(pc.vault(), &vault).unwrap();
         let anchor = pc.anchor();
-        let mut codes = Codes {
-            secret: None,
-            at: 0,
-        };
-        let refused = login(&pc, OLD, &mut codes).err();
+        let refused = login(&pc, OLD).err();
         assert_eq!(refused, Some(super::super::ANCHOR_FORK));
         assert!(super::super::not_a_failure(super::super::ANCHOR_FORK));
         assert_eq!((fs::read(pc.key()).unwrap(), pc.anchor()), (key, anchor));
@@ -2679,10 +2562,10 @@ mod tests {
     #[test]
     fn forks_relists_and_far_epochs_are_refused_before_any_key_derivation() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let k1 = fs::read(pc.key()).unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         let (k2, v2) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
         let keys1 = keys_of(&k1, OLD);
         let keys2 = keys_of(&k2, NEW);
@@ -2731,7 +2614,7 @@ mod tests {
         // This PC's own pair opens as it is.
         fs::write(pc.vault(), &v2).unwrap();
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         // A later file with a removal (a GOYOKE03 after keys off on another
         // PC): taken silently in the default build (the security-key build
@@ -2748,7 +2631,7 @@ mod tests {
         fs::write(pc.key(), &k3).unwrap();
         fs::write(pc.vault(), vault_of(&s, &dk3, state3)).unwrap();
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         pass_gate(&mut s);
         assert_eq!(notices(&mut s), []);
         let line = pc.lines(&id).vault.unwrap();
@@ -2777,7 +2660,7 @@ mod tests {
         precheck_refuses(&pc, &pc.key(), super::super::ANCHOR_DOWNGRADE);
         fs::write(
             &forged,
-            super::super::encode_key(&id, &keys1[0], None, OLD).unwrap(),
+            super::super::encode_key(&id, &keys1[0], OLD).unwrap(),
         )
         .unwrap();
         precheck_refuses(&pc, &forged, super::super::ANCHOR_DOWNGRADE);
@@ -2799,29 +2682,28 @@ mod tests {
     #[test]
     fn two_pcs_with_a_key_file_each_share_one_vault_file() {
         let a = Pc::new();
-        let (s, mut codes) = setup(&a, true, false, false);
+        let s = setup(&a, true, false, false);
         let id = s.id;
         // One PC at a time has the vault file open (its lock file).
         drop(s);
         let b = Pc::new();
         fs::copy(a.key(), b.key()).unwrap();
-        let open_b = |key: &Path, codes: &mut Codes| {
+        let open_b = |key: &Path| {
             b.here();
             let prepared = prepare(&a.vault(), key)?;
-            let (code, typed) = codes.next();
-            Session::login(prepared, OLD, &code, typed, None).or_else(|_| {
+            Session::login(prepared, OLD, None).or_else(|_| {
                 b.here();
                 let prepared = prepare(&a.vault(), key)?;
-                Session::login(prepared, NEW, &code, typed, None)
+                Session::login(prepared, NEW, None)
             })
         };
-        drop(open_b(&b.key(), &mut codes).unwrap());
+        drop(open_b(&b.key()).unwrap());
         let probe = Rc::new(RefCell::new(None));
         let held = probe.clone();
         let vault = a.vault();
         set_before("S2", move || *held.borrow_mut() = fs::read(&vault).ok());
-        let mut s = login(&a, OLD, &mut codes).unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let mut s = login(&a, OLD).unwrap();
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         // B's own copy cannot open the vault file A saved.
         b.here();
@@ -2837,7 +2719,7 @@ mod tests {
         );
         // With A's new key file: a silent update, and the change sealed.
         fs::copy(a.key(), b.key()).unwrap();
-        let mut sb = open_b(&b.key(), &mut codes).unwrap();
+        let mut sb = open_b(&b.key()).unwrap();
         assert_eq!(notices(&mut sb), []);
         let line = b.lines(&id).vault.unwrap();
         assert_eq!(line.state.key_state(), sb.key_state());
@@ -2870,11 +2752,11 @@ mod tests {
     /// about (S-OLDER) and the yes completes and seals it (§7.7-2). An older
     /// vault file under that key whose counters no honest vault reaches is
     /// refused after its decode, writing nothing (S23-3 #2); within bounds,
-    /// `seen` never above `generation` and the OTP watermark never ahead.
+    /// `seen` never above `generation`, and the old OTP watermark kept.
     #[test]
     fn an_older_vault_file_under_this_pcs_key_is_asked_and_its_counters_checked() {
         let a = Pc::new();
-        let (mut s, mut codes) = setup(&a, true, false, true);
+        let mut s = setup(&a, true, false, true);
         let id = s.id;
         let dk1 = *s.keys.current();
         let state1 = s.key_state();
@@ -2883,9 +2765,9 @@ mod tests {
         fs::copy(a.vault(), b.vault()).unwrap();
         fs::copy(a.key(), b.key()).unwrap();
         let mine = fs::read(b.vault()).unwrap();
-        drop(login(&b, OLD, &mut codes).unwrap());
+        drop(login(&b, OLD).unwrap());
         // A changes the shared key file.
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         fs::copy(a.key(), b.key()).unwrap();
         let entries = s.entries.clone();
         let tombstones = s.tombstones.clone();
@@ -2905,14 +2787,13 @@ mod tests {
             };
             encode_data(&id, &dk1, &header, Format::V2, d).unwrap()
         };
-        let yes = |codes: &mut Codes| {
+        let yes = || {
             b.here();
             let prepared = prepare(&b.vault(), &b.key()).unwrap();
             let VaultClass::Older { sha } = prepared.check().vault else {
                 panic!("not asked");
             };
-            let (code, typed) = codes.next();
-            Session::login(prepared, NEW, &code, typed, Some(sha))
+            Session::login(prepared, NEW, Some(sha))
         };
         // Counters no honest vault reaches: refused, nothing written.
         let unsealed = b.anchor();
@@ -2920,18 +2801,18 @@ mod tests {
             let planted = with(generation, seen, u64::MAX);
             fs::write(b.vault(), &planted).unwrap();
             let anchor = b.anchor();
-            assert_eq!(yes(&mut codes).err(), Some(super::super::VAULT_COUNTERS));
+            assert_eq!(yes().err(), Some(super::super::VAULT_COUNTERS));
             assert!(super::super::not_a_failure(super::super::VAULT_COUNTERS));
             assert_eq!(
                 (fs::read(b.vault()).unwrap(), b.anchor()),
                 (planted, anchor)
             );
         }
-        // Within bounds: `seen` is cut to `generation`, `last` to the clock.
+        // Within bounds: `seen` is cut to `generation`; the old OTP
+        // watermark `last` stays as it is, as nothing reads it.
         fs::write(b.vault(), with(100, 5000, u64::MAX)).unwrap();
-        let s = yes(&mut codes).unwrap();
-        assert_eq!((s.generation, s.seen), (100, 100));
-        assert!(s.last <= otp::now().unwrap() / 30 + 1);
+        let s = yes().unwrap();
+        assert_eq!((s.generation, s.seen, s.last), (100, 100, u64::MAX));
         drop(s);
         // That open completed the change on B: the key it sealed refuses
         // any older vault file now.
@@ -2941,7 +2822,7 @@ mod tests {
         // B's own vault file, before any of that: the yes completes and
         // seals it.
         fs::write(b.anchor_dir().join("goyo-vault.keys"), &unsealed).unwrap();
-        let mut s = yes(&mut codes).unwrap();
+        let mut s = yes().unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::OlderAccepted]);
         let line = b.lines(&id).vault.unwrap();
         assert_eq!(line.state.key_state(), s.key_state());
@@ -2964,12 +2845,12 @@ mod tests {
     fn a_change_that_landed_in_a_key_file_elsewhere() {
         for unplugged in [false, true] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             let id = s.id;
             let backup = pc.file("backup.goyokey");
             s.backup_key(&backup).unwrap();
             CRASH.with(|c| c.set(Some("S2v")));
-            assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+            assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
             drop(s);
             let away = pc.file("away.goyokey");
             if unplugged {
@@ -2977,7 +2858,7 @@ mod tests {
             }
             pc.here();
             let prepared = prepare(&pc.vault(), &backup).unwrap();
-            let mut s = Session::login(prepared, OLD, "", otp::now().unwrap(), None).unwrap();
+            let mut s = Session::login(prepared, OLD, None).unwrap();
             if unplugged {
                 let key = pc.canonical("vault.goyokey");
                 assert_eq!(notices(&mut s), [KeyNotice::PendingElsewhere(key.clone())]);
@@ -2994,32 +2875,30 @@ mod tests {
                 assert!(pc.lines(&id).pending.is_none());
                 drop(s);
             }
-            let mut s = login(&pc, NEW, &mut codes).unwrap();
+            let mut s = login(&pc, NEW).unwrap();
             assert_eq!(notices(&mut s), [KeyNotice::Resumed]);
             assert!(pc.lines(&id).pending.is_none());
             consistent(&pc, &s);
         }
         // Gone for good: discarded after a Reauth, then a change works.
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let backup = pc.file("backup.goyokey");
         s.backup_key(&backup).unwrap();
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
         fs::remove_file(pc.key()).unwrap();
         pc.here();
         let prepared = prepare(&pc.vault(), &backup).unwrap();
-        let mut s = Session::login(prepared, OLD, "", otp::now().unwrap(), None).unwrap();
+        let mut s = Session::login(prepared, OLD, None).unwrap();
         assert!(s.pending_elsewhere().is_some());
-        let r = s
-            .reauth(OLD, Some(("", otp::now().unwrap())), None)
-            .unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         s.forget_pending(r).unwrap();
         assert!(s.pending_elsewhere().is_none() && pc.lines(&id).pending.is_none());
         assert_eq!(s.password_change(), Ok(None));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         // A path on a network share is never read at precheck: it counts as
         // a key file that cannot be read.
@@ -3049,7 +2928,7 @@ mod tests {
         pc.here();
         let prepared = prepare(&pc.vault(), &backup).unwrap();
         assert_eq!(anchor::KPATH_READS.with(|n| n.get()), 0);
-        let s = Session::login(prepared, NEW, "", otp::now().unwrap(), None).unwrap();
+        let s = Session::login(prepared, NEW, None).unwrap();
         assert_eq!(
             s.pending_elsewhere(),
             Some(Path::new(r"\\server\share\vault.goyokey"))
@@ -3064,12 +2943,12 @@ mod tests {
     #[test]
     fn an_overtaken_pending_entry_is_dropped() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let keys1 = s.keys.keys().to_vec();
         let v1 = fs::read(pc.vault()).unwrap();
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
         let away = pc.file("stick.goyokey");
         fs::rename(pc.key(), &away).unwrap();
@@ -3092,14 +2971,7 @@ mod tests {
         let VaultClass::Older { sha } = prepared.check().vault else {
             panic!("not older");
         };
-        let mut s = Session::login(
-            prepared,
-            "synthetic b password",
-            "",
-            otp::now().unwrap(),
-            Some(sha),
-        )
-        .unwrap();
+        let mut s = Session::login(prepared, "synthetic b password", Some(sha)).unwrap();
         let key = pc.canonical("vault.goyokey");
         assert!(
             s.take_key_notices()
@@ -3111,14 +2983,7 @@ mod tests {
         fs::rename(&away, pc.key()).unwrap();
         pc.here();
         let prepared = prepare(&pc.vault(), &kb_path).unwrap();
-        let mut s = Session::login(
-            prepared,
-            "synthetic b password",
-            "",
-            otp::now().unwrap(),
-            None,
-        )
-        .unwrap();
+        let mut s = Session::login(prepared, "synthetic b password", None).unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::NotFinished]);
         assert!(pc.lines(&id).pending.is_none());
         drop(s);
@@ -3133,12 +2998,12 @@ mod tests {
     #[test]
     fn a_restore_never_writes_the_anchor() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let (k1, v1) = (pc.file("k1.goyokey"), pc.file("v1.goyo"));
         fs::copy(pc.key(), &k1).unwrap();
         fs::copy(pc.vault(), &v1).unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         // Another vault's line first, so this vault's are not.
         anchor::update(
@@ -3154,7 +3019,7 @@ mod tests {
         let anchor = pc.anchor();
         let restored = pc.file("restored.goyo");
         pc.here();
-        let mut r = Session::restore(&v1, &k1, &restored, OLD, "").unwrap();
+        let mut r = Session::restore(&v1, &k1, &restored, OLD).unwrap();
         assert_eq!(
             r.take_key_notices(),
             [KeyNotice::RestoreOldKey { old: 2, new: 1 }]
@@ -3165,25 +3030,25 @@ mod tests {
         assert_eq!(pc.anchor(), anchor);
         // A Restore of a backup with this PC's current key file: not held,
         // and still nothing written to the anchor.
-        let mut r = Session::restore(&v1, &pc.key(), &pc.file("r2.goyo"), NEW, "").unwrap();
+        let mut r = Session::restore(&v1, &pc.key(), &pc.file("r2.goyo"), NEW).unwrap();
         assert!(!r.local_rollback());
         assert_eq!(notices(&mut r), []);
         drop(r);
         assert_eq!(pc.anchor(), anchor);
         // A change of this PC that waits for a login: held, and the pending
         // line left for that login.
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, NEW, THIRD), Err(SIMULATED_CRASH));
         drop(s);
         let anchor = pc.anchor();
         pc.here();
-        let mut r = Session::restore(&v1, &k1, &pc.file("r3.goyo"), OLD, "").unwrap();
+        let mut r = Session::restore(&v1, &k1, &pc.file("r3.goyo"), OLD).unwrap();
         assert_eq!(r.take_key_notices(), [KeyNotice::RestorePending]);
         assert_eq!(r.password_change(), Err(super::super::RESTORE_PENDING));
         drop(r);
         assert_eq!(pc.anchor(), anchor);
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert_eq!(notices(&mut s), [KeyNotice::Resumed]);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -3194,19 +3059,19 @@ mod tests {
     #[test]
     fn a_planted_key_temp_gives_no_hint() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         let (junk, _) = sealed(id, &[[0x6a; 32]], 9, &[], "synthetic junk password");
         let mut name = pc.key().into_os_string();
         name.push(format!(".{:032x}.goyotmp", 0x9u8));
         fs::write(&name, &junk).unwrap();
-        assert_eq!(refused(&pc, OLD, &codes), None);
+        assert_eq!(refused(&pc, OLD), None);
         fs::write(pc.key(), &k1).unwrap();
         fs::write(pc.vault(), &v1).unwrap();
-        assert_eq!(refused(&pc, NEW, &codes), None);
+        assert_eq!(refused(&pc, NEW), None);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -3217,11 +3082,11 @@ mod tests {
     #[test]
     fn a_key_temp_below_the_confirmed_state_opens_held() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, false, false, false);
+        let mut s = setup(&pc, false, false, false);
         let id = s.id;
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         drop(s);
         assert_eq!(pc.lines(&id).vault.unwrap().state.epoch, 2);
         let k2 = fs::read(pc.key()).unwrap();
@@ -3230,7 +3095,7 @@ mod tests {
         let mut name = pc.key().into_os_string();
         name.push(format!(".{:032x}.goyotmp", 0x1u8));
         fs::write(&name, &k1).unwrap();
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert!(s.local_rollback());
         assert!(notices(&mut s).contains(&KeyNotice::LocalRollback { old: 2, new: 1 }));
         assert_eq!(fs::read(pc.key()).unwrap(), k1);
@@ -3246,11 +3111,11 @@ mod tests {
     #[test]
     fn vault_files_left_as_temps_meet_the_anchor_first() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
         let keys1 = s.keys.keys().to_vec();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         let temp = |data: &[u8]| {
             let mut name = pc.vault().into_os_string();
@@ -3263,7 +3128,7 @@ mod tests {
         fs::remove_file(pc.vault()).unwrap();
         fs::write(pc.key(), &k1).unwrap();
         let t1 = temp(&v1);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert!(s.take_recovery().vault && s.local_rollback());
         assert_eq!(
             notices(&mut s),
@@ -3302,13 +3167,13 @@ mod tests {
         // C5g: V′ in its temp file, the pending entry not yet promoted.
         fs::write(pc.key(), &k2).unwrap();
         fs::write(pc.vault(), &v2).unwrap();
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         s.take_key_notices();
         CRASH.with(|c| c.set(Some("S3.tmp_synced")));
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, NEW, THIRD), Err(SIMULATED_CRASH));
         drop(s);
         fs::remove_file(pc.vault()).unwrap();
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert!(s.take_recovery().vault);
         assert_eq!(notices(&mut s), []);
         let line = pc.lines(&id).vault.unwrap();
@@ -3329,22 +3194,22 @@ mod tests {
     #[test]
     fn the_key_backup_reminder_and_an_anchor_that_cannot_be_written() {
         let pc = Pc::new();
-        let (s, mut codes) = setup(&pc, false, false, false);
+        let s = setup(&pc, false, false, false);
         drop(s);
         for _ in 0..2 {
-            let mut s = login(&pc, OLD, &mut codes).unwrap();
+            let mut s = login(&pc, OLD).unwrap();
             assert_eq!(s.take_key_notices(), []);
             assert!(!s.key_backup_due());
         }
         assert!(pc.anchor().is_empty());
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let mut s = login(&pc, OLD).unwrap();
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(s.take_key_notices(), [KeyNotice::KeyBackupDue]);
         s.backup_key(&pc.file("key-backup.goyokey")).unwrap();
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(s.take_key_notices(), []);
         drop(s);
         // The anchor's folder cannot be made.
@@ -3353,10 +3218,10 @@ mod tests {
         set_anchor_dir(Some(blocker.join("anchor")));
         let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
         assert_eq!(prepared.check().anchor, AnchorClass::New);
-        let mut s = Session::login(prepared, NEW, "", otp::now().unwrap(), None).unwrap();
+        let mut s = Session::login(prepared, NEW, None).unwrap();
         let said = s.take_key_notices();
         assert!(said.contains(&KeyNotice::SidecarFailed));
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         assert_eq!(s.take_key_notices(), []);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -3370,13 +3235,12 @@ mod tests {
     fn a_completed_change_refuses_its_probe_at_once() {
         for what in [What::Password, What::Successor] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             let probe = Rc::new(RefCell::new(None));
             let held = probe.clone();
             let vault = pc.vault();
             set_before("S2", move || *held.borrow_mut() = fs::read(&vault).ok());
-            let (code, typed) = codes.next();
-            let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+            let r = s.reauth(OLD, None).unwrap();
             if what == What::Password {
                 let to = Change::Password(Zeroizing::new(NEW.to_owned()));
                 let done = s.rekey(r, Vec::new(), to, Consent::default(), true);
@@ -3403,52 +3267,44 @@ mod tests {
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
-    /// [이 열쇠 파일이 맞습니다] and [끝나지 않은 열쇠 변경 버리기…] of an
-    /// OTP vault take only a Reauth that spent a code, as every key change
-    /// does (spec §5.10): one with the password alone is stale, and
-    /// nothing changes.
+    /// [이 열쇠 파일이 맞습니다] and [끝나지 않은 열쇠 변경 버리기…] take a
+    /// Reauth with the password alone, as every key change does (spec
+    /// §5.10), also for a 0.8 pair made with the removed OTP that was put
+    /// back: no code is asked.
     #[test]
-    fn the_hold_buttons_of_an_otp_vault_need_its_code() {
-        // A put-back pair, held.
+    fn the_hold_buttons_take_a_reauth_with_the_password_alone() {
+        // A put-back pair, held: GOYOKE01 with its TOTP secret.
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, true, false);
+        let mut s = setup(&pc, false, true, false);
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         fs::write(pc.key(), &k1).unwrap();
         fs::write(pc.vault(), &v1).unwrap();
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
-        let anchor = pc.anchor();
-        let r = s.reauth(OLD, None, None).unwrap();
-        assert_eq!(s.confirm_key_file(r), Err(REAUTH_STALE));
-        assert!(s.local_rollback());
-        assert_eq!(pc.anchor(), anchor);
-        let (code, typed) = codes.next();
-        let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
+        assert!(s.local_rollback() && s.key_file.otp_secret());
+        let r = s.reauth(OLD, None).unwrap();
         s.confirm_key_file(r).unwrap();
+        assert!(!s.local_rollback());
+        drop(s);
+        assert_eq!(fs::read(pc.key()).unwrap(), k1);
+        let s = login(&pc, OLD).unwrap();
         assert!(!s.local_rollback());
         drop(s);
         // A change that may have landed in a key file that is away.
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, true, false);
+        let mut s = setup(&pc, true, false, false);
         let copy = pc.file("copy.goyokey");
         fs::copy(pc.key(), &copy).unwrap();
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
         fs::rename(pc.key(), pc.file("away.goyokey")).unwrap();
         pc.here();
         let prepared = prepare(&pc.vault(), &copy).unwrap();
-        let (code, typed) = codes.next();
-        let mut s = Session::login(prepared, OLD, &code, typed, None).unwrap();
+        let mut s = Session::login(prepared, OLD, None).unwrap();
         assert!(s.pending_elsewhere().is_some());
-        let anchor = pc.anchor();
-        let r = s.reauth(OLD, None, None).unwrap();
-        assert_eq!(s.forget_pending(r), Err(REAUTH_STALE));
-        assert!(s.pending_elsewhere().is_some());
-        assert_eq!(pc.anchor(), anchor);
-        let (code, typed) = codes.next();
-        let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         s.forget_pending(r).unwrap();
         assert!(s.pending_elsewhere().is_none());
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -3463,28 +3319,27 @@ mod tests {
     #[test]
     fn a_restored_vault_never_changes_the_shared_key_file() {
         let pc = Pc::new();
-        let (s, mut codes) = setup(&pc, true, false, false);
+        let s = setup(&pc, true, false, false);
         drop(s);
         let backup = pc.file("backup.goyo");
         fs::copy(pc.vault(), &backup).unwrap();
         let before = files(&pc);
         pc.here();
-        let mut r =
-            Session::restore(&backup, &pc.key(), &pc.file("restored.goyo"), OLD, "").unwrap();
+        let mut r = Session::restore(&backup, &pc.key(), &pc.file("restored.goyo"), OLD).unwrap();
         assert!(r.restored() && !r.restore_held() && !r.local_rollback());
         assert_eq!(notices(&mut r), []);
         assert_eq!(r.password_change(), Err(RESTORE_KEYS));
-        assert_eq!(change(&mut r, &mut codes, OLD, NEW), Err(RESTORE_KEYS));
+        assert_eq!(change(&mut r, OLD, NEW), Err(RESTORE_KEYS));
         let other = other_of(&r, What::Successor);
         let file = KeyFile::from_bytes(Path::new("other.goyokey"), other).unwrap();
         let checked = r.adopt_check(&file, Source::File(file.path().to_owned()));
         assert_eq!(checked.err(), Some(RESTORE_KEYS));
         drop(r);
         assert_eq!(files(&pc), before);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert!(!s.restored());
         assert_eq!(notices(&mut s), []);
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -3509,9 +3364,9 @@ mod tests {
         // A KF2 pair put back: it looks new while the anchor is held, and
         // the unlock refuses once the lock shows the confirmed line.
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let (k1, v1) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         drop(s);
         fs::write(pc.key(), &k1).unwrap();
         fs::write(pc.vault(), &v1).unwrap();
@@ -3521,12 +3376,11 @@ mod tests {
         let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
         assert_eq!(prepared.check().anchor, AnchorClass::New);
         drop(lock);
-        let (code, typed) = codes.next();
-        let refused = Session::login(prepared, OLD, &code, typed, None).err();
+        let refused = Session::login(prepared, OLD, None).err();
         assert_eq!(refused, Some(super::super::ANCHOR_REREAD));
         assert!(super::super::not_a_failure(super::super::ANCHOR_REREAD));
         assert_eq!(files(&pc), before);
-        let mut s = login(&pc, OLD, &mut codes).unwrap();
+        let mut s = login(&pc, OLD).unwrap();
         assert!(s.local_rollback());
         assert_eq!(
             notices(&mut s),
@@ -3538,11 +3392,11 @@ mod tests {
         // that epoch.
         for (changes, confirmed) in [(2, "2"), (1, "1")] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, false, false, false);
+            let mut s = setup(&pc, false, false, false);
             let (k0, v0) = (fs::read(pc.key()).unwrap(), fs::read(pc.vault()).unwrap());
-            assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+            assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
             if changes == 2 {
-                assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+                assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
             }
             drop(s);
             fs::write(pc.key(), &k0).unwrap();
@@ -3552,11 +3406,10 @@ mod tests {
             let prepared = prepare(&pc.vault(), &pc.key()).unwrap();
             assert_eq!(prepared.check().anchor, AnchorClass::New);
             drop(lock);
-            let (code, typed) = codes.next();
-            let mut s = Session::login(prepared, OLD, &code, typed, None).unwrap();
+            let mut s = Session::login(prepared, OLD, None).unwrap();
             assert!(!s.local_rollback());
             let before = files(&pc);
-            assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(LOCAL_ROLLBACK));
+            assert_eq!(change(&mut s, OLD, NEW), Err(LOCAL_ROLLBACK));
             assert_eq!(
                 super::super::refusal_values(LOCAL_ROLLBACK),
                 Some(vec![confirmed.into(), "0".into()])

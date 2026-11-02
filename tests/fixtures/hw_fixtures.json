@@ -281,6 +281,109 @@
    "e": 1810,
    "tag": "cbff366c4a88b06a41f3a56507400e22",
    "key_code": "0698b8e1319a8a3e"
+  },
+  {
+   "file": "goyokh01-no-otp.goyokey",
+   "magic": "GOYOKH01",
+   "kdf": "test",
+   "password": "goyo security-key fixture, KH",
+   "vault_id": "3132333435363738393a3b3c3d3e3f40",
+   "epoch": 6,
+   "kind": "remove",
+   "next": 4,
+   "pin": false,
+   "pw_id": "5152535455565758595a5b5c5d5e5f60",
+   "loss": 1767139200,
+   "written": 1767225602,
+   "resume": "7172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f90",
+   "tombstones": [
+    [
+     "621f4cfef41590581446d54d185a5e0b",
+     5757570648616468486
+    ],
+    [
+     "73d3940c43b7a1f9c8998ef2a1a8e4c5",
+     3
+    ]
+   ],
+   "keys": [
+    "a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0",
+    "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0"
+   ],
+   "otp": null,
+   "s": "3d3c3f3e39383b3a35343736313033322d2c2f2e29282b2a2524272621202322",
+   "authorizer": 1,
+   "present": [
+    0,
+    1
+   ],
+   "suspended": [],
+   "pairs": [
+    {
+     "owner": 0,
+     "target": 1,
+     "new": true,
+     "nonce": "55545756515053525d5c5f5e59585b5a4544474641404342"
+    },
+    {
+     "owner": 1,
+     "target": 0,
+     "new": true,
+     "nonce": "56575455525350515e5f5c5d5a5b58594647444542434041"
+    }
+   ],
+   "wrap_nonces": [
+    "57565554535251505f5e5d5c5b5a59584746454443424140",
+    "58595a5b5c5d5e5f505152535455565748494a4b4c4d4e4f"
+   ],
+   "slots": [
+    {
+     "number": 1,
+     "flags": 1,
+     "registered": 1759449600,
+     "added_epoch": 1,
+     "added_by": null,
+     "seed": "13121110171615141b1a19181f1e1d1c03020100070605040b0a09080f0e0d0c",
+     "cred_id": "02030405060708090a0b0c0d0e0f1011",
+     "cred_random_uv": "414043424544474649484b4a4d4c4f4e515053525554575659585b5a5d5c5f5e",
+     "cred_random_nouv": "42434041464744454a4b48494e4f4c4d52535051565754555a5b58595e5f5c5d",
+     "cred_protect": 1,
+     "uv": true,
+     "credhash": "9d3f33f61f7ae6fb19472b03024ae2a3",
+     "hmac_output": "dea4c552db128f0f7146ffae2b8fa371a03e5d7b7792a3c117836d6784e808df"
+    },
+    {
+     "number": 3,
+     "flags": 0,
+     "registered": 1764633600,
+     "added_epoch": 4,
+     "added_by": 0,
+     "seed": "17161514131211101f1e1d1c1b1a191807060504030201000f0e0d0c0b0a0908",
+     "cred_id": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+     "cred_random_uv": "43424140474645444b4a49484f4e4d4c53525150575655545b5a59585f5e5d5c",
+     "cred_random_nouv": "44454647404142434c4d4e4f48494a4b54555657505152535c5d5e5f58595a5b",
+     "cred_protect": 1,
+     "uv": false,
+     "credhash": "517ce072f57cfa223004691d098ece39",
+     "hmac_output": "12dec17a4a8d7581e45cd5ded1282f02763f64d5ec9f916cfe88e939545343a9"
+    }
+   ],
+   "ks_id": "da2d85ee1414d3373c32ea188910a2d7",
+   "draws": [
+    "59585b5a5d5c5f5e515053525554575649484b4a4d4c4f4e4140434245444746",
+    "5b5a59585f5e5d5c53525150575655544b4a49484f4e4d4c",
+    "55545756515053525d5c5f5e59585b5a4544474641404342",
+    "56575455525350515e5f5c5d5a5b58594647444542434041",
+    "57565554535251505f5e5d5c5b5a59584746454443424140",
+    "58595a5b5c5d5e5f505152535455565748494a4b4c4d4e4f"
+   ],
+   "size": 1088,
+   "h": 612,
+   "w": 824,
+   "b": 912,
+   "e": 1024,
+   "tag": "0be6862557dec9d47dbdf28429edb7e8",
+   "key_code": "06aa66bb66f5ef67"
   }
  ],
  "variants": [

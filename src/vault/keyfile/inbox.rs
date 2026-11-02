@@ -609,11 +609,13 @@ pub(super) fn check(plan: &KeysPlan) -> Result<()> {
 /// Steps 2 and 3 of spec §3.3 for a file with keys: `[0, W)`, with the
 /// nonce of every new pair record drawn in file order, then of every
 /// S-wrap in slot order. No S-wrap is made before `[0, H)` is complete.
+/// `otp`: flags bit0, which `seal` sets for no file it writes now.
 pub(super) fn head(
     spec: &Spec,
     bundle: &Bundle,
     plan: &KeysPlan,
     written: u64,
+    otp: bool,
 ) -> Result<(Vec<u8>, Written)> {
     let id = &spec.vault_id;
     let magic = if plan.sync { Magic::Ks01 } else { Magic::Kh01 };
@@ -627,12 +629,12 @@ pub(super) fn head(
         pairs.push((o as u8, t as u8, pair));
     }
     pairs.sort_unstable_by_key(|(o, t, _)| (*o, *t));
-    let otp = bundle.otp().is_some();
     let mut out = Vec::new();
     out.extend_from_slice(magic.bytes());
     out.extend_from_slice(id);
     out.extend_from_slice(&spec.epoch.to_le_bytes());
     out.extend_from_slice(&[
+        // Bit0 as `seal` decides it: never for a file it writes now.
         u8::from(otp) | u8::from(plan.pin) << 1,
         bundle.keys().len() as u8,
         plan.slots.len() as u8,
@@ -1065,6 +1067,16 @@ pub(in crate::vault) mod tests {
     }
     /// Four keys in PIN mode: keys 2 and 4 touched and paired, key 5
     /// reached through the authorizer's pair record, key 6 suspended.
+    /// The same inputs without the TOTP secret: what seal writes now.
+    fn recorded_kh_no_otp() -> Recorded {
+        Recorded {
+            bytes: include_bytes!("../../../tests/fixtures/goyokh01-no-otp.goyokey"),
+            otp: None,
+            tag: "0be6862557dec9d47dbdf28429edb7e8",
+            code: "06aa66bb66f5ef67",
+            ..recorded_kh()
+        }
+    }
     pub(in crate::vault) fn recorded_ks() -> Recorded {
         let key = |number, added_epoch, added_by, n: u8, cred: (u8, usize), days| RecordedKey {
             number,
@@ -1160,7 +1172,7 @@ pub(in crate::vault) mod tests {
                 .collect()
         }
         fn bundle(&self) -> Bundle {
-            Bundle::new(&self.keys, self.otp.as_ref()).unwrap()
+            Bundle::new(&self.keys).unwrap()
         }
         fn file(&self) -> KeyFile {
             file(self.bytes).unwrap()
@@ -1276,11 +1288,13 @@ pub(in crate::vault) mod tests {
     /// suspended key is refused before any Argon2, and `seal`, fed the
     /// recorded draws and time and the recorded inputs (the new records'
     /// keys touched, the carried ones copied, the absent key's inbox key
-    /// read through the authorizer's record), writes the same bytes.
+    /// read through the authorizer's record), writes the same bytes: the
+    /// GOYOKH01 of a vault made with the removed OTP as a version with it
+    /// wrote it, and its twin without the TOTP secret as seal writes now.
     #[test]
     fn the_pinned_fixtures_open_and_reproduce_byte_for_byte() {
         set_kdf_profile(KdfProfile::Test);
-        for r in [recorded_kh(), recorded_ks()] {
+        for r in [recorded_kh(), recorded_kh_no_otp(), recorded_ks()] {
             let source = r.file();
             let h = source.header().unwrap().clone();
             assert!(source.needs_security_key() && source.refusal().is_none());
@@ -1334,6 +1348,8 @@ pub(in crate::vault) mod tests {
             draws.extend(r.wrap_nonces.iter().map(|n| &n[..]));
             queue_random(&draws);
             set_test_now(Some(r.written));
+            assert_eq!(h.otp_secret(), r.otp.is_some());
+            super::super::OLD_OTP.with(|o| o.set(r.otp));
             let sealed = seal(&r.spec, &r.bundle(), r.password, Plan::Keys(&plan));
             set_test_now(None);
             assert_eq!(queued_random(), 0, "seal draws exactly the recorded values");
@@ -1592,7 +1608,12 @@ pub(in crate::vault) mod tests {
         out.extend_from_slice(&r.body_nonce);
         let (k_body, c_body) = body_keys(&pw_key, s, &sha256(&[&out]));
         out.extend_from_slice(&c_body);
-        let body = crypto::seal(&k_body, &r.body_nonce, &out, &r.bundle().plain()).unwrap();
+        let plain = [
+            &r.bundle().plain(false)[..],
+            r.otp.as_ref().map_or(&[][..], |o| &o[..]),
+        ]
+        .concat();
+        let body = crypto::seal(&k_body, &r.body_nonce, &out, &plain).unwrap();
         out.extend_from_slice(&body);
         let end = sha256(&[&out]);
         for key in &r.keys {
@@ -1828,7 +1849,7 @@ pub(in crate::vault) mod tests {
             tombstones: Vec::new(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(&[[epoch as u8; 32]], None).unwrap();
+        let bundle = Bundle::new(&[[epoch as u8; 32]]).unwrap();
         let (bytes, _) = seal(&spec, &bundle, "p", Plan::Keys(&plan)).unwrap();
         (bytes, s, suspended)
     }
@@ -2137,7 +2158,7 @@ pub(in crate::vault) mod tests {
                 Some(SECURITY_KEY_NEEDED)
             );
         }
-        assert!(file(&ks().bytes()).unwrap().uses_otp());
+        assert!(file(&ks().bytes()).unwrap().otp_secret());
         assert_eq!(take_failed_at(), None);
         for magic in [
             b"GOYOKH02",

@@ -375,7 +375,8 @@ def parse_key(blob, vid):
     kind, authorizer, present, suspended, p = r.u8(), r.u8(), r.u8(), r.u8(), r.u8()
     reserved, ks_id, pw_id = r.take(5), r.take(16), r.take(16)
     r.take(16)  # written and loss: display only
-    # GOYOKS01 is always PIN mode (flags bit1); bit0 is the OTP vault.
+    # GOYOKS01 is always PIN mode (flags bit1); bit0 is an old OTP vault's TOTP
+    # secret in the body (the OTP was removed: no new file sets it).
     if not (1 <= epoch <= EPOCH_MAX and flags in (2, 3) and 1 <= k <= MAX_KEYS and nxt >= 1
             and count <= TOMB_MAX and kind in KEY_KINDS and reserved == bytes(5) and pw_id != bytes(16)):
         return None

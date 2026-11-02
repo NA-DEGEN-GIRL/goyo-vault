@@ -16,7 +16,7 @@ pub const KDF_PASSES: u32 = 3;
 /// The text of AUTH_ERROR, for messages that add a line to it.
 macro_rules! auth_error {
     () => {
-        "인증 실패: 비밀번호·열쇠·새 OTP·시스템 시간과 파일 상태를 확인하세요."
+        "인증 실패: 비밀번호·열쇠와 파일 상태를 확인하세요."
     };
 }
 pub(crate) use auth_error;

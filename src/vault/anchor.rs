@@ -1605,9 +1605,6 @@ pub(super) enum Refusal {
     /// A key both know has another record than this PC pinned.
     #[cfg(feature = "security-key")]
     Pinned,
-    /// Another OTP flag than this PC recorded (E1).
-    #[cfg(feature = "security-key")]
-    Otp,
 }
 /// Compares a KF2 key file's public state with the confirmed line.
 pub(super) fn compare(h: &KeyHeader, line: Option<&VaultLine>) -> Result<AnchorClass, Refusal> {
@@ -1632,12 +1629,10 @@ pub(super) fn compare(h: &KeyHeader, line: Option<&VaultLine>) -> Result<AnchorC
     if super::gate::relisted(h, c) {
         return Err(Refusal::RelistKeys);
     }
-    // E1 (spec §7.14): the OTP flag is set at create and no writer changes
-    // it; a policy change of the gate is only a PIN mode or a magic.
-    #[cfg(feature = "security-key")]
-    if (h.flags ^ c.policy) & 1 != 0 {
-        return Err(Refusal::Otp);
-    }
+    // The policy byte's bit0 (an old OTP vault's TOTP secret) decides
+    // nothing since the OTP was removed, and every key change clears it:
+    // E1 is gone. The byte is in `[0, W)`, so a file that changes it is
+    // another state and meets every rule here and the gate's like any.
     let had = c.had(h.state());
     let lacks = c
         .tombs
@@ -1975,7 +1970,8 @@ pub(super) fn pending_of(
 }
 /// The confirmed line of a 0.8 key file in `state` (epoch 0 and its legacy
 /// tag, spec §4.5) whose one data key has the ID `key_id`, taken over
-/// `old`: after [이 열쇠 파일이 맞습니다] on a 0.8 pair put back.
+/// `old`: after [이 열쇠 파일이 맞습니다] on a 0.8 pair put back. `otp`: it
+/// is a GOYOKE01 file (the policy byte records it; nothing compares it).
 pub(super) fn legacy_line(
     state: KeyState,
     magic: Magic,
@@ -2937,7 +2933,7 @@ mod tests {
                 .collect(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(keys, None).unwrap();
+        let bundle = Bundle::new(keys).unwrap();
         let (bytes, _) = keyfile::seal(&spec, &bundle, "p", Plan::PasswordOnly).unwrap();
         parse(&bytes).unwrap()
     }

@@ -3,8 +3,8 @@
 //!
 //! Precheck keeps the key record `kview` shows as a snapshot. A login whose
 //! own key file opens returns an `UnlockProof` with the session, so the
-//! flow can take that snapshot with the unlock's touch and no second OTP
-//! code (`Session::reauth_from_unlock`), through the attended accept of
+//! flow can take that snapshot with the unlock's touch and no second
+//! password (`Session::reauth_from_unlock`), through the attended accept of
 //! §7.15 (the adopt engine with `Source::Server`). A login whose own key
 //! file does not open returns a `ServerEntry` when the snapshot could be a
 //! successor: the failed-unlock entry (S-TRY-SERVER-KEY, and S-TRY-OTHERKEY
@@ -43,9 +43,6 @@ pub const SERVER_KEY_UNCHAINED: &str = "서버의 새 열쇠 파일은 이 PC의
 pub const SERVER_KEY_OLD_KEYS: &str = "서버의 새 열쇠 파일에는 이 PC의 열쇠 파일에 있는 예전 열쇠가 모두 들어 있지 않아 이 방법으로는 열 수 없습니다. 이 PC에서 쓰던 예전 비밀번호로 연 뒤 '열쇠 관리'의 [받기…]로 받으세요.";
 /// The server's key file can be taken here only as a plain successor.
 pub const SERVER_KEY_NOT_SUCCESSOR: &str = "서버의 열쇠 파일은 이 PC의 열쇠 파일을 바로 이어받은 것이 아니어서 이 방법으로는 받을 수 없습니다. 이 PC에서 쓰던 비밀번호로 연 뒤 '열쇠 관리'의 [받기…]로 받으세요.";
-/// The OTP code was typed more than three minutes before the failed-unlock
-/// entry started: not a failed attempt (nothing was derived).
-pub const OTP_STALE: &str = "OTP 번호를 입력한 지 3분이 넘었습니다. 새 OTP 번호로 다시 여세요.";
 /// The result turns key-file sync on here: S-KEYSYNC-ON is asked now that
 /// the gate passed, and the call made again with the yes.
 pub const KEYSYNC_CONSENT: &str =
@@ -104,12 +101,11 @@ pub(super) fn snapshot(
 }
 
 /// What a login returns to its own flow with the session (spec §5.3): the
-/// password and the OTP step the unlock verified, and the snapshot. Single
+/// password the unlock verified, and the snapshot. Single
 /// use, bound to that session, zeroized on drop, never kept in the session.
 pub struct UnlockProof {
     pub(super) session: u64,
     pub(super) password: Zeroizing<String>,
-    pub(super) otp_step: Option<u64>,
     pub(super) snapshot: Option<Snapshot>,
 }
 
@@ -141,16 +137,10 @@ impl From<&'static str> for Failed {
 pub struct ServerEntry {
     prepared: Prepared,
     password: Zeroizing<String>,
-    otp: Zeroizing<String>,
-    otp_time: u64,
     confirmed_older: Option<[u8; 32]>,
     /// The touch was of a key own lists (S-TRY-SERVER-KEY): the gate pick
     /// marks it.
     touched: Option<u8>,
-    /// `start` checked the OTP code's time window.
-    otp_in_time: bool,
-    /// The OTP step this entry's own earlier call verified and saved.
-    otp_spent: Option<u64>,
 }
 
 impl Prepared {
@@ -225,53 +215,18 @@ impl Prepared {
     pub fn other_key_entry(
         self,
         password: &str,
-        otp: &str,
-        otp_time: u64,
         confirmed_older: Option<[u8; 32]>,
     ) -> Option<ServerEntry> {
         self.offers_other_key().then(|| ServerEntry {
             prepared: self,
             password: Zeroizing::new(password.to_owned()),
-            otp: Zeroizing::new(otp.to_owned()),
-            otp_time,
             confirmed_older,
             touched: None,
-            otp_in_time: false,
-            otp_spent: None,
         })
     }
 }
 
 impl ServerEntry {
-    /// The OTP code's time window, checked once when the entry starts (after
-    /// S-TRY-SERVER-KEY's yes or S-TRY-OTHERKEY's touch, before the gate
-    /// question), as a login checks it once its touch is in: the gate
-    /// question, a wrong code typed again and S-KEYSYNC-ON that follow do
-    /// not run it out. The code itself is checked at every call, as of when
-    /// it was typed, against the vault file's last step (the step this
-    /// entry's own earlier call saved passes again). OTP_STALE is no failed
-    /// attempt.
-    pub fn start(&mut self) -> Result<()> {
-        if self.otp_in_time {
-            return Ok(());
-        }
-        let server_otp = self
-            .prepared
-            .server
-            .as_ref()
-            .and_then(|s| s.file().ok())
-            .is_some_and(|f| f.uses_otp());
-        if self.prepared.key.uses_otp() || server_otp {
-            let now = crate::otp::now()?;
-            if now.saturating_sub(self.otp_time) > super::OTP_TYPED_MAX
-                || self.otp_time > now.saturating_add(5)
-            {
-                return Err(OTP_STALE);
-            }
-        }
-        self.otp_in_time = true;
-        Ok(())
-    }
     /// The snapshot's gate (spec §7.15a), asked after S-TRY-SERVER-KEY's
     /// yes or S-TRY-OTHERKEY's ceremony and before the open: the kind, the
     /// keys S-LOSTPICK offers (this PC's confirmed ones only) with the key
@@ -407,7 +362,7 @@ pub fn prepare_restore_fetched(backup: &Path) -> Result<Prepared> {
     })
 }
 /// What the login screen reads of the server's key file next to `vault`
-/// (its OTP flag), as of a key file at a path.
+/// (whether it needs a security key), as of a key file at a path.
 pub fn fetched_key_info(vault: &Path) -> Option<super::KeyInfo> {
     let (path, bytes) = fetched(vault)?;
     super::keyfile::key_info_of(&path, bytes)
@@ -584,8 +539,6 @@ impl Session {
     pub fn login_proved(
         prepared: Prepared,
         password: &str,
-        input: &str,
-        otp_time: u64,
         confirmed_older: Option<[u8; 32]>,
         touch: &Touch,
     ) -> std::result::Result<(Self, UnlockProof), Failed> {
@@ -594,9 +547,6 @@ impl Session {
         }
         if let Some(refusal) = prepared.key.refusal() {
             return Err(refusal.into());
-        }
-        if prepared.key.uses_otp() && !super::otp_format(input) {
-            return Err(AUTH_ERROR.into());
         }
         let opened = match prepared.key.open(password, Some(touch)) {
             Ok(opened) => opened,
@@ -613,12 +563,8 @@ impl Session {
                     Box::new(ServerEntry {
                         prepared,
                         password: Zeroizing::new(password.to_owned()),
-                        otp: Zeroizing::new(input.to_owned()),
-                        otp_time,
                         confirmed_older,
                         touched,
-                        otp_in_time: false,
-                        otp_spent: None,
                     })
                 });
                 return Err(Failed { error, entry });
@@ -629,13 +575,10 @@ impl Session {
             bundle: opened.bundle,
             state: opened.state,
             slot: opened.slot,
-            otp_in_time: false,
-            otp_spent: None,
         };
-        let factors = (password, input, otp_time);
         let s = Self::load(
             prepared,
-            factors,
+            password,
             Some(touch),
             confirmed_older,
             None,
@@ -644,7 +587,6 @@ impl Session {
         let proof = UnlockProof {
             session: s.serial,
             password: Zeroizing::new(password.to_owned()),
-            otp_step: s.uses_otp().then_some(s.last),
             snapshot,
         };
         Ok((s, proof))
@@ -673,20 +615,17 @@ impl Session {
     /// opened with the typed password and `touch`; this PC's data keys
     /// taken from it (every key ID this PC's key file lists); rule D under
     /// this PC's current data key; the local vault file read under it as a
-    /// login reads it, its OTP code checked; then the snapshot judged by
+    /// login reads it; then the snapshot judged by
     /// its gate (`answer`, a wrong pick turns G2 off only now) and taken as
     /// a plain successor (the re-seal), S-KEYSYNC-ON's `keysync_on` where
     /// the result turns key-file sync on here. The session is returned only
-    /// with the snapshot installed; any failure drops it (the OTP step the
-    /// read spent stays spent, and this entry's next call takes the same
-    /// code again; the time window is `start`'s).
+    /// with the snapshot installed; any failure drops it.
     pub fn login_via_server(
         entry: &mut ServerEntry,
         touch: &Touch,
         answer: Option<GateAnswer>,
         keysync_on: bool,
     ) -> Result<(Self, Adopted)> {
-        entry.start()?;
         let prepared = entry.prepared.duplicate()?;
         let snap = prepared.server.clone().ok_or(AUTH_ERROR)?;
         let own: KeyHeader = prepared.key.header().ok_or(AUTH_ERROR)?.clone();
@@ -709,7 +648,7 @@ impl Session {
                 .ok_or(SERVER_KEY_OLD_KEYS)?;
             keys.push(*key);
         }
-        let bundle = Bundle::new(&keys, opened.bundle.otp()).ok_or(AUTH_ERROR)?;
+        let bundle = Bundle::new(&keys).ok_or(AUTH_ERROR)?;
         drop(keys);
         // Rule D: the writer knew this PC's current data key.
         if !file.chain_ok(bundle.current()) {
@@ -723,21 +662,15 @@ impl Session {
                 .iter()
                 .position(|s| s.cred_id == touch.cred_id)
                 .and_then(|j| u8::try_from(j).ok()),
-            otp_in_time: true,
-            otp_spent: entry.otp_spent,
         };
-        let factors = (entry.password.as_str(), entry.otp.as_str(), entry.otp_time);
         let mut s = Self::load(
             prepared,
-            factors,
+            &entry.password,
             Some(touch),
             entry.confirmed_older,
             None,
             Some(given),
         )?;
-        if s.uses_otp() {
-            entry.otp_spent = Some(s.last);
-        }
         // The snapshot as this session's view shows it, a plain successor.
         let (shown, seq) = s.server_key_file().ok_or(super::NO_CANDIDATE)?;
         if seq != snap.seq || shown.bytes() != snap.bytes.as_slice() {

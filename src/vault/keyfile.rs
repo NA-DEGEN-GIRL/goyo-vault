@@ -10,8 +10,8 @@ use super::{TOO_LARGE, boxed};
 #[cfg(feature = "security-key")]
 pub(crate) mod inbox;
 use crate::{
+    clock,
     crypto::{self, AUTH_ERROR, Key, Result, ct_eq, hkdf_expand, hkdf_extract},
-    otp,
 };
 use hmac::{Hmac, Mac};
 #[cfg(feature = "security-key")]
@@ -28,13 +28,14 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// Key file with the TOTP secret: the app also asks for the phone's code.
+/// 0.8 key file of a vault made with the removed OTP: the data key and a
+/// TOTP secret, which is read and dropped. Read only, never written.
 pub(super) const KEY_MAGIC: &[u8; 8] = b"GOYOKE01";
-/// Key file without one: password and key file only.
+/// 0.8 key file with the data key alone.
 pub(super) const KEY_MAGIC_NO_OTP: &[u8; 8] = b"GOYOKE02";
 /// Largest key file any read takes. The largest KF2 file is 32,532 bytes:
 /// 64 data keys, 480 tombstones, 8 security keys with 1023-byte credential
-/// IDs, every pair record and an OTP.
+/// IDs, every pair record and an old TOTP secret.
 pub const KEY_FILE_LIMIT: usize = 32_768;
 /// Highest epoch. A tombstone keeps the epoch of its removal in 48 bits, so
 /// a larger one would read back as another epoch with a loss mark.
@@ -79,7 +80,7 @@ const NOT_SEALED: &str = "새 열쇠 파일이 형식 검사를 통과하지 못
 /// The key-file magics this build knows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Magic {
-    /// 0.8, with the TOTP secret.
+    /// 0.8, with a TOTP secret of the removed OTP (read only).
     Ke01,
     /// 0.8, without one.
     Ke02,
@@ -303,7 +304,8 @@ pub struct KeyHeader {
     pub magic: Magic,
     pub vault_id: [u8; 16],
     pub epoch: u64,
-    /// The policy byte: bit0 OTP vault, bit1 PIN mode.
+    /// The policy byte: bit0 the body holds a TOTP secret of the removed
+    /// OTP (read and dropped, never written), bit1 PIN mode.
     pub flags: u8,
     /// The next key number to give out.
     pub next: u8,
@@ -340,7 +342,9 @@ pub struct KeyHeader {
     e: usize,
 }
 impl KeyHeader {
-    pub fn otp(&self) -> bool {
+    /// Bit0: the body holds a TOTP secret of the removed OTP after the data
+    /// keys. Only a reader's and a re-seal's concern.
+    pub fn otp_secret(&self) -> bool {
         self.flags & 1 != 0
     }
     /// PIN mode: every slot is a PIN slot.
@@ -635,27 +639,25 @@ pub fn parse(bytes: &[u8]) -> Result<KeyHeader> {
 }
 
 /// The secrets of a key file (spec §4.2): the data keys, the current one
-/// first and the ID key last (one entry for both when there is one key),
-/// and the TOTP secret of an OTP vault. Zeroized on drop.
+/// first and the ID key last (one entry for both when there is one key).
+/// The TOTP secret an old file may hold is never kept. Zeroized on drop.
 pub struct Bundle {
     keys: Zeroizing<Vec<[u8; 32]>>,
-    otp: Option<Box<Zeroizing<[u8; 20]>>>,
 }
 impl Bundle {
     /// None unless there are 1 to MAX_KEYS keys.
-    pub fn new(keys: &[[u8; 32]], otp: Option<&[u8; 20]>) -> Option<Self> {
+    pub fn new(keys: &[[u8; 32]]) -> Option<Self> {
         if keys.is_empty() || keys.len() > MAX_KEYS {
             return None;
         }
         // Sized up front: a growing Vec would free unwiped copies.
         let mut stored = Zeroizing::new(Vec::with_capacity(keys.len()));
         stored.extend_from_slice(keys);
-        Some(Self {
-            keys: stored,
-            otp: otp.map(boxed),
-        })
+        Some(Self { keys: stored })
     }
-    /// The body plaintext of a key file: `keys ‖ [otp]`.
+    /// The body plaintext of a key file: `keys ‖ [otp]`. An old file's TOTP
+    /// secret (`otp`) is checked for its length and dropped with the
+    /// caller's zeroized plaintext: nothing asks for a code any more.
     fn from_plain(plain: &[u8], k: usize, otp: bool) -> Option<Self> {
         if plain.len() + 16 != body_size(k, otp) {
             return None;
@@ -664,20 +666,17 @@ impl Bundle {
         for (key, part) in keys.iter_mut().zip(plain.as_chunks::<32>().0) {
             key.copy_from_slice(part);
         }
-        let otp = otp.then(|| {
-            let mut secret: Box<Zeroizing<[u8; 20]>> = Box::default();
-            secret.copy_from_slice(&plain[32 * k..]);
-            secret
-        });
-        Some(Self { keys, otp })
+        Some(Self { keys })
     }
-    fn plain(&self) -> Zeroizing<Vec<u8>> {
+    /// The body plaintext `seal` writes: the keys, and for the re-seal of an
+    /// old OTP vault's file (`pad`) 20 zero bytes where its TOTP secret was.
+    fn plain(&self, pad: bool) -> Zeroizing<Vec<u8>> {
         let mut plain = Zeroizing::new(Vec::with_capacity(32 * self.keys.len() + 20));
         for key in self.keys.iter() {
             plain.extend_from_slice(key);
         }
-        if let Some(otp) = &self.otp {
-            plain.extend_from_slice(otp.as_slice());
+        if pad {
+            plain.extend_from_slice(&[0; 20]);
         }
         plain
     }
@@ -693,20 +692,14 @@ impl Bundle {
     pub fn id_key(&self) -> &[u8; 32] {
         &self.keys[self.keys.len() - 1]
     }
-    pub fn otp(&self) -> Option<&[u8; 20]> {
-        self.otp.as_deref().map(|otp| &**otp)
-    }
-    /// The same keys in the same order and the same TOTP secret, compared in
-    /// constant time (counts are public).
+    /// The same keys in the same order, compared in constant time (counts
+    /// are public).
     pub fn same(&self, other: &Bundle) -> bool {
         let mut same = self.keys.len() == other.keys.len();
         for (a, b) in self.keys.iter().zip(other.keys.iter()) {
             same &= ct_eq(a, b);
         }
-        same & match (self.otp(), other.otp()) {
-            (Some(a), Some(b)) => ct_eq(a, b),
-            (a, b) => a.is_none() && b.is_none(),
-        }
+        same
     }
 }
 
@@ -875,14 +868,16 @@ impl KeyFile {
             Form::SecurityKey(_) => None,
         }
     }
-    /// Whether the vault asks for an OTP code. Unauthenticated: it only
-    /// decides which fields the screen shows.
-    pub fn uses_otp(&self) -> bool {
+    /// Whether the file still holds a TOTP secret of the removed OTP
+    /// (GOYOKE01, or flags bit0): it opens without any code, and the next
+    /// key change writes a file without it. Unauthenticated: it only
+    /// decides whether the app says so once (`Session::otp_note`).
+    pub fn otp_secret(&self) -> bool {
         match &self.form {
             Form::Legacy(magic) => *magic == Magic::Ke01,
-            Form::Kf2(h) => h.otp(),
+            Form::Kf2(h) => h.otp_secret(),
             #[cfg(not(feature = "security-key"))]
-            Form::SecurityKey(h) => h.as_ref().is_some_and(|h| h.otp()),
+            Form::SecurityKey(h) => h.as_ref().is_some_and(|h| h.otp_secret()),
         }
     }
     /// The state of a 0.8 key file whose data key is `key` (spec §4.5):
@@ -910,11 +905,9 @@ impl KeyFile {
             #[cfg(not(feature = "security-key"))]
             Form::SecurityKey(_) => Err(self.refusal().unwrap_or(NO_SECURITY_KEY_SUPPORT)),
             Form::Legacy(magic) => {
-                let (id, key, otp) = decode_key(&self.bytes, password)?;
-                let bundle =
-                    Bundle::new(std::slice::from_ref(&**key), otp.as_deref().map(|o| &**o))
-                        .ok_or(AUTH_ERROR)?;
-                let tag = legacy_tag(*magic, &id, otp.is_some(), &key_id(&id, &key));
+                let (id, key) = decode_key(&self.bytes, password)?;
+                let bundle = Bundle::new(std::slice::from_ref(&**key)).ok_or(AUTH_ERROR)?;
+                let tag = legacy_tag(*magic, &id, *magic == Magic::Ke01, &key_id(&id, &key));
                 Ok(Opened {
                     bundle: Box::new(bundle),
                     s: None,
@@ -961,7 +954,8 @@ impl KeyFile {
             crypto::note(crypto::Event::BodyAead);
         }
         let plain = crypto::open(&k_body, nonce, &bytes[..h.b + 32], &bytes[h.b + 32..h.e])?;
-        let bundle = Bundle::from_plain(&plain, h.key_ids.len(), h.otp()).ok_or(AUTH_ERROR)?;
+        let bundle =
+            Bundle::from_plain(&plain, h.key_ids.len(), h.otp_secret()).ok_or(AUTH_ERROR)?;
         // Every listed key ID belongs to a key of the body, and every
         // chain entry verifies, so every byte of the file is checked.
         let end = sha256(&[&bytes[..h.e]]);
@@ -1001,8 +995,7 @@ impl KeyFile {
 }
 
 /// The authored fields of a KF2 key file that `seal` writes (spec §4.1).
-/// `written` is the time of the seal; the bundle gives the key IDs and the
-/// OTP bit.
+/// `written` is the time of the seal; the bundle gives the key IDs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Spec {
     pub vault_id: [u8; 16],
@@ -1025,8 +1018,9 @@ pub enum Plan<'a> {
     /// The same-epoch re-seal of a verified file: `[0, W)` byte for byte
     /// (so the state tag stays), with a new seal block, body and chain. The
     /// spec must be that file's, but for `resume`; `opened` is what opening
-    /// `source` gave, and the bundle must be the one it holds, TOTP secret
-    /// included. The password is the one that opened it: comparing it with
+    /// `source` gave, and the bundle must be the one it holds. An old OTP
+    /// vault's flag stays with `[0, W)`; the body holds 20 zero bytes where
+    /// its TOTP secret was. The password is the one that opened it: comparing it with
     /// the source's would cost a second Argon2. A security-key file also
     /// takes its S from `opened`.
     Reseal {
@@ -1064,7 +1058,19 @@ pub fn seal(
         return Err(TOMBSTONES_FULL);
     }
     let k = bundle.keys().len();
-    let otp = bundle.otp().is_some();
+    // No new key file holds a TOTP secret (the OTP was removed): only a
+    // re-seal, which keeps `[0, W)` and so an old OTP vault's flag, keeps
+    // the 20 bytes the flag announces, written as zeros. Every other write
+    // makes a state without the flag.
+    let pad = match plan {
+        Plan::Reseal { source, .. } => source.header().is_some_and(KeyHeader::otp_secret),
+        _ => false,
+    };
+    // The tests' old files: what a version with the OTP sealed.
+    #[cfg(test)]
+    let old_otp = OLD_OTP.with(std::cell::Cell::take);
+    #[cfg(test)]
+    let pad = pad || old_otp.is_some();
     // A re-seal copies [0, W) of a verified file: the spec must be that
     // file's but for `resume`, and the bundle the one its opening gave.
     // Refused before any draw or Argon2.
@@ -1075,14 +1081,13 @@ pub fn seal(
         let mut sorted = spec.clone();
         sorted.tombstones.sort_unstable_by_key(Tombstone::order);
         let keys_match = h.key_ids.len() == k
-            && h.otp() == otp
             && bundle
                 .keys()
                 .iter()
                 .zip(&h.key_ids)
                 .all(|(key, id)| key_id(&h.vault_id, key) == *id);
-        // Two states never differ in a secret: same keys, same TOTP secret
-        // (constant time), as `opened` read them from exactly these bytes.
+        // Two states never differ in a secret: the same keys (constant
+        // time), as `opened` read them from exactly these bytes.
         let opened_here = opened.file == sha256(&[source.bytes()]) && bundle.same(&opened.bundle);
         // A state with security keys also needs the S that opening it
         // gave; a password-only one has none.
@@ -1099,7 +1104,7 @@ pub fn seal(
     if let Plan::Keys(keys) = plan {
         inbox::check(keys)?;
     }
-    let size = 96 + 16 * k + 24 * spec.tombstones.len() + SEAL_BLOCK + 32 + body_size(k, otp);
+    let size = 96 + 16 * k + 24 * spec.tombstones.len() + SEAL_BLOCK + 32 + body_size(k, pad);
     let size = size + 32 * k;
     // Step 1.
     let salt = crypto::random::<32>()?;
@@ -1117,7 +1122,7 @@ pub fn seal(
             out.extend_from_slice(Magic::Ke03.bytes());
             out.extend_from_slice(&spec.vault_id);
             out.extend_from_slice(&spec.epoch.to_le_bytes());
-            out.extend_from_slice(&[u8::from(otp), k as u8, 0, spec.next]);
+            out.extend_from_slice(&[u8::from(pad), k as u8, 0, spec.next]);
             out.extend_from_slice(&(tombstones.len() as u16).to_le_bytes());
             out.extend_from_slice(&[spec.kind as u8, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0]);
             out.extend_from_slice(&[0; 16]);
@@ -1149,7 +1154,7 @@ pub fn seal(
         }
         #[cfg(feature = "security-key")]
         Plan::Keys(keys) => {
-            let (out, keys_written) = inbox::head(spec, bundle, keys, now()?)?;
+            let (out, keys_written) = inbox::head(spec, bundle, keys, now()?, pad)?;
             written = Some(keys_written);
             (out, boxed(BodySecret::Keyset(keys.s).bytes()))
         }
@@ -1160,7 +1165,14 @@ pub fn seal(
     out.extend_from_slice(nonce.as_slice());
     let (k_body, c_body) = body_keys(&pw_key, &s, &sha256(&[&out]));
     out.extend_from_slice(&c_body);
-    let body = crypto::seal(&k_body, &nonce, &out, &bundle.plain())?;
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut plain = bundle.plain(pad);
+    #[cfg(test)]
+    if let Some(secret) = old_otp {
+        let at = plain.len() - 20;
+        plain[at..].copy_from_slice(&secret);
+    }
+    let body = crypto::seal(&k_body, &nonce, &out, &plain)?;
     out.extend_from_slice(&body);
     // Step 6: a chain entry for every data key.
     let end = sha256(&[&out]);
@@ -1179,7 +1191,16 @@ pub fn seal(
         },
     ))
 }
-/// The body ciphertext of a bundle of `k` keys: `keys ‖ [otp]` and the tag.
+#[cfg(test)]
+thread_local! {
+    /// The next `seal` on this thread writes as a version with the OTP did:
+    /// flags bit0 and this TOTP secret after the keys. The tests' old files
+    /// only; no build without tests has it.
+    pub(crate) static OLD_OTP: std::cell::Cell<Option<[u8; 20]>> =
+        const { std::cell::Cell::new(None) };
+}
+/// The body ciphertext of a bundle of `k` keys: `keys ‖ [otp]` and the tag,
+/// `otp` the 20 bytes of an old OTP vault's file.
 fn body_size(k: usize, otp: bool) -> usize {
     let otp = if otp { 20 } else { 0 };
     32 * k + otp + 16
@@ -1190,7 +1211,7 @@ fn now() -> Result<u64> {
     if let Some(now) = crypto::test_now() {
         return Ok(now);
     }
-    otp::now()
+    clock::now()
 }
 
 /// The public syntax of a GOYOKS01 file, which sync gates check (spec §4.6).
@@ -1232,8 +1253,6 @@ pub fn is_sync_key_file(bytes: &[u8], id: &[u8; 16]) -> Option<KeySyntax> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct KeyInfo {
     pub magic: [u8; 8],
-    /// The OTP field is shown.
-    pub otp: bool,
     pub needs_security_key: bool,
     pub well_formed: bool,
     pub slots: u8,
@@ -1274,7 +1293,6 @@ pub fn key_info_of(path: &Path, bytes: Vec<u8>) -> Option<KeyInfo> {
     let needs_security_key = Magic::of(&magic).is_some_and(Magic::hardware);
     let mut info = KeyInfo {
         magic,
-        otp: &magic == KEY_MAGIC,
         needs_security_key,
         well_formed: false,
         slots: 0,
@@ -1294,7 +1312,6 @@ pub fn key_info_of(path: &Path, bytes: Vec<u8>) -> Option<KeyInfo> {
     };
     if let Some(h) = header {
         info.well_formed = true;
-        info.otp = h.otp();
         info.slots = h.slots.len() as u8;
         info.pin = h.pin();
         info.key_sync = h.magic == Magic::Ks01;
@@ -1418,11 +1435,26 @@ fn mac(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
     m.finalize().into_bytes().into()
 }
 
-/// GOYOKE01 (148 bytes) holds the data key and the TOTP secret, GOYOKE02
-/// (128 bytes) the data key only. The magic is part of the authenticated
-/// header, so one kind cannot be passed off as the other. 0.9 still writes
-/// them for a new vault without security keys.
-pub(super) fn encode_key(
+/// GOYOKE02 (128 bytes): the data key only. 0.9 still writes it for a new
+/// vault without security keys; GOYOKE01 is never written.
+pub(super) fn encode_key(id: &[u8; 16], key: &[u8; 32], password: &str) -> Result<Vec<u8>> {
+    encode_legacy(id, key, None, password)
+}
+/// GOYOKE01 (148 bytes), the data key and a TOTP secret, as a vault made
+/// with the removed OTP has it: the tests' old files only.
+#[cfg(test)]
+pub(super) fn encode_key_otp(
+    id: &[u8; 16],
+    key: &[u8; 32],
+    otp: &[u8; 20],
+    password: &str,
+) -> Result<Vec<u8>> {
+    encode_legacy(id, key, Some(otp), password)
+}
+/// GOYOKE01 holds the data key and the TOTP secret, GOYOKE02 the data key
+/// only. The magic is part of the authenticated header, so one kind cannot
+/// be passed off as the other.
+fn encode_legacy(
     id: &[u8; 16],
     key: &[u8; 32],
     otp: Option<&[u8; 20]>,
@@ -1453,8 +1485,9 @@ pub(super) fn encode_key(
     header.extend_from_slice(&ciphertext);
     Ok(header)
 }
-pub(super) type KeyMaterial = ([u8; 16], Box<Key>, Option<Box<Zeroizing<[u8; 20]>>>);
-pub(super) fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
+/// The vault ID and the data key of a 0.8 key file. GOYOKE01's TOTP secret
+/// is checked for its length and dropped with the zeroized plaintext.
+pub(super) fn decode_key(data: &[u8], password: &str) -> Result<([u8; 16], Box<Key>)> {
     let with_otp = match (data.len(), data.get(..8)) {
         (148, Some(m)) if m == KEY_MAGIC => true,
         (128, Some(m)) if m == KEY_MAGIC_NO_OTP => false,
@@ -1470,12 +1503,7 @@ pub(super) fn decode_key(data: &[u8], password: &str) -> Result<KeyMaterial> {
     }
     let mut key: Box<Key> = Box::default();
     key.copy_from_slice(&plain[..32]);
-    let otp = with_otp.then(|| {
-        let mut otp: Box<Zeroizing<[u8; 20]>> = Box::default();
-        otp.copy_from_slice(&plain[32..]);
-        otp
-    });
-    Ok((id, key, otp))
+    Ok((id, key))
 }
 
 /// A GOYOKE03 of `spec` and `bundle` sealed with `password` whose key-ID
@@ -1501,12 +1529,41 @@ pub(crate) fn seal_claiming(
     out.extend_from_slice(&[2; 24]);
     let (k_body, c_body) = body_keys(&pw_key, &[0; 32], &sha256(&[&out]));
     out.extend_from_slice(&c_body);
-    let body = crypto::seal(&k_body, &[2; 24], &out, &bundle.plain()).unwrap();
+    let body = crypto::seal(&k_body, &[2; 24], &out, &bundle.plain(false)).unwrap();
     out.extend_from_slice(&body);
     let end = sha256(&[&out]);
     for key in bundle.keys() {
         out.extend_from_slice(&chain_mac(&spec.vault_id, key, &end));
     }
+    out
+}
+/// What the body of a password-only KF2 `file` holds after its data keys,
+/// opened with `password`: 20 bytes for flags bit0 (an old TOTP secret, or
+/// the zeros of a re-seal), else none. The tests' look inside only.
+#[cfg(test)]
+pub(crate) fn body_tail(file: &KeyFile, password: &str) -> Vec<u8> {
+    let h = file.header().unwrap();
+    let bytes = file.bytes();
+    let salt: &[u8; 32] = bytes[h.w + 32..h.w + 64].try_into().unwrap();
+    let nonce: &[u8; 24] = bytes[h.w + 64..h.b].try_into().unwrap();
+    let pw_key = crypto::derive(password.as_bytes(), salt).unwrap();
+    let (k_body, _) = body_keys(&pw_key, &[0; 32], &sha256(&[&bytes[..h.b]]));
+    let plain = crypto::open(&k_body, nonce, &bytes[..h.b + 32], &bytes[h.b + 32..h.e]).unwrap();
+    plain[32 * h.key_ids.len()..].to_vec()
+}
+/// A GOYOKE03 of `spec` and `bundle` sealed with `password` as a vault
+/// made with the removed OTP had it: flags bit0 and the TOTP secret `otp`
+/// after the keys. The tests' old files only: no writer makes one now.
+#[cfg(test)]
+pub(crate) fn seal_old_otp(
+    spec: &Spec,
+    bundle: &Bundle,
+    password: &str,
+    otp: &[u8; 20],
+) -> Vec<u8> {
+    OLD_OTP.with(|o| o.set(Some(*otp)));
+    let (out, _) = seal(spec, bundle, password, Plan::PasswordOnly).unwrap();
+    assert!(parse(&out).unwrap().otp_secret());
     out
 }
 /// A well-formed GOYOKS01 (`sync`) or GOYOKH01 of three keys from the
@@ -1601,6 +1658,8 @@ mod tests {
 
     /// A GOYOKE03 that scripts/make_key_fixtures.py wrote from recorded
     /// inputs, and those inputs (the same seq/mixed patterns as there).
+    /// One with `otp` is an old OTP vault's file: it opens, and no writer
+    /// makes it any more.
     struct Fixture {
         bytes: &'static [u8],
         password: &'static str,
@@ -1644,6 +1703,16 @@ mod tests {
             draws: (mixed(0x5a), mixed(0xa5)),
             tag: "d0ae538c5e5bdeaef009ae29055c806a",
             code: "6af6e45f0540f1c6",
+        }
+    }
+    /// The same inputs without the TOTP secret: what seal writes now.
+    fn fixture_password_no_otp() -> Fixture {
+        Fixture {
+            bytes: include_bytes!("../../tests/fixtures/goyoke03-test-no-otp.goyokey"),
+            otp: None,
+            tag: "ee1c5b2c9142f43b33df48dd8f0c138b",
+            code: "7db1bdefb0d6af31",
+            ..fixture_password()
         }
     }
     fn fixture_keys_off() -> Fixture {
@@ -1705,10 +1774,12 @@ mod tests {
     }
     impl Fixture {
         fn bundle(&self) -> Bundle {
-            Bundle::new(&self.keys, self.otp.as_ref()).unwrap()
+            Bundle::new(&self.keys).unwrap()
         }
-        /// Seals the recorded inputs with the recorded draws and time.
+        /// Seals the recorded inputs with the recorded draws and time; an
+        /// old OTP vault's as a version with the OTP sealed it.
         fn seal(&self, plan: Plan) -> Result<(Vec<u8>, WriterSecrets)> {
+            OLD_OTP.with(|o| o.set(self.otp));
             queue_random(&[&self.draws.0, &self.draws.1]);
             set_test_now(Some(self.written));
             let sealed = seal(&self.spec, &self.bundle(), self.password, plan);
@@ -1726,8 +1797,13 @@ mod tests {
             spec.tombstones.sort_unstable_by_key(Tombstone::order);
             assert_eq!(h.spec(), spec);
             assert_eq!(
-                (h.magic, h.written, h.otp()),
-                (Magic::Ke03, self.written, self.otp.is_some())
+                (h.magic, h.written, h.otp_secret(), file.otp_secret()),
+                (
+                    Magic::Ke03,
+                    self.written,
+                    self.otp.is_some(),
+                    self.otp.is_some()
+                )
             );
             assert_eq!(hex(&h.tag), self.tag);
             let opened = file.open(self.password, None).unwrap();
@@ -1756,6 +1832,10 @@ mod tests {
         set_kdf_profile(KdfProfile::Test);
         let fixture = fixture_password();
         fixture.reproduce();
+        // What seal writes now from its inputs: the twin without the TOTP
+        // secret or the flag, byte for byte.
+        fixture_password_no_otp().reproduce();
+        assert!(!parse(fixture_password_no_otp().bytes).unwrap().otp_secret());
         fixture_keys_off().reproduce();
         // The tombstone at EPOCH_MAX keeps its epoch and its loss mark.
         let h = parse(fixture_keys_off().bytes).unwrap();
@@ -1771,7 +1851,8 @@ mod tests {
             20_455
         );
         // The same-epoch re-seal: [0, W) byte for byte, so the state tag
-        // stays; a new seal block, body and chain.
+        // and the OTP flag stay; a new seal block, body and chain, and 20
+        // zero bytes where the TOTP secret was.
         let source = file(fixture.bytes).unwrap();
         let w = source.header().unwrap().w;
         let opened = source.open(fixture.password, None).unwrap();
@@ -1797,6 +1878,7 @@ mod tests {
             (h.tag, h.resume, h.written),
             (source.header().unwrap().tag, seq(0xe0), WRITTEN)
         );
+        assert!(h.otp_secret());
         assert!(
             resealed
                 .open(fixture.password, None)
@@ -1804,6 +1886,19 @@ mod tests {
                 .bundle
                 .same(&fixture.bundle())
         );
+        let (k_body, _) = body_keys(
+            &crypto::derive(fixture.password.as_bytes(), &mixed::<32>(0x66)).unwrap(),
+            &[0; 32],
+            &sha256(&[&python[..h.b]]),
+        );
+        let plain = crypto::open(
+            &k_body,
+            &mixed::<24>(0x99),
+            &python[..h.b + 32],
+            &python[h.b + 32..h.e],
+        )
+        .unwrap();
+        assert_eq!(plain[64..], [0; 20]);
     }
 
     #[test]
@@ -1817,7 +1912,7 @@ mod tests {
 
     /// A GOYOKH01 or GOYOKS01 that scripts/make_key_fixtures.py wrote, and
     /// what this build can check it against (hw_fixtures.json): the data
-    /// keys, the OTP secret, S and the password.
+    /// keys, an old OTP vault's TOTP secret, S and the password.
     struct HwFixture {
         bytes: &'static [u8],
         password: &'static str,
@@ -1947,7 +2042,7 @@ mod tests {
             )
             .unwrap();
             let bundle = Bundle::from_plain(&plain, f.keys.len(), f.otp.is_some()).unwrap();
-            assert!(bundle.same(&Bundle::new(&f.keys, f.otp.as_ref()).unwrap()));
+            assert!(bundle.same(&Bundle::new(&f.keys).unwrap()));
             let end = sha256(&[&f.bytes[..h.e]]);
             for (i, key) in f.keys.iter().enumerate() {
                 let at = h.e + 32 * i;
@@ -1994,7 +2089,7 @@ mod tests {
             assert_eq!(f.open(kh.password, None).err(), Some(refusal), "{name}");
             assert_eq!(f.open(ks.password, None).err(), Some(refusal), "{name}");
         }
-        assert!(file(kh.bytes).unwrap().uses_otp());
+        assert!(file(kh.bytes).unwrap().otp_secret());
         assert_eq!(derive_count(), derives);
     }
 
@@ -2002,17 +2097,15 @@ mod tests {
     fn goyoke03_round_trips() {
         set_kdf_profile(KdfProfile::Test);
         let password = "round trip passphrase";
-        for (k, r, otp, kind) in [1usize, 2, 64]
+        for (k, r, kind) in [1usize, 2, 64]
             .into_iter()
             .flat_map(|k| [0usize, 1, 480].map(|r| (k, r)))
-            .flat_map(|(k, r)| [false, true].map(|otp| (k, r, otp)))
-            .flat_map(|(k, r, otp)| {
-                [Kind::Password, Kind::Union, Kind::KeysOff].map(|kind| (k, r, otp, kind))
+            .flat_map(|(k, r)| {
+                [Kind::Password, Kind::Union, Kind::KeysOff].map(|kind| (k, r, kind))
             })
         {
             let keys: Vec<[u8; 32]> = (0..k).map(|i| [i as u8 + 1; 32]).collect();
-            let otp_secret = otp.then_some([9; 20]);
-            let bundle = Bundle::new(&keys, otp_secret.as_ref()).unwrap();
+            let bundle = Bundle::new(&keys).unwrap();
             let spec = Spec {
                 vault_id: [5; 16],
                 epoch: 1000,
@@ -2034,24 +2127,26 @@ mod tests {
                 resume: [7; 32],
             };
             let (bytes, written) = seal(&spec, &bundle, password, Plan::PasswordOnly).unwrap();
-            let size = 96 + 16 * k + 24 * r + 88 + 32 + body_size(k, otp) + 32 * k;
+            let size = 96 + 16 * k + 24 * r + 88 + 32 + body_size(k, false) + 32 * k;
             assert_eq!(bytes.len(), size);
             let f = file(&bytes).unwrap();
             let h = f.header().unwrap();
             let mut sorted = spec.clone();
             sorted.tombstones.sort_unstable_by_key(Tombstone::order);
             assert_eq!(h.spec(), sorted);
-            assert_eq!((h.otp(), f.uses_otp(), h.slots.len()), (otp, otp, 0));
+            assert_eq!(
+                (h.otp_secret(), f.otp_secret(), h.slots.len()),
+                (false, false, 0)
+            );
             assert!(f.open_written(&written).unwrap().bundle.same(&bundle));
             assert!(f.open(password, None).unwrap().bundle.same(&bundle));
             assert!(f.chain_ok(&keys[k - 1]) && !f.chain_ok(&[0xEE; 32]));
         }
         // The sizes of spec §4.1.
-        let one = Bundle::new(&[[1; 32]], None).unwrap();
-        let two = Bundle::new(&[[1; 32], [2; 32]], None).unwrap();
-        let with_otp = Bundle::new(&[[1; 32]], Some(&[3; 20])).unwrap();
+        let one = Bundle::new(&[[1; 32]]).unwrap();
+        let two = Bundle::new(&[[1; 32], [2; 32]]).unwrap();
         let spec = fixture_real().spec;
-        for (bundle, size) in [(&one, 312), (&with_otp, 332), (&two, 392)] {
+        for (bundle, size) in [(&one, 312), (&two, 392)] {
             let (bytes, _) = seal(&spec, bundle, "p", Plan::PasswordOnly).unwrap();
             assert_eq!(bytes.len(), size);
         }
@@ -2095,8 +2190,8 @@ mod tests {
             assert_eq!(refused(&spec), Some(NOT_SEALED));
         }
         // A re-seal takes nothing but `resume` from its spec, and needs the
-        // bundle that opening the source gave: the same keys and the same
-        // TOTP secret, so two files of one state never differ in a secret.
+        // bundle that opening the source gave: the same keys, so two files
+        // of one state never differ in a secret.
         let source = file(fixture.bytes).unwrap();
         let opened = source.open(fixture.password, None).unwrap();
         let derives = derive_count();
@@ -2110,12 +2205,10 @@ mod tests {
         let mut spec = fixture.spec.clone();
         spec.epoch += 1;
         assert_eq!(reseal(&spec, &bundle, &opened), Some(NOT_SEALED));
-        let other = Bundle::new(&[seq(0x40), seq(0x61)], fixture.otp.as_ref()).unwrap();
+        let other = Bundle::new(&[seq(0x40), seq(0x61)]).unwrap();
         assert_eq!(reseal(&fixture.spec, &other, &opened), Some(NOT_SEALED));
-        let no_otp = Bundle::new(&fixture.keys, None).unwrap();
-        assert_eq!(reseal(&fixture.spec, &no_otp, &opened), Some(NOT_SEALED));
-        let other_otp = Bundle::new(&fixture.keys, Some(&[0x5a; 20])).unwrap();
-        assert_eq!(reseal(&fixture.spec, &other_otp, &opened), Some(NOT_SEALED));
+        let fewer = Bundle::new(&fixture.keys[..1]).unwrap();
+        assert_eq!(reseal(&fixture.spec, &fewer, &opened), Some(NOT_SEALED));
         assert_eq!(derive_count(), derives);
         assert_eq!(reseal(&fixture.spec, &bundle, &opened), None);
         // What opening another file gave, even one of the same state and
@@ -2143,8 +2236,8 @@ mod tests {
         );
         assert_eq!(derive_count(), derives);
         // Only a KF2 file can be re-sealed.
-        let legacy = file(&encode_key(&[1; 16], &[2; 32], None, "p").unwrap()).unwrap();
-        let one = Bundle::new(&[[2; 32]], None).unwrap();
+        let legacy = file(&encode_key(&[1; 16], &[2; 32], "p").unwrap()).unwrap();
+        let one = Bundle::new(&[[2; 32]]).unwrap();
         let opened_legacy = legacy.open("p", None).unwrap();
         let plan = Plan::Reseal {
             source: &legacy,
@@ -2230,7 +2323,10 @@ mod tests {
             bytes.extend_from_slice(&[2; 24]);
             let (k_body, c_body) = body_keys(&pw_key, &[0; 32], &sha256(&[&bytes]));
             bytes.extend_from_slice(&c_body);
-            let body = crypto::seal(&k_body, &[2; 24], &bytes, &bundle.plain()).unwrap();
+            // The fixture is an old OTP vault's: its body holds 20 bytes
+            // after the keys.
+            let plain = bundle.plain(fixture.otp.is_some());
+            let body = crypto::seal(&k_body, &[2; 24], &bytes, &plain).unwrap();
             bytes.extend_from_slice(&body);
             let end = sha256(&[&bytes]);
             for key in bundle.keys() {
@@ -2476,7 +2572,8 @@ mod tests {
             wraps: vec![[0, 0], [1, 0]],
         }
     }
-    /// GOYOKS01: PIN mode, every slot a PIN slot, with an OTP.
+    /// GOYOKS01: PIN mode, every slot a PIN slot, with an old OTP vault's
+    /// flag.
     pub(super) fn ks() -> Draft {
         let mut d = kh();
         d.magic = *b"GOYOKS01";
@@ -2501,7 +2598,7 @@ mod tests {
         }
     }
     /// The largest file: 64 keys, 480 tombstones, 8 keys with 1023-byte
-    /// credential IDs, all 56 pair records, 8 S-wraps and an OTP.
+    /// credential IDs, all 56 pair records, 8 S-wraps and an old TOTP secret.
     fn largest() -> Draft {
         let mut d = kh();
         d.flags = 1;
@@ -2867,7 +2964,7 @@ mod tests {
             assert_eq!(f.magic(), Some(Magic::of(&d.magic).unwrap()));
             assert!(f.header().is_none() && f.vault_id().is_none());
         }
-        assert!(file(&ks().bytes()).unwrap().uses_otp());
+        assert!(file(&ks().bytes()).unwrap().otp_secret());
         // Damaged, newer, or another grammar under the same family: the same
         // refusal with S-NOSK-DAMAGED, never a wrong password.
         let mut flipped = kh().bytes();
@@ -2918,9 +3015,8 @@ mod tests {
         }
         // The relabel matrix over the five magics: no file passes as
         // another; a hardware magic gets this build's refusal.
-        let legacy_otp =
-            encode_key(&[1; 16], &[2; 32], Some(&Zeroizing::new([3; 20])), "p").unwrap();
-        let legacy = encode_key(&[1; 16], &[2; 32], None, "p").unwrap();
+        let legacy_otp = encode_key_otp(&[1; 16], &[2; 32], &[3; 20], "p").unwrap();
+        let legacy = encode_key(&[1; 16], &[2; 32], "p").unwrap();
         let originals = [
             legacy_otp,
             legacy,
@@ -2955,35 +3051,30 @@ mod tests {
         assert_eq!(derive_count(), derives);
     }
 
+    /// GOYOKE01, a vault made with the removed OTP, opens like GOYOKE02 with
+    /// the password alone: its TOTP secret is read and dropped.
     #[test]
     fn legacy_key_files_open_with_their_state() {
         set_kdf_profile(KdfProfile::Test);
-        let otp = Zeroizing::new([3; 20]);
-        for (secret, magic, size) in [(Some(&otp), Magic::Ke01, 148), (None, Magic::Ke02, 128)] {
-            let bytes = encode_key(
-                &[1; 16],
-                &[2; 32],
-                secret.map(|o| &**o),
-                "legacy passphrase",
-            )
+        let pass = "legacy passphrase";
+        for (otp, magic, size) in [(true, Magic::Ke01, 148), (false, Magic::Ke02, 128)] {
+            let bytes = if otp {
+                encode_key_otp(&[1; 16], &[2; 32], &[3; 20], pass)
+            } else {
+                encode_key(&[1; 16], &[2; 32], pass)
+            }
             .unwrap();
             let f = file(&bytes).unwrap();
             assert_eq!(
-                (f.bytes().len(), f.magic(), f.uses_otp()),
-                (size, Some(magic), secret.is_some())
+                (f.bytes().len(), f.magic(), f.otp_secret()),
+                (size, Some(magic), otp)
             );
             assert_eq!(f.vault_id(), Some([1; 16]));
             assert!(f.header().is_none() && !f.needs_security_key() && f.refusal().is_none());
             let opened = f.open("legacy passphrase", None).unwrap();
             assert_eq!(opened.bundle.keys(), [[2; 32]]);
             assert!(opened.bundle.current() == opened.bundle.id_key());
-            assert_eq!(opened.bundle.otp(), secret.map(|o| &**o));
-            let tag = legacy_tag(
-                magic,
-                &[1; 16],
-                secret.is_some(),
-                &key_id(&[1; 16], &[2; 32]),
-            );
+            let tag = legacy_tag(magic, &[1; 16], otp, &key_id(&[1; 16], &[2; 32]));
             assert_eq!(opened.state, KeyState { epoch: 0, tag });
             assert_eq!(opened.pw_id, [0; 16]);
             assert!(!f.chain_ok(&[2; 32]));
@@ -3098,25 +3189,24 @@ mod tests {
             path
         };
         let info = |bytes: &[u8]| key_info(&write("k.goyokey", bytes));
-        let legacy = encode_key(&[1; 16], &[2; 32], Some(&Zeroizing::new([3; 20])), "p").unwrap();
+        let legacy = encode_key_otp(&[1; 16], &[2; 32], &[3; 20], "p").unwrap();
         let i = info(&legacy).unwrap();
-        assert!(i.otp && i.well_formed && !i.needs_security_key && i.epoch == 0);
+        assert!(i.well_formed && !i.needs_security_key && i.epoch == 0);
         let i = info(&legacy[..100]).unwrap();
-        assert!(i.otp && !i.well_formed);
+        assert!(!i.well_formed);
         let i = info(fixture_password().bytes).unwrap();
-        assert_eq!((i.otp, i.well_formed, i.epoch, i.slots), (true, true, 7, 0));
+        assert_eq!((i.well_formed, i.epoch, i.slots), (true, 7, 0));
         let i = info(&ks().bytes()).unwrap();
         assert_eq!(
             (
                 i.needs_security_key,
                 i.well_formed,
-                i.otp,
                 i.slots,
                 i.pin,
                 i.key_sync,
                 i.epoch
             ),
-            (true, true, true, 3, true, true, 9)
+            (true, true, 3, true, true, 9)
         );
         let i = info(&kh().bytes()).unwrap();
         assert!(i.needs_security_key && i.well_formed && !i.pin && !i.key_sync);
@@ -3125,7 +3215,7 @@ mod tests {
         let head = kh().bytes();
         for bytes in [&head[..50], &b"GOYOKH02"[..], &big[..]] {
             let i = info(bytes).unwrap();
-            assert!(!i.well_formed && !i.otp);
+            assert!(!i.well_formed);
             // The security-key build opens GOYOKH01 and GOYOKS01 only.
             let newer = cfg!(feature = "security-key") && bytes == b"GOYOKH02";
             assert_eq!(i.needs_security_key, !newer);
@@ -3172,20 +3262,23 @@ mod tests {
 
     #[test]
     fn bundles_keep_the_id_key_last() {
-        assert!(Bundle::new(&[], None).is_none());
-        assert!(Bundle::new(&[[1; 32]; MAX_KEYS + 1], None).is_none());
-        let b = Bundle::new(&[[1; 32], [2; 32], [3; 32]], Some(&[4; 20])).unwrap();
-        assert_eq!(
-            (b.current(), b.id_key(), b.otp()),
-            (&[1; 32], &[3; 32], Some(&[4; 20]))
-        );
-        assert!(b.same(&Bundle::new(&[[1; 32], [2; 32], [3; 32]], Some(&[4; 20])).unwrap()));
-        assert!(!b.same(&Bundle::new(&[[1; 32], [2; 32], [3; 32]], None).unwrap()));
-        assert!(!b.same(&Bundle::new(&[[1; 32], [2; 32]], Some(&[4; 20])).unwrap()));
-        assert!(!b.same(&Bundle::new(&[[1; 32], [2; 32], [5; 32]], Some(&[4; 20])).unwrap()));
-        let plain = b.plain();
-        assert_eq!(plain.len(), 3 * 32 + 20);
-        assert!(Bundle::from_plain(&plain, 3, true).unwrap().same(&b));
-        assert!(Bundle::from_plain(&plain, 3, false).is_none());
+        assert!(Bundle::new(&[]).is_none());
+        assert!(Bundle::new(&[[1; 32]; MAX_KEYS + 1]).is_none());
+        let b = Bundle::new(&[[1; 32], [2; 32], [3; 32]]).unwrap();
+        assert_eq!((b.current(), b.id_key()), (&[1; 32], &[3; 32]));
+        assert!(b.same(&Bundle::new(&[[1; 32], [2; 32], [3; 32]]).unwrap()));
+        assert!(!b.same(&Bundle::new(&[[1; 32], [2; 32]]).unwrap()));
+        assert!(!b.same(&Bundle::new(&[[1; 32], [2; 32], [5; 32]]).unwrap()));
+        // What seal writes: the keys, and only for a re-seal of an old OTP
+        // vault's file 20 zero bytes after them. An old file's secret is
+        // read past and dropped.
+        assert_eq!(*b.plain(false), [[1; 32], [2; 32], [3; 32]].concat());
+        let padded = b.plain(true);
+        assert_eq!(padded[..96], *b.plain(false));
+        assert_eq!(padded[96..], [0; 20]);
+        let old = [&b.plain(false)[..], &[4; 20]].concat();
+        assert!(Bundle::from_plain(&old, 3, true).unwrap().same(&b));
+        assert!(Bundle::from_plain(&old, 3, false).is_none());
+        assert!(Bundle::from_plain(&b.plain(false), 3, true).is_none());
     }
 }

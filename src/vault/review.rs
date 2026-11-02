@@ -383,7 +383,7 @@ fn capped(mut all: Vec<Vec<u8>>, anchor_due: Option<&str>) -> Vec<Vec<u8>> {
         }
     }
     if let Some(before) = lost {
-        let now = crate::otp::now().unwrap_or(before);
+        let now = crate::clock::now().unwrap_or(before);
         all.push(format!("{now} ! {before}").into_bytes());
     }
     all
@@ -665,7 +665,7 @@ impl Session {
             return Ok(());
         }
         let dir = self.anchor.dir.as_deref().ok_or(())?;
-        let now = crate::otp::now().map_err(|_| ())?;
+        let now = crate::clock::now().map_err(|_| ())?;
         let due = self.due_known();
         record(dir, &self.id, now, version, brought, due.as_deref()).map_err(|_| ())
     }
@@ -684,7 +684,7 @@ impl Session {
             }
             true
         })?;
-        mark_done(&dir, &self.id, crate::otp::now()?).map_err(failed)?;
+        mark_done(&dir, &self.id, crate::clock::now()?).map_err(failed)?;
         self.review_due = None;
         if let Some(link) = self.sync.as_mut() {
             link.mark_due();
@@ -698,7 +698,7 @@ impl Session {
     pub(super) fn review_store(&mut self, loss: &str) -> Result<String> {
         let dir = self.anchor.dir.clone().ok_or(super::ANCHOR_FAILED)?;
         let due = self.due_known();
-        mark_due(&dir, &self.id, loss, due.as_deref(), crate::otp::now()?).map_err(failed)
+        mark_due(&dir, &self.id, loss, due.as_deref(), crate::clock::now()?).map_err(failed)
     }
     /// The review this session, or the anchor's `review` line, already
     /// holds due: the earlier date.

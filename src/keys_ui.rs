@@ -12,6 +12,7 @@
 //! through `phased_command` (§9.2a): its secrets (the typed password, the
 //! Reauth, every Touch and NewKey) live only in its frame.
 use super::*;
+use goyo_vault::clock;
 use goyo_vault::fido::{self, MakeRequest, NewKey, Registration};
 use goyo_vault::vault::{
     Exposure, GateAnswer, GateChoice, GateKind, KeyRow, KeysOverview, LossReport, RedoFlow,
@@ -121,7 +122,7 @@ pub const ROW_CLONED: &str = "복제됐을 수 있음: 모든 키 새로 잠그�
 pub const FULL: &str = "다른 키를 모두 대신할 수 있는 키: 보안 키 {list}";
 pub const FULL_NONE: &str = "다른 키를 모두 대신할 수 있는 키: 없음 ('짝 맺기'를 하세요)";
 /// S-KEYS-NOTE.
-pub const KEYS_NOTE: &str = "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. OTP보다 권하는 방법이 아니라 또 하나의 선택지이며, 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.";
+pub const KEYS_NOTE: &str = "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.";
 /// S-KEYCODE-NOTE-SK.
 pub const KEYCODE_NOTE: &str =
     "다른 PC에서 이 금고의 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력합니다.";
@@ -172,9 +173,7 @@ pub const NO_MORE_KEYS: &str =
 /// S-REAUTH-AGAIN (spec §9.2a, §9.3; S45-2 #19, S45-3 #16): the Reauth is
 /// too old for what is left, so a fresh one is taken in the same flow; the
 /// text names what it needs. With neither, there is no dialog.
-pub const REAUTH_AGAIN_OTP: &str = "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.";
 pub const REAUTH_AGAIN_TOUCH: &str = "확인한 지 오래되어 한 번 더 확인합니다. 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.";
-pub const REAUTH_AGAIN_BOTH: &str = "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력한 뒤 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.";
 
 // Keys on, add key, pairing, re-seed and keys off (spec §9.2).
 /// S-KEYSON-OLDFILES.
@@ -192,7 +191,7 @@ pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른
 /// holds another PC's key file with keys (keys on, then key-file sync):
 /// [서버의 새 열쇠 파일 받기…] and what it asks (S-PWONLY-SERVER).
 pub const SERVER_TAKE_BUTTON: &str = "서버의 새 열쇠 파일 받기…";
-pub const SERVER_TAKE_HOLD: &str = "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호(와 OTP)를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).";
+pub const SERVER_TAKE_HOLD: &str = "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).";
 /// [코드 없이 이 서버를 믿고 받기…] and S-NOCODE-SERVER, danger, default
 /// no; the status line after such a take.
 pub const NOCODE_SERVER_LABEL: &str = "코드 없이 이 서버를 믿고 받기…";
@@ -399,7 +398,7 @@ pub const TRY_SERVER_KEY: &str = "열리지 않았습니다. 다른 PC에서 비
 /// S-TRY-OTHERKEY, with [터치] and [취소] (S6-2 #4: own was not tried).
 pub const TRY_OTHERKEY: &str = "보안 키 확인을 취소해서 이 PC의 열쇠 파일로는 열어 보지 않았습니다. 서버에서 받아 둔 열쇠 파일(아직 확인 전)에는 이 PC가 모르는 보안 키가 들어 있습니다. 다른 PC에서 새로 등록해 이 PC로 가져온 키가 있다면 그 키로 열어 볼까요? 그런 키를 가져온 적이 없다면 취소하고 이 PC의 보안 키로 다시 여세요.";
 /// S-TRY-OTHERKEY-FAILED, in place of AUTH with S-AUTH-KEYS on that path.
-pub const TRY_OTHERKEY_FAILED: &str = "서버에서 받아 둔 열쇠 파일이 이 보안 키와 입력한 비밀번호(와 OTP)로 열리지 않았습니다. 이 PC의 열쇠 파일에 등록된 보안 키로 다시 여세요. 다른 PC에서 키를 가져온 적이 없다면 서버의 열쇠 파일이 위조되었을 수 있습니다.";
+pub const TRY_OTHERKEY_FAILED: &str = "서버에서 받아 둔 열쇠 파일이 이 보안 키와 입력한 비밀번호로 열리지 않았습니다. 이 PC의 열쇠 파일에 등록된 보안 키로 다시 여세요. 다른 PC에서 키를 가져온 적이 없다면 서버의 열쇠 파일이 위조되었을 수 있습니다.";
 /// The first status line after the server's key file was taken at login
 /// (spec §7.15 step 9).
 pub const ACCEPTED_AT_LOGIN: &str = "다른 PC의 열쇠 변경을 받았습니다. 열쇠 확인 코드 {code}";
@@ -858,14 +857,14 @@ impl Default for Toggles {
     }
 }
 /// What a removal screen keeps when it is rebuilt for a toggle.
-const KEPT: [i32; 5] = [CURRENT_PASS, OTP, PASS, CONFIRM, LOSS_DATE];
+const KEPT: [i32; 4] = [CURRENT_PASS, PASS, CONFIRM, LOSS_DATE];
 
 /// The hardware section of the Keys screen and the screens of this build.
 impl App {
     /// The Keys screen below the code (spec §9.1), when nothing holds key
     /// changes: the state line, the list with the pairing status, the full
     /// authorizers and S-KEYS-NOTE, the buttons, and the current password
-    /// (and OTP) the flows' Reauth reads; with keys off, the toggles and
+    /// the flows' Reauth reads; with keys off, the toggles and
     /// the new password fields of [보안 키 켜기].
     pub(crate) fn build_hardware(
         &mut self,
@@ -892,11 +891,6 @@ impl App {
             let toggle = if on { theme::TOGGLE_ON } else { theme::TOGGLE };
             self.button(KEY_AUTO, AUTO_LABEL, 436, 370, 400, 28, toggle);
         }
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
         match keys {
             Some(o) => {
                 // The key to keep at hand, always in view (spec §9.1).
@@ -1012,7 +1006,7 @@ impl App {
                         variant,
                     );
                 }
-                // The current password (and OTP) every flow's Reauth reads,
+                // The current password every flow's Reauth reads,
                 // and a halt's override at the right, which reads them too;
                 // else the supersede of a gated change whose PC is gone.
                 let supersede = sync
@@ -1021,16 +1015,8 @@ impl App {
                     .is_some_and(|w| w.supersede)
                     .then_some((GATE_SUPERSEDE, SUPERSEDE_BUTTON));
                 let action = halt.and_then(|(_, action)| action).or(supersede);
-                let w = match (otp.is_some(), action.is_some()) {
-                    (true, true) => 184,
-                    (true, false) | (false, true) => 380,
-                    (false, false) => 796,
-                };
+                let w = if action.is_some() { 380 } else { 796 };
                 self.password_field(CURRENT_PASS, REAUTH_LABEL, 40, 608, w);
-                if let Some(tag) = otp {
-                    let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-                    self.field(OTP, &caption, "", 40 + w + 16, 608, 180, true);
-                }
                 if let Some((id, label)) = action {
                     self.button(id, label, 436, 630, 400, 40, theme::DANGER_GHOST);
                 }
@@ -1041,9 +1027,9 @@ impl App {
                 let toggle = if pw { theme::TOGGLE_ON } else { theme::TOGGLE };
                 self.button(KEYON_PWCHANGE, PWCHANGE_TOGGLE, 40, 490, 388, 34, toggle);
                 // The current password, the new one and its confirmation,
-                // and the OTP code, in one row.
-                let fields = 1 + 2 * usize::from(pw) + usize::from(otp.is_some());
-                let w = (796 - 16 * (fields as i32 - 1)) / fields as i32;
+                // in one row.
+                let fields = 1 + 2 * i32::from(pw);
+                let w = (796 - 16 * (fields - 1)) / fields;
                 let mut x = 40;
                 self.password_field(CURRENT_PASS, REAUTH_LABEL, x, 536, w);
                 x += w + 16;
@@ -1051,11 +1037,6 @@ impl App {
                     self.password_field(PASS, NEW_PASS, x, 536, w);
                     x += w + 16;
                     self.password_field(CONFIRM, NEW_CONFIRM, x, 536, w);
-                    x += w + 16;
-                }
-                if let Some(tag) = otp {
-                    let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-                    self.field(OTP, &caption, "", x, 536, w, true);
                 }
                 self.button(KEY_ON, ON_BUTTON, 40, 612, 300, 40, theme::PRIMARY);
             }
@@ -1063,7 +1044,7 @@ impl App {
     }
     /// `Screen::Pair` (spec §9.1 "짝 맺기"): S-PAIR, one toggle per live key
     /// with its pairing status (keys that need pairing ticked at first),
-    /// the current password (and OTP) and [짝 맺기].
+    /// the current password and [짝 맺기].
     pub(crate) fn build_pair(&mut self) {
         let title = self.font_of(|t| t.title());
         self.text(0, PAIR_TITLE, (AX, 80, AW - 100, 34), title, TONE_TEXT, 0);
@@ -1088,17 +1069,7 @@ impl App {
             self.button(KEY_PICK_ITEM + i as i32, &label, AX, y, AW, 30, variant);
             y += 34;
         }
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
-        let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 474, w);
-        if let Some(tag) = otp {
-            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-            self.field(OTP, &caption, "", AX + AW - 180, 474, 180, true);
-        }
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 474, AW);
         self.button(SUBMIT, PAIR_SUBMIT, AX, 556, AW, 44, theme::PRIMARY);
         unsafe {
             SetFocus(self.handle(CURRENT_PASS));
@@ -1247,20 +1218,10 @@ impl App {
         }
     }
     /// The Keys screen's per-vault forget in gate-pending mode (spec §5.10,
-    /// §9.1), under [받기…]: the password (and OTP) its Reauth checks, and
+    /// §9.1), under [받기…]: the password its Reauth checks, and
     /// [이 금고의 기록 지우고 다시 확인…] in the danger tone.
     pub(crate) fn build_forget_held(&mut self) {
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
-        let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 566, w);
-        if let Some(tag) = otp {
-            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-            self.field(OTP, &caption, "", AX + AW - 180, 566, 180, true);
-        }
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 566, AW);
         self.button(
             ANCHOR_FORGET,
             FORGET_BUTTON,
@@ -1332,7 +1293,7 @@ impl App {
             self.status = line(if fetched { FETCHED_PICKED } else { "" });
             self.build();
         } else if fetched {
-            self.rebuild_keeping(&[PASS, OTP]);
+            self.rebuild_keeping(&[PASS]);
         }
     }
     /// The vault screen's backups and key management while the TOFU
@@ -1449,7 +1410,7 @@ impl App {
     }
     /// "서버에서 가져온 금고" (`Screen::Fetched`, spec §2.29): what happened
     /// and the three steps in plain words, the vault file (its own [찾기]),
-    /// the password (and OTP), [다음 · 보안 키 터치], and the links to the
+    /// the password, [다음 · 보안 키 터치], and the links to the
     /// login with another key file and to Restore. No key path: the key
     /// file is the server's, in the vault's sync folder.
     pub(crate) fn build_fetched(&mut self) {
@@ -1472,15 +1433,7 @@ impl App {
         self.text(0, &intro, (AX, 124, AW, 112), small, TONE_TEXT, 0);
         let vault = self.vault_path.to_string_lossy().into_owned();
         self.path_field(VPATH, BROWSE_V, FETCHED_VAULT_LABEL, &vault, 244);
-        let otp = self.key_otp();
-        self.password_field(PASS, "비밀번호", AX, 318, if otp { AW - 196 } else { AW });
-        if otp {
-            let caption = match vault_tag(&self.vault_path) {
-                Some(tag) => fill("OTP 6자리 · {tag}", &[&tag]),
-                None => "Google OTP 6자리".into(),
-            };
-            self.field(OTP, &caption, "", AX + AW - 180, 318, 180, true);
-        }
+        self.password_field(PASS, "비밀번호", AX, 318, AW);
         self.button(SUBMIT, submit, AX, 400, AW, 46, theme::PRIMARY);
         let (_, ly, _, _) = LOGIN_LINKS;
         let mid = AX + AW / 2;
@@ -1517,14 +1470,14 @@ impl App {
                 } else {
                     SK_OFF_NOTE
                 });
-                self.rebuild_keeping(&[PASS, CONFIRM, OTP]);
+                self.rebuild_keeping(&[PASS, CONFIRM]);
             }
             KEYON_PWCHANGE => {
                 self.toggles.keyon_pw = !self.toggles.keyon_pw;
                 if !self.toggles.keyon_pw {
                     self.status = line(KEYSON_OLDFILES);
                 }
-                self.rebuild_keeping(&[CURRENT_PASS, OTP]);
+                self.rebuild_keeping(&[CURRENT_PASS]);
             }
             KEY_PICK_ITEM..=KEY_PICK_LAST => {
                 self.toggles.pick ^= 1 << (id - KEY_PICK_ITEM);
@@ -1600,8 +1553,7 @@ impl App {
                 self.session.is_some()
                     && matches!(
                         id,
-                        BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT | OTP | KEY_PICK_ITEM
-                            ..=KEY_PICK_LAST
+                        BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT | KEY_PICK_ITEM..=KEY_PICK_LAST
                     ),
             ),
             (Screen::LostKey | Screen::KeyRemove, _) => {
@@ -1613,7 +1565,6 @@ impl App {
                             BACK | SUBMIT
                                 | CURRENT_PASS
                                 | PEEK_CURRENT
-                                | OTP
                                 | PASS
                                 | CONFIRM
                                 | PEEK_PASS
@@ -1650,7 +1601,7 @@ impl App {
             (Screen::Restore, RESTORE_FETCHED) => Some(true),
             (Screen::Fetched, _) => Some(matches!(
                 id,
-                SUBMIT | BROWSE_V | VPATH | PASS | PEEK_PASS | OTP | OPEN | RESTORE
+                SUBMIT | BROWSE_V | VPATH | PASS | PEEK_PASS | OPEN | RESTORE
             )),
             (
                 Screen::Keys,
@@ -1717,7 +1668,6 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         (Some(Screen::Create), _) => create_flow(h),
         (Some(Screen::Restore), _) => restore_flow(h),
         (Some(Screen::Fetched), _) => fetched_flow(h),
-        (Some(Screen::OtpBackup), _) => otp_backup_flow(h),
         (Some(Screen::Pair), _) => pair_flow(h),
         (Some(Screen::Login), ANCHOR_FORGET) => forget_flow(h),
         (Some(Screen::Keys), ANCHOR_FORGET) => forget_held_flow(h),
@@ -1821,8 +1771,8 @@ fn forget_flow(h: Hwnd) -> crypto::Result<()> {
 /// [이 금고의 기록 지우고 다시 확인…] on the Keys screen in gate-pending
 /// mode (spec §5.10, round 4, finding 13): S-ANCHOR-FORGET (danger,
 /// default 아니요) with the record's epoch, the touch of one of the key
-/// file's live, non-suspended keys and a Reauth with the password (and
-/// OTP) typed there, which verifies the factors in place of the unlock;
+/// file's live, non-suspended keys and a Reauth with the password typed
+/// there, which verifies the factors in place of the unlock;
 /// then the session drops the changed key file's gate and runs as a
 /// bootstrap (the TOFU banner: G1, or S-TOFU-NOPC). Nothing of the record
 /// is removed before the TOFU pass.
@@ -1845,11 +1795,8 @@ fn forget_held_flow(h: Hwnd) -> crypto::Result<()> {
             screen: a.screen,
             serial: a.serial,
             current: a.read(CURRENT_PASS)?,
-            otp: a.read(OTP)?,
-            otp_time: otp::now()?,
             gate: None,
             keys,
-            uses_otp: s.uses_otp(),
         };
         a.flow = Some(ANCHOR_FORGET);
         Ok((typed, old, request))
@@ -1881,22 +1828,18 @@ fn forget_held_flow(h: Hwnd) -> crypto::Result<()> {
     .map(|_| ())
 }
 /// What phase 1 of a key change took (spec §9.2a): the screen and serial
-/// it ran on, the current password and OTP code typed there (wiped when
-/// the flow ends), the gate the user must answer and the keys.
+/// it ran on, the current password typed there (wiped when the flow ends),
+/// the gate the user must answer and the keys.
 struct Typed {
     screen: Screen,
     serial: u64,
     current: Zeroizing<String>,
-    otp: Zeroizing<String>,
-    otp_time: u64,
     gate: Option<vault::Gate>,
     keys: Option<KeysOverview>,
-    /// The vault asks for an OTP code: a fresh Reauth needs a new one.
-    uses_otp: bool,
 }
 /// Phase 1 of a key change: the screen's checks, what holds key changes
 /// (a local rollback is refused at once, every other gate is asked later),
-/// the typed password and code, and `more`, under the same borrow.
+/// the typed password, and `more`, under the same borrow.
 fn take<T>(
     h: Hwnd,
     id: i32,
@@ -1925,11 +1868,8 @@ fn take_with<T>(
             screen: a.screen,
             serial: a.serial,
             current: a.read(CURRENT_PASS)?,
-            otp: a.read(OTP)?,
-            otp_time: otp::now()?,
             gate,
             keys: s.keys_overview(),
-            uses_otp: s.uses_otp(),
         };
         let more = more(a, &typed)?;
         a.flow = Some(id);
@@ -1942,23 +1882,14 @@ fn take_with<T>(
 fn gate_asked(h: Hwnd, t: &Typed) -> bool {
     t.gate.is_none_or(|g| ask(h, g.question()))
 }
-/// The flow's re-authentication (spec §5.3) with the typed password and
-/// code and, for a key file with keys, the touch. A wrong password counts
-/// as a failed attempt. None: the flow is void.
+/// The flow's re-authentication (spec §5.3) with the typed password and,
+/// for a key file with keys, the touch. A wrong password counts as a
+/// failed attempt. None: the flow is void.
 fn reauth(h: Hwnd, t: &Typed, touch: Option<&Touch>) -> crypto::Result<Option<vault::Reauth>> {
-    reauth_as(h, t, (&t.otp, t.otp_time), touch)
-}
-/// The same with the OTP code `otp` (typed at that time).
-fn reauth_as(
-    h: Hwnd,
-    t: &Typed,
-    otp: (&str, u64),
-    touch: Option<&Touch>,
-) -> crypto::Result<Option<vault::Reauth>> {
     phase(h, t.screen, t.serial, |a| {
         let serial = a.serial;
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
-        match s.reauth(&t.current, Some(otp), touch) {
+        match s.reauth(&t.current, touch) {
             Ok(mut r) => {
                 r.app_serial = serial;
                 a.failed = 0;
@@ -1975,11 +1906,10 @@ fn reauth_as(
 }
 /// The flow's Reauth for its next step (spec §9.2a "The Reauth's
 /// remaining life", S45-2 #19): `r` itself while it covers `need`, else a
-/// fresh one in the same flow. S-REAUTH-AGAIN by what the fresh one needs
-/// (a new OTP code in the guarded code dialog on an OTP vault, a touch of
-/// the same key when `r` had one); with neither, it is taken from the
-/// flow's snapshot with no dialog, so no Cancel can throw away what the
-/// flow holds. The first Reauth (and its lock) is dropped first; every
+/// fresh one in the same flow. S-REAUTH-AGAIN-TOUCH when the fresh one
+/// needs a touch of the same key `r` had; else it is taken from the flow's
+/// snapshot with no dialog, so no Cancel can throw away what the flow
+/// holds. The first Reauth (and its lock) is dropped first; every
 /// NewKey and Touch the flow holds is kept. None: cancelled or void, and
 /// nothing is written.
 fn renewed(
@@ -1993,22 +1923,12 @@ fn renewed(
     }
     let key = r.key();
     drop(r);
-    let mut code: Option<(Zeroizing<String>, u64)> = None;
     let ok = DialogButton {
         id: 1,
         label: "확인",
         role: Role::Accept,
     };
-    if t.uses_otp {
-        let text = match key {
-            Some(n) => fill(REAUTH_AGAIN_BOTH, &[&n]),
-            None => tr(REAUTH_AGAIN_OTP).to_owned(),
-        };
-        match ask_input(h, InputKind::Code(""), &text, &[ok, CANCEL_BUTTON]) {
-            InputAnswer::Code(typed) => code = Some((typed, otp::now()?)),
-            _ => return Ok(cancelled(t)),
-        }
-    } else if let Some(n) = key {
+    if let Some(n) = key {
         let text = fill(REAUTH_AGAIN_TOUCH, &[&n]);
         let kind = InputKind::Preview { check: None };
         if !matches!(
@@ -2028,11 +1948,7 @@ fn renewed(
         },
         None => None,
     };
-    let otp = match &code {
-        Some((typed, at)) => (typed.as_str(), *at),
-        None => (t.otp.as_str(), t.otp_time),
-    };
-    reauth_as(h, t, otp, touch.as_ref())
+    reauth(h, t, touch.as_ref())
 }
 /// The user's Cancel ended the flow, which writes nothing: the status line
 /// says so, also over a line an earlier step told (an optional touch that
@@ -2250,7 +2166,7 @@ fn register(
     if !standing(screen, serial) {
         return Err(None);
     }
-    let registered = otp::now().map_err(|_| failed(FidoError::Other(0)))?;
+    let registered = clock::now().map_err(|_| failed(FidoError::Other(0)))?;
     let (mut reg, make): (Registration, MakeRequest) =
         Registration::new(vault_id, number, registered, exclude, h)
             .map_err(|_| failed(FidoError::Other(0)))?;
@@ -2351,7 +2267,7 @@ fn register_loop(
 
 /// Create with security keys (spec §9.2, §5.9): phase 1 checks everything
 /// that would refuse the vault before any registration (paths, password,
-/// the OTP code, the anchor probe, the WebAuthn API), then the keys are
+/// the anchor probe, the WebAuthn API), then the keys are
 /// registered, then phase 3 writes the vault with every key paired with
 /// every other. Nothing is written before that, and a lock voids it.
 fn create_flow(h: Hwnd) -> crypto::Result<()> {
@@ -2372,16 +2288,10 @@ fn create_flow(h: Hwnd) -> crypto::Result<()> {
             return Err("비밀번호 확인이 일치하지 않습니다.");
         }
         vault::password_policy(&pass)?;
-        let otp_time = otp::now()?;
         let provision = a
             .provision
             .as_ref()
             .ok_or("새 금고 등록을 다시 시작하세요.")?;
-        let otp_step = if a.create_otp {
-            Some(provision.check_otp(&a.read(OTP)?, otp_time)?)
-        } else {
-            None
-        };
         provision.check_anchor()?;
         authenticator().map_err(FidoError::text)?;
         let vault_id = provision.vault_id();
@@ -2389,13 +2299,12 @@ fn create_flow(h: Hwnd) -> crypto::Result<()> {
         Ok(Some((
             a.serial,
             pass,
-            otp_step,
             vault_id,
             (a.new_vault_path.clone(), a.new_key_path.clone()),
         )))
     });
     drain_pending(h);
-    let Some((serial, pass, otp_step, vault_id, (vault, key))) = p1? else {
+    let Some((serial, pass, vault_id, (vault, key))) = p1? else {
         return Ok(());
     };
     let numbers: Vec<u8> = (1..=8).collect();
@@ -2426,7 +2335,7 @@ fn create_flow(h: Hwnd) -> crypto::Result<()> {
             .as_ref()
             .ok_or("새 금고 등록을 다시 시작하세요.")?;
         // PIN mode only (spec §2.28).
-        let result = provision.finish_with_keys(&vault, &key, &pass, otp_step, true, keys);
+        let result = provision.finish_with_keys(&vault, &key, &pass, true, keys);
         a.opened(Screen::Create, result, None)?;
         a.toggles = Toggles::default();
         let created = if n == 1 {
@@ -2460,7 +2369,6 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
         a.enter(SUBMIT)?;
         a.paths()?;
         let pass = a.read(PASS)?;
-        let otp = a.read(OTP)?;
         // The server's key file in a sync folder's key view is opened only
         // by "서버에서 가져온 금고" (spec §2.29), never as a backup's key.
         if vault::is_fetched_key(&a.backup_path, &a.key_path) {
@@ -2468,7 +2376,6 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
         }
         a.check_files()?;
         let prepared = vault::prepare_restore(&a.backup_path, &a.key_path)?;
-        let otp_time = otp::now()?;
         let auth_failure = prepared.auth_failure();
         let request = prepared.unlock_request(h);
         if request.is_some() {
@@ -2477,19 +2384,10 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
         a.working();
         a.flow = Some(SUBMIT);
         let dest = a.dest_path.clone();
-        Ok((
-            a.serial,
-            prepared,
-            pass,
-            otp,
-            otp_time,
-            auth_failure,
-            request,
-            dest,
-        ))
+        Ok((a.serial, prepared, pass, auth_failure, request, dest))
     });
     drain_pending(h);
-    let (serial, prepared, pass, otp, otp_time, auth_failure, request, dest) = p1?;
+    let (serial, prepared, pass, auth_failure, request, dest) = p1?;
     let touch = match request {
         Some(request) => match touch_step(h, Screen::Restore, serial, request, TOUCH) {
             Some(touch) => Some(touch),
@@ -2507,8 +2405,8 @@ fn restore_flow(h: Hwnd) -> crypto::Result<()> {
             return Ok(());
         }
         let restored = match &touch {
-            Some(touch) => Session::restore_with(prepared, &dest, &pass, &otp, otp_time, touch),
-            None => Session::restore_from(prepared, &dest, &pass, &otp, otp_time),
+            Some(touch) => Session::restore_with(prepared, &dest, &pass, touch),
+            None => Session::restore_from(prepared, &dest, &pass),
         };
         a.opened(Screen::Restore, restored, auth_failure)
     });
@@ -2545,7 +2443,7 @@ pub(crate) fn restore_fetched(backup: &Path, key: &Path) -> bool {
 }
 /// SUBMIT on `Screen::Fetched` (spec §2.29, §7.17): the vault file is the
 /// Restore's source and, in place, its destination; the key file is the
-/// server's, read only from the key view. The password (and OTP), one
+/// server's, read only from the key view. The password, one
 /// touch, then the vault screen's TOFU banner asks for the other PC's
 /// code; nothing is written before it passes.
 fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
@@ -2568,10 +2466,8 @@ fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
             return Err(FETCHED_GONE);
         }
         let pass = a.read(PASS)?;
-        let otp = a.read(OTP)?;
         a.check_files()?;
         let prepared = vault::prepare_restore_fetched(&vault)?;
-        let otp_time = otp::now()?;
         let auth_failure = prepared.auth_failure();
         let touch_request = prepared.unlock_request(h);
         if touch_request.is_some() {
@@ -2583,15 +2479,13 @@ fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
             a.serial,
             prepared,
             pass,
-            otp,
-            otp_time,
             auth_failure,
             touch_request,
             vault,
         )))
     });
     drain_pending(h);
-    let Some((serial, prepared, pass, otp, otp_time, auth_failure, request, vault)) = p1? else {
+    let Some((serial, prepared, pass, auth_failure, request, vault)) = p1? else {
         return Ok(());
     };
     let touch = match request {
@@ -2611,8 +2505,8 @@ fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
             return Ok(());
         }
         let restored = match &touch {
-            Some(touch) => Session::restore_with(prepared, &vault, &pass, &otp, otp_time, touch),
-            None => Session::restore_from(prepared, &vault, &pass, &otp, otp_time),
+            Some(touch) => Session::restore_with(prepared, &vault, &pass, touch),
+            None => Session::restore_from(prepared, &vault, &pass),
         };
         a.opened(Screen::Fetched, restored, auth_failure)?;
         // The next step on the status line too, above what the unlock said.
@@ -2625,59 +2519,6 @@ fn fetched_flow(h: Hwnd) -> crypto::Result<()> {
     });
     drain_pending(h);
     result
-}
-/// SUBMIT on OtpBackup (spec §9.2 "OTP backup", §5.10; S45-1 #13): the
-/// password typed, then for a key file with security keys a touch of one
-/// of its live, non-suspended keys (no password verifier is kept), then
-/// phase 3 shows the QR. A key file without keys runs the command as
-/// before.
-fn otp_backup_flow(h: Hwnd) -> crypto::Result<()> {
-    let p1 = APP.with(|cell| -> crypto::Result<_> {
-        let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
-        let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
-        let keys = a.session.as_ref().and_then(Session::keys_overview);
-        let Some(keys) = keys.filter(|_| a.otp_setup.is_none()) else {
-            // Without keys, as before (spec §9.2a: no C step).
-            a.flow = Some(SUBMIT);
-            a.command(SUBMIT, 0)?;
-            return Ok(None);
-        };
-        a.enter(SUBMIT)?;
-        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
-        if !s.uses_otp() {
-            return Err("이 금고는 OTP를 쓰지 않습니다.");
-        }
-        let current = a.read(CURRENT_PASS)?;
-        authenticator().map_err(FidoError::text)?;
-        let request = s.key_request(&keys.active(), h)?;
-        a.flow = Some(SUBMIT);
-        Ok(Some((a.serial, current, request)))
-    });
-    drain_pending(h);
-    let Some((serial, current, request)) = p1? else {
-        return Ok(());
-    };
-    let Some(touch) = touch_step(h, Screen::OtpBackup, serial, request, TOUCH) else {
-        return Ok(());
-    };
-    phase(h, Screen::OtpBackup, serial, |a| {
-        let s = a.session.as_ref().ok_or("금고가 잠겼습니다.")?;
-        match s.otp_setup_with(&current, &touch) {
-            Ok(setup) => {
-                a.failed = 0;
-                a.otp_setup = Some(setup);
-                a.status = line("예비 기기에 등록한 뒤 '닫기'를 누르세요.");
-                a.build();
-                Ok(())
-            }
-            Err(e) if e == crypto::AUTH_ERROR => {
-                a.failed_attempt();
-                Err("비밀번호가 맞지 않습니다.")
-            }
-            Err(e) => Err(e),
-        }
-    })
-    .map(|_| ())
 }
 
 /// [보안 키 켜기] (spec §9.2 "Keys on"): the new password checked before any
@@ -3976,7 +3817,7 @@ fn remove_flow(h: Hwnd) -> crypto::Result<()> {
         }
         let loss = if lost {
             let exposure = a.toggles.exposure.ok_or(EXPOSE_NEEDED)?;
-            let date = loss_day(&a.read(LOSS_DATE)?, otp::now()?)?;
+            let date = loss_day(&a.read(LOSS_DATE)?, clock::now()?)?;
             let shared_pin = if exposure == Exposure::No {
                 Vec::new()
             } else {
@@ -4606,15 +4447,10 @@ impl App {
         }
         (lines.join("\r\n"), tone)
     }
-    /// The current password, the new one and its confirmation when
-    /// `new`, and the OTP code, in one row at `y` (as keys off).
+    /// The current password, and the new one and its confirmation when
+    /// `new`, in one row at `y` (as keys off).
     fn removal_fields(&mut self, y: i32, new: bool) {
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
-        let fields = 1 + 2 * i32::from(new) + i32::from(otp.is_some());
+        let fields = 1 + 2 * i32::from(new);
         let w = (796 - 16 * (fields - 1)) / fields;
         let mut x = 40;
         self.password_field(CURRENT_PASS, REAUTH_LABEL, x, y, w);
@@ -4623,11 +4459,6 @@ impl App {
             self.password_field(PASS, NEW_PASS, x, y, w);
             x += w + 16;
             self.password_field(CONFIRM, NEW_CONFIRM, x, y, w);
-            x += w + 16;
-        }
-        if let Some(tag) = otp {
-            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-            self.field(OTP, &caption, "", x, y, w, true);
         }
     }
     /// `Screen::LostKey` and `Screen::KeyRemove` (spec §9.1): one toggle
@@ -4635,7 +4466,7 @@ impl App {
     /// picked (for 예 and 모름), the loss date (empty: unknown), the
     /// exposure question with no answer at first and the password change
     /// it ticks; for a retirement the optional password change; the touch
-    /// plan; the current password (and OTP), read by the flow's phase 1.
+    /// plan; the current password, read by the flow's phase 1.
     pub(crate) fn build_remove(&mut self) {
         let lost = self.screen == Screen::LostKey;
         let (title, small) = (self.font_of(|t| t.title()), self.font_of(|t| t.small()));
@@ -4905,7 +4736,7 @@ impl App {
             // EN_CHANGE of the date: only a date the list can use (a day
             // after today would list nothing and end the review unread).
             (LOSS_DATE, 0x300) => {
-                let Ok(day) = loss_day(&self.read(LOSS_DATE)?, otp::now()?) else {
+                let Ok(day) = loss_day(&self.read(LOSS_DATE)?, clock::now()?) else {
                     return Ok(true);
                 };
                 if self.toggles.review_day != Some(day) {
@@ -5086,7 +4917,7 @@ enum Taking {
 /// The accept at login when the server's key file waits (spec §5.2 step
 /// 9(b), §7.15 at login): a successor (with a carry or not) whose gate, if
 /// any, is asked now, after the unlock and rule D and before anything about
-/// the change is shown; no second touch and no second OTP code. A fork, a
+/// the change is shown; no second touch and no second password. A fork, a
 /// refused file, or one whose result this Windows cannot take, asks
 /// nothing.
 pub(crate) fn accept_at_login(
@@ -5136,9 +4967,8 @@ pub(crate) fn try_other_key(h: Hwnd, screen: Screen, serial: u64, mut entry: vau
         report(h, e);
     }
 }
-/// The failed-unlock entry (spec §5.2, §7.15 step 4): the OTP code's time
-/// window checked as the entry starts (OTP_STALE is no failed attempt); the
-/// gate asked once, before the open; then the server's key file opened with the typed
+/// The failed-unlock entry (spec §5.2, §7.15 step 4): the gate asked once,
+/// before the open; then the server's key file opened with the typed
 /// password and `touch`, judged and installed in one library call, which
 /// returns the session only with the file taken. A wrong code may be typed
 /// again; S-KEYSYNC-ON is asked once the gate passed, where the result
@@ -5151,7 +4981,6 @@ fn server_entry(
     entry: &mut vault::ServerEntry,
     touch: &Touch,
 ) -> crypto::Result<()> {
-    entry.start()?;
     // "열쇠 변경 자동 적용" (spec §2.30): no gate is asked (`gate` is
     // None), and the status names what was applied.
     let trusted = entry.trusted();
@@ -5340,19 +5169,16 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
             }
         }
         let gate = (s.gate_choices(), s.unlocked_with());
-        let (current, otp) = match &login {
-            Some(proof) => (proof.password(), Zeroizing::new(String::new())),
-            None => (a.read(CURRENT_PASS)?, a.read(OTP)?),
+        let current = match &login {
+            Some(proof) => proof.password(),
+            None => a.read(CURRENT_PASS)?,
         };
         let typed = Typed {
             screen,
             serial: a.serial,
             current,
-            otp,
-            otp_time: otp::now()?,
             gate: None,
             keys: keys.clone(),
-            uses_otp: s.uses_otp(),
         };
         if login.is_none() {
             a.flow = Some(if server { KEY_ACCEPT } else { SUBMIT });
@@ -5377,7 +5203,7 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
     // The automatic merge at login asks nothing before the open, and shows
     // no preview: a question after the open (S-SUSPEND) is still asked.
     let quiet = at_login && removal;
-    let (current, otp, otp_time) = (&t.current, &t.otp, t.otp_time);
+    let current = &t.current;
     let (epoch, tag) = (check.other.epoch, check.other.tag);
     // A: the fork option, then its gate; nothing about the change before.
     // Two password-only files have no options: they are joined, as in the
@@ -5439,7 +5265,7 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
         let s = a.session.as_mut().ok_or("금고가 잠겼습니다.")?;
         let result = match (login, touch.as_ref()) {
             (Some(proof), Some(touch)) => s.reauth_from_unlock(proof, touch),
-            _ => s.reauth(current, Some((otp, otp_time)), touch.as_ref()),
+            _ => s.reauth(current, touch.as_ref()),
         };
         match result {
             Ok(mut r) => {

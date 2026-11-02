@@ -1991,7 +1991,7 @@ fn a_newer_format_head_is_never_written() {
 
 fn key_file(pc: &Pc) -> Vec<u8> {
     let p = Provision::new().unwrap();
-    drop(p.finish(&pc.vault, &pc.key, PASSWORD, None).unwrap());
+    drop(p.finish(&pc.vault, &pc.key, PASSWORD).unwrap());
     fs::read(&pc.key).unwrap()
 }
 /// Makes `link` a junction to `target` the way `mklink /J` does.
@@ -2279,7 +2279,7 @@ impl Local {
 /// A real vault with sync turned on, as the app leaves it: GOYOVA02.
 fn real_vault(pc: &Pc) -> (Session, [u8; 16]) {
     let p = Provision::new().unwrap();
-    let mut s = p.finish(&pc.vault, &pc.key, PASSWORD, None).unwrap();
+    let mut s = p.finish(&pc.vault, &pc.key, PASSWORD).unwrap();
     let entry = Entry::new(
         "mail".into(),
         "login".into(),
@@ -2498,7 +2498,7 @@ fn end_to_end_a_frozen_server_is_shown_and_learns_no_unlock() {
     let mut e = a.engine(frozen, &clock);
     let entry = |title: &str| Entry::new(title.into(), String::new(), "x".into(), String::new());
     let p = Provision::new().unwrap();
-    let mut s = p.finish(&a.vault, &a.key, PASSWORD, None).unwrap();
+    let mut s = p.finish(&a.vault, &a.key, PASSWORD).unwrap();
     s.put(None, entry("mail").unwrap()).unwrap();
     assert_eq!(e.pass(0, false), done(SyncState::Idle, 0, None, None));
     s.enable_sync().unwrap();
@@ -2528,7 +2528,7 @@ fn end_to_end_a_frozen_server_is_shown_and_learns_no_unlock() {
         clock.advance(5);
         let before = syncfile::stamp(&a.dir, OUTGOING);
         assert!(before.is_some());
-        drop(Session::unlock(&a.vault, &a.key, PASSWORD, "").unwrap());
+        drop(Session::unlock(&a.vault, &a.key, PASSWORD).unwrap());
         assert_eq!(syncfile::stamp(&a.dir, OUTGOING), before);
         assert!(!e.due(0));
         assert_eq!(e.pass(0, false), done(SyncState::Server, 1, None, None));
@@ -2541,7 +2541,7 @@ fn end_to_end_a_frozen_server_is_shown_and_learns_no_unlock() {
     assert!(e.due(0));
     assert_eq!(e.pass(0, false), done(SyncState::Ok, 2, Some(2), None));
     assert_eq!(e.transport.puts, 3);
-    let mut s = Session::unlock(&a.vault, &a.key, PASSWORD, "").unwrap();
+    let mut s = Session::unlock(&a.vault, &a.key, PASSWORD).unwrap();
     assert!(matches!(
         s.take_unlock_notice(),
         Some(SyncNotice::Synced { .. })

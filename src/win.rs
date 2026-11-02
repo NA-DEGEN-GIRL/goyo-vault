@@ -556,7 +556,7 @@ pub struct DialogButton<'a> {
 pub enum InputKind<'a> {
     /// A masked password field under the text.
     Password,
-    /// A code field under the text (a key code, an OTP code): not masked,
+    /// A code field under the text (a key code): not masked,
     /// with the same subclass and input scope as a password field, holding
     /// what was typed before when it is asked again (a code that did not
     /// match or parse is kept for correcting, never retyped).

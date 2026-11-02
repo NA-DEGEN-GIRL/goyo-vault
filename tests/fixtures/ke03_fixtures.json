@@ -115,6 +115,41 @@
    "size": 312,
    "tag": "51af9edf2d7225ba074565cc4c954af6",
    "key_code": "5ab3e523313a4c70"
+  },
+  {
+   "file": "goyoke03-test-no-otp.goyokey",
+   "kdf": "test",
+   "password": "goyo fixture passphrase, KE03",
+   "vault_id": "101112131415161718191a1b1c1d1e1f",
+   "epoch": 7,
+   "kind": "password",
+   "next": 3,
+   "pw_id": "303132333435363738393a3b3c3d3e3f",
+   "loss": 0,
+   "written": 1767225600,
+   "resume": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+   "tombstones": [
+    [
+     "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+     5757570648616468485
+    ],
+    [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     2
+    ]
+   ],
+   "keys": [
+    "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+   ],
+   "otp": null,
+   "draws": [
+    "5a5b58595e5f5c5d52535051565754554a4b48494e4f4c4d4243404146474445",
+    "a5a4a7a6a1a0a3a2adacafaea9a8abaab5b4b7b6b1b0b3b2"
+   ],
+   "size": 440,
+   "tag": "ee1c5b2c9142f43b33df48dd8f0c138b",
+   "key_code": "7db1bdefb0d6af31"
   }
  ],
  "reseal": {

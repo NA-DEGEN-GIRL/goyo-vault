@@ -1031,7 +1031,7 @@ impl App {
         );
         self.text(
             0,
-            "가져올 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
+            "가져올 금고를 고르세요. 태그는 금고 ID의 앞부분입니다.",
             (IX, S + 44, IW, 18),
             small,
             TONE_MUTED,
@@ -4529,7 +4529,7 @@ mod tests {
                     } else if class == "Button" {
                         let variant = GetWindowLongPtrW(child, -21);
                         let font = theme::with(|t| match variant {
-                            theme::PRIMARY | theme::ACCENT | theme::TAB_ON => t.strong(),
+                            theme::PRIMARY | theme::TAB_ON => t.strong(),
                             theme::LINK | theme::CHIP => t.small(),
                             _ => t.body(),
                         })

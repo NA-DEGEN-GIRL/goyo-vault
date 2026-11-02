@@ -64,10 +64,6 @@ pub const EN: &[(&str, &str)] = &[
     ("12자 이상의\n긴 문장", "12+ characters,\na long phrase"),
     ("15초 보기", "Show 15 s"),
     ("1분", "1m"),
-    (
-        "2분 동안 쓰지 않아 OTP 화면을 닫았습니다.",
-        "Closed the OTP screen after 2 minutes without use.",
-    ),
     ("30분", "30m"),
     ("5분", "5m"),
     ("API 키", "API key"),
@@ -87,35 +83,12 @@ pub const EN: &[(&str, &str)] = &[
         "DLL 검색 경로 보호 설정에 실패했습니다.",
         "Could not protect the DLL search path.",
     ),
-    (
-        "Google Authenticator → + → QR 코드 스캔\r\nOTP 앱 안의 스캐너로만 찍고, 사진으로 남기지 마세요.",
-        "Google Authenticator → + → Scan a QR code\r\nScan only inside the OTP app; never take a photo.",
-    ),
-    ("Google OTP 6자리", "6-digit OTP code"),
     ("KDF 설정 오류", "Key derivation settings error"),
     (
         "NUL 문자는 저장할 수 없습니다.",
         "NUL characters cannot be stored.",
     ),
-    ("OTP 6자리 · {tag}", "OTP code · {tag}"),
-    ("OTP 끄기", "OTP off"),
-    (
-        "OTP 등록 정보는 두 번째 잠금 수단이라 금고가 열려 있어도 비밀번호를 다시 확인합니다.",
-        "The OTP setup is a second lock, so the password is asked again even with the vault open.",
-    ),
-    ("OTP 백업", "OTP backup"),
-    ("OTP 없이 금고 만들기", "Create vault without OTP"),
-    (
-        "OTP 없이 비밀번호와 열쇠 파일로만 여는 금고를 만듭니다. 이 PC를 다른 사람도 쓸 수 있다면 OTP를 켜 두세요.",
-        "This vault will open with the password and key file only. If others can use this PC, turn on the OTP.",
-    ),
-    ("OTP 켜기", "Turn on OTP"),
-    (
-        "OTP가 틀렸거나 이미 사용되었습니다. 휴대폰·PC 시간을 확인하고 새 번호를 입력하세요.",
-        "The OTP code is wrong or already used. Check the phone and PC clocks and enter a new code.",
-    ),
-    ("OTP는 숫자 6자리입니다.", "The OTP code is 6 digits."),
-    ("QR 보기", "Show QR"),
+    ("금고 만들기", "Create vault"),
     (
         "RDSEED를 지원하는 x64 CPU가 필요합니다. 약한 난수로 대체하지 않습니다.",
         "An x64 CPU with RDSEED is required. The app never falls back to weaker randomness.",
@@ -165,14 +138,14 @@ pub const EN: &[(&str, &str)] = &[
     ("권장", "Recommended"),
     ("금고 백업", "Back up vault"),
     (
-        "금고 백업을 저장했습니다. 열 때 열쇠 파일, 비밀번호, OTP도 필요합니다.",
-        "Vault backup saved. Opening it also needs the key file, the password and the OTP.",
-    ),
-    (
         "금고 백업을 저장했습니다. 열 때 열쇠 파일과 비밀번호도 필요합니다.",
         "Vault backup saved. Opening it also needs the key file and the password.",
     ),
     ("금고 열기", "Open vault"),
+    (
+        "OTP 기능은 없어졌습니다. 휴대폰 OTP 앱의 'Goyo Vault' 항목은 지워도 됩니다. 열쇠 파일 안의 OTP 비밀은 다음 열쇠 변경(비밀번호 변경 등) 때 지워집니다.",
+        "The OTP feature has been removed. You can delete the 'Goyo Vault' entry in your phone's OTP app. The OTP secret inside the key file is erased at the next key change (such as a password change).",
+    ),
     (
         "금고 용량 제한(8 MiB)을 초과했습니다.",
         "The vault size limit (8 MiB) was exceeded.",
@@ -232,10 +205,6 @@ pub const EN: &[(&str, &str)] = &[
     (
         "다른 앱에 30초 넘게 머물러 잠갔습니다.",
         "Locked after more than 30 s in another app.",
-    ),
-    (
-        "다른 앱으로 전환되어 OTP 화면을 닫았습니다.",
-        "The OTP screen closed because you switched apps.",
     ),
     (
         "금고 파일 열기 (다른 폴더 · 서버에서 가져온 금고)",
@@ -302,11 +271,6 @@ pub const EN: &[(&str, &str)] = &[
         "두 PC에서 함께 고친 항목 {}개는 두 버전을 모두 남겼습니다. 이름이 같은 항목을 확인하세요.",
         "Entries edited on two PCs: {}. Both versions were kept; check entries with the same name.",
     ),
-    (
-        "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
-        "You may write the setup key on paper, but never take a photo.\r\nSwitching to another app closes this QR at once.",
-    ),
-    ("등록 확인 · 금고 만들기", "Confirm and create vault"),
     (
         "디버거 연결이 감지되었거나 확인할 수 없어 잠갔습니다.",
         "Locked: a debugger was detected or could not be ruled out.",
@@ -394,7 +358,6 @@ pub const EN: &[(&str, &str)] = &[
     ("비밀번호 숨기기", "Hide password"),
     ("비밀번호 키 생성 실패", "Could not derive the password key"),
     ("비밀번호 확인", "Confirm password"),
-    ("비밀번호 확인 중입니다…", "Checking the password…"),
     (
         "비밀번호 확인이 일치하지 않습니다.",
         "The passwords do not match.",
@@ -403,7 +366,6 @@ pub const EN: &[(&str, &str)] = &[
         "비밀번호·니모닉·프라이빗키를 암호화해 이 PC에 보관합니다.\n처음 사용한다면 새 금고를 만드세요.",
         "Keeps passwords, seed phrases and private keys encrypted on this PC.\nUsing it for the first time? Create a new vault.",
     ),
-    ("비밀번호가 맞지 않습니다.", "Wrong password."),
     (
         "비밀번호는 12자 이상, UTF-8 1024바이트 이하로 입력하세요. 짧고 복잡한 암호보다 긴 문장이 안전합니다.",
         "Use at least 12 characters and at most 1024 UTF-8 bytes. A long phrase is safer than a short, complex password.",
@@ -420,7 +382,6 @@ pub const EN: &[(&str, &str)] = &[
         "The delete/edit record limit (65,536) was reached.",
     ),
     ("삭제할 항목을 선택하세요.", "Select an entry to delete."),
-    ("새 OTP 6자리 · {tag}", "New OTP code · {tag}"),
     (
         "새 금고 등록을 다시 시작하세요.",
         "Start creating the vault again.",
@@ -434,10 +395,6 @@ pub const EN: &[(&str, &str)] = &[
     (
         "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요.",
         "Vault created. Use 'Back up key' below to keep a copy of the key away from the vault.",
-    ),
-    (
-        "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요.",
-        "Vault created. In case you lose your phone, enroll a spare device with 'OTP backup' below.",
     ),
     (
         "새 금고와 열쇠 파일은 기존 파일을 덮어쓸 수 없습니다.",
@@ -497,10 +454,6 @@ pub const EN: &[(&str, &str)] = &[
     ("수동으로 잠갔습니다.", "Locked."),
     ("수정", "Edit"),
     ("수정할 항목을 선택하세요.", "Select an entry to edit."),
-    (
-        "스캔이 안 되면 '설정 키 입력'에:",
-        "Can't scan? Choose 'Enter a setup key':",
-    ),
     ("시스템 시간을 확인하세요.", "Check the system clock."),
     ("아직 저장된 금고가 없습니다", "No vault yet"),
     (
@@ -523,7 +476,6 @@ pub const EN: &[(&str, &str)] = &[
         "압축 파일 안이나 임시 폴더에서 실행 중입니다. 이 폴더는 지워질 수 있으니, 계속 보관할 폴더에 압축을 푼 뒤 실행하세요.",
         "Running from inside a ZIP or a temporary folder, which may be deleted. Extract to a folder you will keep and run it from there.",
     ),
-    ("앱에 표시된 6자리", "Code shown in the app"),
     ("연결 안 됨", "Offline"),
     ("열림 · {}", "Open · {}"),
     ("열림 · {} · {}", "Open · {} · {}"),
@@ -562,8 +514,8 @@ pub const EN: &[(&str, &str)] = &[
         "The key file and the vault file belong to different vaults.",
     ),
     (
-        "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠·OTP를 우회하는 복구 기능은 없습니다.",
-        "The key file is encrypted with your password; keeping it apart from the vault adds protection.\r\nThere is no recovery for a lost password, key file or OTP.",
+        "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠를 우회하는 복구 기능은 없습니다.",
+        "The key file is encrypted with your password; keeping it apart from the vault adds protection.\r\nThere is no recovery for a lost password or key file.",
     ),
     (
         "열쇠 파일의 제거 기록이 가득 찼습니다(480개). 더 이상 보안 키를 뺄 수 없습니다. 새 금고를 만들어 항목을 옮기세요.",
@@ -618,14 +570,6 @@ pub const EN: &[(&str, &str)] = &[
         "Stopped because the screen changed. Nothing was changed.",
     ),
     (
-        "예비 기기에 등록한 뒤 '닫기'를 누르세요.",
-        "Enroll the spare device, then press 'Close'.",
-    ),
-    (
-        "예비 휴대폰이나 다른 OTP 앱에 등록하면 지금 휴대폰과 같은 번호가 나옵니다.",
-        "A spare phone or another OTP app enrolled here shows the same codes as your phone.",
-    ),
-    (
         "예전 열쇠로 저장된 금고 파일을 새 열쇠로 다시 저장했습니다. 항목이 예상과 다르면 백업이나 서버 기록을 확인하세요.",
         "The vault file saved under an older key is saved again under the new key. If the entries are not what you expect, check your backups or the server history.",
     ),
@@ -672,16 +616,8 @@ pub const EN: &[(&str, &str)] = &[
         "This vault file is saved under an older key of this key file.\nThat is normal if this PC opens it for the first time after the key was changed on another PC (sharing one key file, or with the new key file carried over).\nIf nothing like that happened, someone holding the old key may have swapped the vault file. In that case press 'No' and check your backups or the server history.\nOpen this file and save it again under the new key?",
     ),
     (
-        "이 금고는 OTP를 쓰지 않습니다.",
-        "This vault does not use an OTP.",
-    ),
-    (
         "이 백업은 이 열쇠 파일에 없는 열쇠로 잠겨 있습니다. 그 백업을 만들 때의 열쇠 파일 사본으로 복원하세요.",
         "This backup is locked with a key that is not in this key file. Restore it with the copy of the key file from when the backup was made.",
-    ),
-    (
-        "이 열쇠 파일은 OTP를 씁니다. 휴대폰 OTP 앱의 6자리도 입력하세요.",
-        "This key file uses an OTP. Also enter the 6-digit code from your phone.",
     ),
     (
         "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md).",
@@ -709,8 +645,8 @@ pub const EN: &[(&str, &str)] = &[
         "Authentication failed. Try again in a moment.",
     ),
     (
-        "인증 실패: 비밀번호·열쇠·새 OTP·시스템 시간과 파일 상태를 확인하세요.",
-        "Authentication failed: check the password, key file, a fresh OTP code, the clock and the files.",
+        "인증 실패: 비밀번호·열쇠와 파일 상태를 확인하세요.",
+        "Authentication failed: check the password, the key file and the files.",
     ),
     (
         "일반 파일 경로를 지정하세요. 스트림·끝 공백·끝 점은 허용하지 않습니다.",
@@ -796,10 +732,6 @@ pub const EN: &[(&str, &str)] = &[
         "지난 열쇠 변경을 마저 끝내 금고 파일을 새 열쇠로 다시 저장했습니다.",
         "The last key change is now finished: the vault file is saved again under the new key.",
     ),
-    (
-        "창을 선택하면\nQR이 다시 보입니다",
-        "Select this window\nto show the QR again",
-    ),
     ("찾기", "Browse"),
     (
         "최대 1000개까지 저장할 수 있습니다.",
@@ -813,14 +745,6 @@ pub const EN: &[(&str, &str)] = &[
     (
         "캡처 차단이 적용되지 않아 금고를 잠갔습니다.",
         "Locked: screen-capture protection is not in effect.",
-    ),
-    (
-        "켜 두면 비밀번호가 새어도 휴대폰 없이는 이 앱으로 금고를 열 수 없습니다.\r\n금고를 열 때마다 휴대폰 OTP 앱의 6자리를 함께 입력합니다.\r\n금고·열쇠 파일을 통째로 복사해 가는 것은 막지 못하니, 열쇠 파일은 따로 두세요.",
-        "With it on, a leaked password cannot open the vault in this app without your phone.\r\nEach time you open the vault, you also enter the 6-digit code from the OTP app.\r\nIt cannot stop someone copying both vault and key files, so keep the key apart.",
-    ),
-    (
-        "켜기 권장\n켠 금고만 필요",
-        "Recommended;\nonly if turned on",
     ),
     ("끔", "Off"),
     (
@@ -913,10 +837,6 @@ pub const EN: &[(&str, &str)] = &[
         "Checks the current password, then encrypts the vault again with a new key.",
     ),
     (
-        "현재 비밀번호와 새 OTP 번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다.",
-        "Checks the current password and a fresh OTP code, then encrypts the vault again with a new key.",
-    ),
-    (
         "새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다. 예전 열쇠 파일과 예전 비밀번호로는 앞으로 저장하는 내용을 열 수 없습니다. 바꾼 뒤 새 열쇠 파일을 백업하세요.",
         "The vault is encrypted again with a new data key, and a new key file is written. The old key file and old password cannot open what you save from now on. Back up the new key file after the change.",
     ),
@@ -944,24 +864,6 @@ pub const EN: &[(&str, &str)] = &[
     (
         "확인한 뒤에 금고 파일이 바뀌어 열지 않았습니다. 다시 열어 보세요. 그런 일이 없었다면 누군가 금고 파일을 바꿔 넣었을 수 있으니 백업이나 서버 기록을 확인하세요.",
         "The vault file changed after you confirmed it, so it was not opened. Try opening it again. If nothing like that happened, someone may have swapped the vault file: check your backups or the server history.",
-    ),
-    ("휴대폰 OTP", "Phone OTP"),
-    ("휴대폰 OTP 등록 · {tag}", "Enroll your phone · {tag}"),
-    (
-        "휴대폰 OTP 앱으로 QR을 등록하고, 앱에 표시된 6자리를 입력하세요.",
-        "Scan the QR with your phone's OTP app, then enter the 6-digit code it shows.",
-    ),
-    (
-        "휴대폰 OTP로 한 번 더 잠그기",
-        "Add a second lock: phone OTP",
-    ),
-    (
-        "휴대폰을 잃어도 금고를 열 수 있도록, 지금 쓰는 OTP를 예비 휴대폰이나\r\n다른 OTP 앱에도 등록해 둡니다. 휴대폰을 잃은 뒤에는 이 화면을 열 수 없습니다.",
-        "So you can still open the vault if you lose your phone, enroll this OTP on a spare\r\nphone or another OTP app too. Once the phone is lost, this screen cannot be opened.",
-    ),
-    (
-        "휴대폰을 잃으면 금고를 열 수 없으니 예비 기기에도 등록해 두세요.\r\n금고를 연 뒤 아래쪽 'OTP 백업'에서 이 QR을 다시 볼 수 있습니다.",
-        "Lose the phone and the vault cannot be opened, so enroll a spare device too.\r\nOnce the vault is open, 'OTP backup' at the bottom shows this QR again.",
     ),
     (
         "흔한 단어(password, dragon 등)·키보드 배열·연속된 숫자는 추측 도구가 가장 먼저 시도해서 글자 수로 치지 않습니다. 흔하지 않은 단어나 나만 아는 문장을 섞으세요.",
@@ -1015,8 +917,8 @@ pub const EN: &[(&str, &str)] = &[
     ("아직 로그가 없습니다.", "No log yet."),
     ("이 PC로 가져오기", "Bring to this PC"),
     (
-        "가져올 금고를 고르세요. 태그는 OTP 앱에 보이는 'Goyo Vault (태그)'의 태그와 같습니다.",
-        "Choose the vault to bring. Its tag is the one your OTP app shows as 'Goyo Vault (tag)'.",
+        "가져올 금고를 고르세요. 태그는 금고 ID의 앞부분입니다.",
+        "Choose the vault to bring. The tag is the start of the vault ID.",
     ),
     (
         "고른 폴더에 금고 파일(vault.goyo)로 저장하고 동기화 목록에 넣습니다. 그다음 할 일은 가져온 뒤 알려 드립니다.",
@@ -1613,7 +1515,6 @@ pub const EN: &[(&str, &str)] = &[
         "확인하거나 버릴 열쇠 기록이 없습니다.",
         "There is no key record to confirm or discard.",
     ),
-    ("QR 데이터가 너무 깁니다.", "The QR data is too long."),
     (
         "이 열쇠 파일은 이 PC가 마지막으로 본 열쇠 파일에서 이어진 새 버전이 아니라, 그와 갈라진 다른 열쇠 파일입니다(다른 PC에서 따로 열쇠를 바꿨거나, 누군가 예전 열쇠 파일로 새로 만들었을 수 있습니다). 그대로 쓰면 이 PC의 열쇠 변경이 사라지므로 열지 않았습니다.",
         "This key file is not a later version of the key file this PC saw last, but another key file that split from it (another PC changed the key on its own, or someone made it from an old key file). Using it would lose this PC's key changes, so it was not opened.",
@@ -1877,8 +1778,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "The security key check was cancelled, so this PC's key file was not tried. The key file received from the server (not confirmed yet) holds a security key this PC does not know. If you brought a key here that was newly registered on another PC, try it? If you never brought such a key, cancel and open again with this PC's security key.",
     ),
     (
-        "서버에서 받아 둔 열쇠 파일이 이 보안 키와 입력한 비밀번호(와 OTP)로 열리지 않았습니다. 이 PC의 열쇠 파일에 등록된 보안 키로 다시 여세요. 다른 PC에서 키를 가져온 적이 없다면 서버의 열쇠 파일이 위조되었을 수 있습니다.",
-        "The key file received from the server did not open with this security key and the password (and OTP) entered. Open again with a security key registered in this PC's key file. If you never brought a key from another PC, the server's key file may be forged.",
+        "서버에서 받아 둔 열쇠 파일이 이 보안 키와 입력한 비밀번호로 열리지 않았습니다. 이 PC의 열쇠 파일에 등록된 보안 키로 다시 여세요. 다른 PC에서 키를 가져온 적이 없다면 서버의 열쇠 파일이 위조되었을 수 있습니다.",
+        "The key file received from the server did not open with this security key and the password entered. Open again with a security key registered in this PC's key file. If you never brought a key from another PC, the server's key file may be forged.",
     ),
     (
         "다른 PC의 열쇠 변경을 받았습니다. 열쇠 확인 코드 {code}",
@@ -1934,10 +1835,6 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "서버의 열쇠 파일은 이 PC의 열쇠 파일을 바로 이어받은 것이 아니어서 이 방법으로는 받을 수 없습니다. 이 PC에서 쓰던 비밀번호로 연 뒤 '열쇠 관리'의 [받기…]로 받으세요.",
         "The server's key file does not directly follow this PC's key file, so it cannot be taken this way. Open with the password this PC used, then take it with [Get…] in 'Key management'.",
-    ),
-    (
-        "OTP 번호를 입력한 지 3분이 넘었습니다. 새 OTP 번호로 다시 여세요.",
-        "More than three minutes passed since the OTP code was entered. Open again with a new OTP code.",
     ),
     (
         "열쇠 파일 동기화를 켜는 열쇠 파일입니다. 받기 전에 확인이 필요합니다.",
@@ -2075,8 +1972,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Keys that can stand in for all the others: none (use 'Pair keys')",
     ),
     (
-        "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. OTP보다 권하는 방법이 아니라 또 하나의 선택지이며, 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.",
-        "With security keys on (YubiKey or another FIDO2 key), the key file is locked with both the password and a registered security key. This is not recommended over the OTP; it is another option, and experimental.\nIf every registered key is lost, no one (not even you) can open this vault, and there is no recovery, so register two or more. Keys registered together on one PC are paired, so if one is lost the other alone can remove it at once. Give each key its own PIN, and write the key number on each key.",
+        "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.",
+        "With security keys on (YubiKey or another FIDO2 key), the key file is locked with both the password and a registered security key. It is experimental.\nIf every registered key is lost, no one (not even you) can open this vault, and there is no recovery, so register two or more. Keys registered together on one PC are paired, so if one is lost the other alone can remove it at once. Give each key its own PIN, and write the key number on each key.",
     ),
     (
         "다른 PC에서 이 금고의 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력합니다.",
@@ -2136,16 +2033,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "The check is too old for another registration. Register the other keys with 'Add key'.",
     ),
     (
-        "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
-        "It has been a while, so we check once more. Enter a new OTP code. The keys registered or touched so far are kept.",
-    ),
-    (
         "확인한 지 오래되어 한 번 더 확인합니다. 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
         "It has been a while, so we check once more. Touch security key {n} again. The keys registered or touched so far are kept.",
-    ),
-    (
-        "확인한 지 오래되어 한 번 더 확인합니다. 새 OTP 코드를 입력한 뒤 보안 키 {n}을(를) 다시 터치하세요. 지금까지 등록하거나 터치한 키는 그대로 씁니다.",
-        "It has been a while, so we check once more. Enter a new OTP code, then touch security key {n} again. The keys registered or touched so far are kept.",
     ),
     (
         "비밀번호를 그대로 두면, 보안 키를 켜기 전에 만든 열쇠 파일과 그 백업(비밀번호만으로 열림)을 가진 사람은 누구나 이 비밀번호를 오프라인으로 계속 추측할 수 있고, 맞히면 남은 것은 등록한 보안 키(와 PIN)뿐입니다. 그 사본들을 지우거나 비밀번호도 바꾸세요.",
@@ -2168,8 +2057,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Receive the new key file from the server…",
     ),
     (
-        "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호(와 OTP)를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).",
-        "The server holds a new key file (revision {e}) from another PC that turned security keys on. Take it to sync with that PC again.\r\nEnter your current password (and OTP), press 'Receive the new key file from the server…', enter that PC's key check code and touch one security key registered in the new key file. If you cannot see that PC's code, you can choose 'Trust this server and take it without a code…'. If no PC turned security keys on, do not take it (the server copy may be forged).",
+        "다른 PC에서 보안 키를 켠 새 열쇠 파일(수정 {e})이 서버에 있습니다. 받아야 그 PC와 다시 동기화됩니다.\r\n현재 비밀번호를 넣고 '서버의 새 열쇠 파일 받기…'를 누른 뒤, 그 PC의 열쇠 확인 코드를 입력하고 새 열쇠 파일에 등록된 보안 키 하나를 터치하세요. 그 PC의 코드를 볼 수 없으면 '코드 없이 이 서버를 믿고 받기…'를 고를 수 있습니다. 보안 키를 켠 PC가 없다면 받지 마세요(서버 사본이 위조되었을 수 있습니다).",
+        "The server holds a new key file (revision {e}) from another PC that turned security keys on. Take it to sync with that PC again.\r\nEnter your current password, press 'Receive the new key file from the server…', enter that PC's key check code and touch one security key registered in the new key file. If you cannot see that PC's code, you can choose 'Trust this server and take it without a code…'. If no PC turned security keys on, do not take it (the server copy may be forged).",
     ),
     (
         "코드 없이 이 서버를 믿고 받기…",
@@ -2470,10 +2359,6 @@ pub const EN_SK: &[(&str, &str)] = &[
     (
         "이 열쇠 파일의 보안 키 기록이 이 PC가 기록해 둔 것과 다릅니다. 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.",
         "This key file's security key records differ from what this PC recorded. It may have been forged, so it was not opened. Use the latest key file (a key backup, another PC).",
-    ),
-    (
-        "이 열쇠 파일의 OTP 설정이 이 PC가 기록해 둔 것과 다릅니다(설명되지 않는 변경). 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.",
-        "This key file's OTP setting differs from what this PC recorded (an unexplained change). It may have been forged, so it was not opened. Use the latest key file (a key backup, another PC).",
     ),
     (
         "고른 키가 받은 변경과 맞지 않아 받지 않았습니다. 이 변경은 이제 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력해야만 받을 수 있습니다. 키를 잃어버린 것이 확실하면 코드를 기다리지 말고 이 PC에서 '잃어버린 키 제거'를 하세요.",

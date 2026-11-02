@@ -37,8 +37,7 @@ pub const ADOPT_EQUAL: &str = "이미 같은 열쇠 파일입니다.";
 pub const ADOPT_OLDER: &str = "이 열쇠 파일은 이 PC의 열쇠 파일보다 오래되었습니다.";
 /// Everything the other file holds, this PC's holds too: nothing is written.
 pub const ADOPT_CONTAINED: &str = "이 PC의 열쇠 파일에 이미 모두 들어 있습니다.";
-/// Another vault's key file, or one whose ID key, OTP flag or TOTP secret
-/// is not this vault's.
+/// Another vault's key file, or one whose ID key is not this vault's.
 pub const NOT_THIS_VAULT: &str = "이 열쇠 파일은 이 금고의 것이 아닙니다.";
 /// S-ADOPT-REFUSED, filled with one of the reasons below.
 pub const ADOPT_REFUSED: &str = "이 열쇠 파일은 받지 않았습니다({reason}). 이 PC의 열쇠 파일과 맞지 않는 변경이 들어 있어 손상되었거나 위조되었을 수 있습니다. 다른 PC에서 바꾼 것이 맞다면 그 PC의 최신 열쇠 파일을 다시 가져오세요.";
@@ -590,7 +589,7 @@ impl Session {
     /// Opens the other file (spec §5.8): with this PC's password from the
     /// Reauth (`password` None), else with the one the user typed for it
     /// (S-NEWPASS-OTHER). AUTH_ERROR when it does not open; then the same
-    /// ID key and the same TOTP secret, compared in constant time.
+    /// ID key, compared in constant time.
     pub fn adopt_open(
         &self,
         r: &Reauth,
@@ -632,7 +631,7 @@ impl Session {
         self.other_opened(other, opened, password, touch)
     }
     /// The other file as `opened` opened it with `password` (and `touch`):
-    /// the same ID key and TOTP secret, and the touched key's records. The
+    /// the same ID key, and the touched key's records. The
     /// login of the second entry point (spec §5.2) opened it already.
     pub(in crate::vault) fn other_opened(
         &self,
@@ -641,11 +640,7 @@ impl Session {
         password: &str,
         #[cfg_attr(not(feature = "security-key"), allow(unused_variables))] touch: Option<&Touch>,
     ) -> Result<OtherOpened> {
-        let otp = match (opened.bundle.otp(), self.keys.otp()) {
-            (Some(a), Some(b)) => ct_eq(a, b),
-            (a, b) => a.is_none() && b.is_none(),
-        };
-        if !ct_eq(opened.bundle.id_key(), self.keys.id_key()) || !otp {
+        if !ct_eq(opened.bundle.id_key(), self.keys.id_key()) {
             return Err(NOT_THIS_VAULT);
         }
         #[cfg(feature = "security-key")]
@@ -859,7 +854,6 @@ impl Session {
             || plan.session != self.serial
             || r.app_serial != plan.app_serial
             || r.age() > REAUTH_MAX
-            || (self.uses_otp() && r.otp_step.is_none())
         {
             return Err(REAUTH_STALE);
         }
@@ -1147,7 +1141,7 @@ impl Session {
             opened: &opened.opened,
         };
         let (bytes, writer) = keyfile::seal(&spec, bundle, &opened.password, plan)?;
-        let built = self.built(bytes, &writer, &spec, bundle, probe)?;
+        let built = self.built(bytes, &writer, &spec, bundle, probe, Some(h))?;
         // I9: the state stays the other file's.
         if built.kh.state() != h.state() {
             return Err(NOT_VERIFIED);
@@ -1224,7 +1218,7 @@ impl Session {
         let probe = self.encode()?;
         let resume = sha256(&probe);
         let keys = self.union_ring(other, opened, false)?;
-        let bundle = Bundle::new(&keys, self.keys.otp()).ok_or(AUTH_ERROR)?;
+        let bundle = Bundle::new(&keys).ok_or(AUTH_ERROR)?;
         // The same password takes the other file's `pw_id`, so neither PC
         // sees a password change; a 0.8 file has none to keep.
         let pw_id = match (equal, keep_own) {
@@ -1246,7 +1240,7 @@ impl Session {
             resume,
         };
         let (bytes, writer) = keyfile::seal(&spec, &bundle, password, Plan::PasswordOnly)?;
-        self.built(bytes, &writer, &spec, &bundle, Some(probe))
+        self.built(bytes, &writer, &spec, &bundle, Some(probe), None)
     }
     /// What this PC's key file states, for the checks of an adopt.
     fn own_public(&self) -> Public {
@@ -1262,14 +1256,15 @@ impl Session {
         }
     }
     /// What the other file states (spec §5.8, before any touch): a file of
-    /// this vault with the same OTP flag (E1), which this build can open. A
+    /// this vault, which this build can open; an old OTP vault's flag on
+    /// either side counts for nothing (no E1 since the OTP was removed). A
     /// 0.8 file's state follows from this vault's ID key, which the open
     /// then proves it holds.
     fn other_public(&self, other: &KeyFile) -> Result<Public> {
         if let Some(refusal) = other.refusal() {
             return Err(refusal);
         }
-        if other.vault_id() != Some(self.id) || other.uses_otp() != self.uses_otp() {
+        if other.vault_id() != Some(self.id) {
             return Err(NOT_THIS_VAULT);
         }
         Ok(match other.header() {
@@ -1443,7 +1438,7 @@ impl Session {
                 // so; G2 stays off for the session.
                 self.g2_spent.set(true);
                 let dir = self.anchor.dir.as_deref().ok_or(super::ANCHOR_FAILED)?;
-                let (state, now) = (check.other, crate::otp::now()?);
+                let (state, now) = (check.other, crate::clock::now()?);
                 match anchor::update(dir, &self.id, anchor::LOCK_WAIT, &mut |lines| {
                     gate::g2_failed(lines, state, now);
                     true
@@ -1523,11 +1518,10 @@ mod tests {
     };
     use super::super::CORRUPT;
     use super::super::tests::{
-        Codes, NEW, OLD, Pc, THIRD, What, change, entry, keys_of, login, notices, other_of,
-        pass_gate, sealed, sealed_with, secrets, set_before, setup, vault_of,
+        NEW, OLD, Pc, THIRD, What, change, entry, keys_of, login, notices, other_of, pass_gate,
+        sealed, sealed_with, secrets, set_before, setup, vault_of,
     };
     use super::*;
-    use crate::otp;
     use std::{cell::RefCell, fs, path::Path, rc::Rc};
 
     fn file(bytes: &[u8]) -> KeyFile {
@@ -1556,18 +1550,16 @@ mod tests {
     /// write with what `answer` makes of the preview.
     fn take(
         s: &mut Session,
-        codes: &mut Codes,
         mine: &str,
         other: &[u8],
         theirs: &str,
         answer: impl FnOnce(&Preview) -> Acks,
     ) -> Result<Adopted> {
-        take_with(s, codes, mine, other, theirs, GatePass::none, answer)
+        take_with(s, mine, other, theirs, GatePass::none, answer)
     }
     /// The same with the gate answered by `gate`.
     fn take_with(
         s: &mut Session,
-        codes: &mut Codes,
         mine: &str,
         other: &[u8],
         theirs: &str,
@@ -1576,8 +1568,7 @@ mod tests {
     ) -> Result<Adopted> {
         let f = file(other);
         let check = s.adopt_check(&f, Source::File(f.path().to_owned()))?;
-        let (code, typed) = codes.next();
-        let r = s.reauth(mine, Some((&code, typed)), None)?;
+        let r = s.reauth(mine, None)?;
         let opened = match s.adopt_open(&r, &f, None) {
             Err(e) if e == AUTH_ERROR => s.adopt_open(&r, &f, Some(theirs))?,
             opened => opened?,
@@ -1587,8 +1578,7 @@ mod tests {
         s.adopt(r, plan, Vec::new(), acks, Consent::default(), false)
     }
     /// The key file and the anchor of `pc`: what an adopt that writes
-    /// nothing leaves as it was (a Reauth of an OTP vault saves the vault
-    /// file with the code's step).
+    /// nothing leaves as it was.
     fn key_and_anchor(pc: &Pc) -> (Vec<u8>, Vec<u8>) {
         (fs::read(pc.key()).unwrap(), pc.anchor())
     }
@@ -1603,25 +1593,19 @@ mod tests {
         keys.iter().map(|k| key_id(id, k)).collect()
     }
 
-    /// Only this vault's key files are taken (spec §5.8): another vault ID,
-    /// another OTP flag (E1) and a security-key file are refused before any
-    /// key derivation; another ID key or TOTP secret once the file opens.
-    /// Nothing is written.
+    /// Only this vault's key files are taken (spec §5.8): another vault ID
+    /// and a security-key file are refused before any key derivation;
+    /// another ID key once the file opens. Nothing is written.
     #[test]
     fn only_this_vaults_key_files_are_taken() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, true, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
-        let secret = *s.keys.otp().unwrap();
-        let keys = s.keys.keys().to_vec();
         let before = key_and_anchor(&pc);
-        let (another, _) = sealed_with([0x11; 16], &[[0x51; 32]], Some(&secret), 2, &[], NEW);
-        let later = [&[[0x53; 32]][..], &keys].concat();
-        let (no_otp, _) = sealed_with(id, &later, None, 2, &[], NEW);
+        let (another, _) = sealed_with([0x11; 16], &[[0x51; 32]], Some(&[1; 20]), 2, &[], NEW);
         let hardware = keyfile::hardware_draft(false);
         let derived = crypto::derive_count();
         assert_eq!(classify(&s, &another).err(), Some(NOT_THIS_VAULT));
-        assert_eq!(classify(&s, &no_otp).err(), Some(NOT_THIS_VAULT));
         // The security-key build reads it, and it is another vault's.
         #[cfg(not(feature = "security-key"))]
         let refusal = keyfile::NO_SECURITY_KEY_SUPPORT;
@@ -1629,15 +1613,48 @@ mod tests {
         let refusal = NOT_THIS_VAULT;
         assert_eq!(classify(&s, &hardware).err(), Some(refusal));
         assert_eq!(crypto::derive_count(), derived);
-        let (other_id_key, _) =
-            sealed_with(id, &[[0x54; 32], [0x55; 32]], Some(&secret), 2, &[], NEW);
-        let (other_secret, _) = sealed_with(id, &later, Some(&[0x77; 20]), 2, &[], NEW);
-        for other in [other_id_key, other_secret] {
-            assert!(classify(&s, &other).is_ok());
-            let taken = take(&mut s, &mut codes, OLD, &other, NEW, defaults);
-            assert_eq!(taken.err(), Some(NOT_THIS_VAULT));
-        }
+        let (other_id_key, _) = sealed(id, &[[0x54; 32], [0x55; 32]], 2, &[], NEW);
+        assert!(classify(&s, &other_id_key).is_ok());
+        let taken = take(&mut s, OLD, &other_id_key, NEW, defaults);
+        assert_eq!(taken.err(), Some(NOT_THIS_VAULT));
         assert_eq!(key_and_anchor(&pc), before);
+        crypto::set_kdf_profile(crypto::KdfProfile::Real);
+    }
+
+    /// Another PC's later key file that still holds a TOTP secret of the
+    /// removed OTP (written by an older version) is a successor like any:
+    /// no E1. Its re-seal keeps `[0, W)`, so its state and the flag, with
+    /// 20 zero bytes for the secret; the next key change clears the flag.
+    /// The other way round, this PC's old OTP vault takes a file without
+    /// the flag.
+    #[test]
+    fn an_old_otp_flag_decides_nothing_and_its_secret_is_never_copied() {
+        let pc = Pc::new();
+        let mut s = setup(&pc, true, false, false);
+        let later = [&[[0x53; 32]][..], s.keys.keys()].concat();
+        let (with_otp, state) = sealed_with(s.id, &later, Some(&[0x77; 20]), 2, &[], NEW);
+        assert_eq!(keyfile::body_tail(&file(&with_otp), NEW), [0x77; 20]);
+        assert_eq!(
+            classify(&s, &with_otp).unwrap().class,
+            AdoptClass::Successor
+        );
+        take(&mut s, OLD, &with_otp, NEW, defaults).unwrap();
+        let kept = KeyFile::read(&pc.key()).unwrap();
+        assert!(kept.header().unwrap().otp_secret() && s.key_state() == state);
+        assert_eq!(keyfile::body_tail(&kept, NEW), [0; 20]);
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
+        let changed = KeyFile::read(&pc.key()).unwrap();
+        assert!(!changed.otp_secret() && keyfile::body_tail(&changed, THIRD).is_empty());
+        drop(s);
+        // A 0.8 vault made with the OTP takes another PC's file without it.
+        let pc = Pc::new();
+        let mut s = setup(&pc, false, true, false);
+        let later = [&[[0x63; 32]][..], s.keys.keys()].concat();
+        let (plain, state) = sealed(s.id, &later, 1, &[], NEW);
+        assert_eq!(classify(&s, &plain).unwrap().class, AdoptClass::Successor);
+        take(&mut s, OLD, &plain, NEW, defaults).unwrap();
+        assert_eq!(s.key_state(), state);
+        assert!(!KeyFile::read(&pc.key()).unwrap().otp_secret());
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 
@@ -1647,11 +1664,11 @@ mod tests {
     #[test]
     fn older_equal_and_contained_files_write_nothing() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let k1 = fs::read(pc.key()).unwrap();
-        let k0 = encode_key(&id, s.keys.id_key(), None, "synthetic first password").unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let k0 = encode_key(&id, s.keys.id_key(), "synthetic first password").unwrap();
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         let k2 = fs::read(pc.key()).unwrap();
         let keys2 = s.keys.keys().to_vec();
         let (k1x, _) = sealed(id, &keys2[1..], 1, &[], THIRD);
@@ -1665,9 +1682,9 @@ mod tests {
             Ok(AdoptClass::Contained)
         );
         assert_eq!(crypto::derive_count(), derived);
-        let equal = take(&mut s, &mut codes, NEW, &k2, NEW, defaults);
+        let equal = take(&mut s, NEW, &k2, NEW, defaults);
         assert_eq!(equal.err(), Some(ADOPT_EQUAL));
-        let contained = take(&mut s, &mut codes, NEW, &k1x, THIRD, defaults);
+        let contained = take(&mut s, NEW, &k1x, THIRD, defaults);
         assert_eq!(contained.err(), Some(ADOPT_CONTAINED));
         assert_eq!(super::super::tests::files(&pc), before);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -1681,13 +1698,13 @@ mod tests {
     #[test]
     fn a_successor_is_taken_as_it_is() {
         let a = Pc::new();
-        let (mut s, mut codes) = setup(&a, true, false, false);
+        let mut s = setup(&a, true, false, false);
         let id = s.id;
         let id_key = *s.keys.id_key();
         let ids: Vec<[u8; 16]> = s.entries.iter().map(|e| e.id()).collect();
         let b = copy_of(&a);
-        let mut sb = login(&b, OLD, &mut codes).unwrap();
-        assert_eq!(change(&mut sb, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let mut sb = login(&b, OLD).unwrap();
+        assert_eq!(change(&mut sb, OLD, NEW), Ok(Rekeyed::Done));
         drop(sb);
         let kb = fs::read(b.key()).unwrap();
         let hb = keyfile::parse(&kb).unwrap();
@@ -1701,9 +1718,7 @@ mod tests {
             (check.class, check.epoch, check.fork),
             (AdoptClass::Successor, 2, false)
         );
-        let r = s
-            .reauth(OLD, Some(("", otp::now().unwrap())), None)
-            .unwrap();
+        let r = s.reauth(OLD, None).unwrap();
         assert_eq!(s.adopt_open(&r, &f, None).err(), Some(AUTH_ERROR));
         let opened = s.adopt_open(&r, &f, Some(NEW)).unwrap();
         let plan = s
@@ -1759,11 +1774,11 @@ mod tests {
         drop(s);
         // The other file's password opens it now; this PC's old one does
         // not, and is told which one does only while the change waits.
-        let mut s = login(&a, NEW, &mut codes).unwrap();
+        let mut s = login(&a, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         assert_eq!(secrets(&s), ["one", "two"]);
         drop(s);
-        let refused = super::super::tests::refused(&a, OLD, &codes);
+        let refused = super::super::tests::refused(&a, OLD);
         assert_eq!(refused, None);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -1774,7 +1789,7 @@ mod tests {
     #[test]
     fn a_sibling_at_the_same_epoch_that_holds_this_pcs_key_is_a_successor() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let keys = s.keys.keys().to_vec();
         let (past, state) = sealed(id, &[&[[0x5e; 32]][..], &keys].concat(), 1, &[], NEW);
@@ -1784,10 +1799,10 @@ mod tests {
             (fork.class, fork.fork, fork.epoch),
             (AdoptClass::Union, true, 2)
         );
-        let adopted = take(&mut s, &mut codes, OLD, &past, NEW, defaults).unwrap();
+        let adopted = take(&mut s, OLD, &past, NEW, defaults).unwrap();
         assert_eq!((adopted.state, s.max_epoch()), (state, 1));
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         assert_eq!(pc.lines(&id).vault.unwrap().state.key_state(), state);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -1800,18 +1815,18 @@ mod tests {
     fn a_successor_that_keeps_the_data_key_saves_the_vault_file_again() {
         for crash in [false, true] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             let id = s.id;
             let (k2, state2) = sealed(id, s.keys.keys(), 2, &[], NEW);
             if crash {
                 CRASH.with(|c| c.set(Some("S2v")));
-                let taken = take(&mut s, &mut codes, OLD, &k2, NEW, defaults);
+                let taken = take(&mut s, OLD, &k2, NEW, defaults);
                 assert_eq!(taken.err(), Some(SIMULATED_CRASH));
                 drop(s);
-                s = login(&pc, NEW, &mut codes).unwrap();
+                s = login(&pc, NEW).unwrap();
                 assert_eq!(notices(&mut s), []);
             } else {
-                let taken = take(&mut s, &mut codes, OLD, &k2, NEW, defaults).unwrap();
+                let taken = take(&mut s, OLD, &k2, NEW, defaults).unwrap();
                 assert!(!taken.vault_pending);
             }
             let h = keyfile::parse(&fs::read(pc.key()).unwrap()).unwrap();
@@ -1835,18 +1850,18 @@ mod tests {
     fn a_fork_is_joined_under_a_fresh_key_and_taken_back_as_a_successor() {
         for keep_own in [false, true] {
             let a = Pc::new();
-            let (mut sa, mut codes) = setup(&a, false, false, false);
+            let mut sa = setup(&a, false, false, false);
             let id = sa.id;
             let id_key = *sa.keys.id_key();
             let backup = a.file("backup-08.goyo");
             sa.backup(&backup).unwrap();
             let b = copy_of(&a);
-            assert_eq!(change(&mut sa, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+            assert_eq!(change(&mut sa, OLD, NEW), Ok(Rekeyed::Done));
             let ka = fs::read(a.key()).unwrap();
             let dka = *sa.keys.current();
             drop(sa);
-            let mut sb = login(&b, OLD, &mut codes).unwrap();
-            assert_eq!(change(&mut sb, &mut codes, OLD, THIRD), Ok(Rekeyed::Done));
+            let mut sb = login(&b, OLD).unwrap();
+            assert_eq!(change(&mut sb, OLD, THIRD), Ok(Rekeyed::Done));
             let dkb = *sb.keys.current();
             let check = classify(&sb, &ka).unwrap();
             assert_eq!(
@@ -1854,7 +1869,7 @@ mod tests {
                 (AdoptClass::Union, true, Some((true, true)), 2)
             );
             let mut asked = None;
-            let adopted = take(&mut sb, &mut codes, THIRD, &ka, NEW, |p| {
+            let adopted = take(&mut sb, THIRD, &ka, NEW, |p| {
                 asked = Some(p.clone());
                 Acks {
                     union_password: if keep_own {
@@ -1890,10 +1905,10 @@ mod tests {
             }
             drop(sb);
             // A takes B's union as a successor: the same keys and state.
-            let mut sa = login(&a, NEW, &mut codes).unwrap();
+            let mut sa = login(&a, NEW).unwrap();
             let check = classify(&sa, &ku).unwrap();
             assert_eq!(check.class, AdoptClass::Successor);
-            let adopted = take(&mut sa, &mut codes, NEW, &ku, pass, defaults).unwrap();
+            let adopted = take(&mut sa, NEW, &ku, pass, defaults).unwrap();
             assert_eq!(adopted.state, hu.state());
             assert_eq!(sa.keys.keys(), &keys[..]);
             drop(sa);
@@ -1901,7 +1916,7 @@ mod tests {
             for (pc, key) in [(&a, a.key()), (&b, b.key())] {
                 pc.here();
                 let dest = pc.file("restored.goyo");
-                let r = Session::restore(&backup, &key, &dest, pass, "").unwrap();
+                let r = Session::restore(&backup, &key, &dest, pass).unwrap();
                 assert_eq!(secrets(&r), ["one", "two"]);
             }
         }
@@ -1917,28 +1932,28 @@ mod tests {
     fn equal_passwords_need_no_choice() {
         // A 0.8 B takes A's file after P1 → P2 → P1.
         let a = Pc::new();
-        let (mut sa, mut codes) = setup(&a, false, false, false);
+        let mut sa = setup(&a, false, false, false);
         let b = copy_of(&a);
-        assert_eq!(change(&mut sa, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
-        assert_eq!(change(&mut sa, &mut codes, NEW, OLD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut sa, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut sa, NEW, OLD), Ok(Rekeyed::Done));
         drop(sa);
         let ka = fs::read(a.key()).unwrap();
-        let mut sb = login(&b, OLD, &mut codes).unwrap();
-        let adopted = take(&mut sb, &mut codes, OLD, &ka, OLD, defaults).unwrap();
+        let mut sb = login(&b, OLD).unwrap();
+        let adopted = take(&mut sb, OLD, &ka, OLD, defaults).unwrap();
         assert_eq!(adopted.password, PassInForce::Own);
         assert_eq!(adopted.state, keyfile::parse(&ka).unwrap().state());
         drop(sb);
         // Both branches set NEW: a union with A's `pw_id`, and A takes it.
         let a = Pc::new();
-        let (mut sa, mut codes) = setup(&a, false, false, false);
+        let mut sa = setup(&a, false, false, false);
         let b = copy_of(&a);
-        assert_eq!(change(&mut sa, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut sa, OLD, NEW), Ok(Rekeyed::Done));
         drop(sa);
         let ka = fs::read(a.key()).unwrap();
-        let mut sb = login(&b, OLD, &mut codes).unwrap();
-        assert_eq!(change(&mut sb, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        let mut sb = login(&b, OLD).unwrap();
+        assert_eq!(change(&mut sb, OLD, NEW), Ok(Rekeyed::Done));
         let mut asked = None;
-        let adopted = take(&mut sb, &mut codes, NEW, &ka, NEW, |p| {
+        let adopted = take(&mut sb, NEW, &ka, NEW, |p| {
             asked = Some(p.clone());
             defaults(p)
         })
@@ -1950,12 +1965,12 @@ mod tests {
         let pw_id = |bytes: &[u8]| keyfile::parse(bytes).unwrap().pw_id;
         assert_eq!(pw_id(&ku), pw_id(&ka));
         drop(sb);
-        let mut sa = login(&a, NEW, &mut codes).unwrap();
+        let mut sa = login(&a, NEW).unwrap();
         assert_eq!(
             classify(&sa, &ku).map(|c| c.class),
             Ok(AdoptClass::Successor)
         );
-        let adopted = take(&mut sa, &mut codes, NEW, &ku, NEW, defaults).unwrap();
+        let adopted = take(&mut sa, NEW, &ku, NEW, defaults).unwrap();
         assert_eq!(adopted.password, PassInForce::Own);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -1967,7 +1982,7 @@ mod tests {
     #[test]
     fn a_union_keeps_the_password_of_the_side_that_changed_it() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let keys1 = s.keys.keys().to_vec();
         let pw1 = s.key_file.header().unwrap().pw_id;
@@ -1984,9 +1999,9 @@ mod tests {
             resume: [0; 32],
         };
         let kept = [&[[0x61; 32]][..], &keys1].concat();
-        let bundle = Bundle::new(&kept, None).unwrap();
+        let bundle = Bundle::new(&kept).unwrap();
         let (f, _) = keyfile::seal(&spec(2, pw1), &bundle, OLD, Plan::PasswordOnly).unwrap();
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         let pw2 = s.key_file.header().unwrap().pw_id;
         let check = classify(&s, &f).unwrap();
         assert_eq!(
@@ -1994,7 +2009,7 @@ mod tests {
             (AdoptClass::Union, true, Some((true, false)))
         );
         let mut asked = None;
-        let adopted = take(&mut s, &mut codes, NEW, &f, OLD, |p| {
+        let adopted = take(&mut s, NEW, &f, OLD, |p| {
             asked = Some(p.clone());
             Acks {
                 union_password: UnionPassword::Own,
@@ -2021,7 +2036,7 @@ mod tests {
             (AdoptClass::Union, Some((false, true)))
         );
         let mut asked = None;
-        let adopted = take(&mut s, &mut codes, NEW, &g, THIRD, |p| {
+        let adopted = take(&mut s, NEW, &g, THIRD, |p| {
             asked = Some(p.clone());
             defaults(p)
         })
@@ -2032,13 +2047,13 @@ mod tests {
         );
         assert_eq!(adopted.password, PassInForce::Other);
         drop(s);
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert_eq!(notices(&mut s), []);
         // Both sides changed it: S-ADOPT-BOTHPASS, and without its yes
         // nothing is written.
         let other = other_of(&s, What::Union);
         let before = key_and_anchor(&pc);
-        let taken = take(&mut s, &mut codes, THIRD, &other, NEW, |p| {
+        let taken = take(&mut s, THIRD, &other, NEW, |p| {
             assert!(p.both_passwords);
             Acks {
                 both_passwords: false,
@@ -2061,11 +2076,11 @@ mod tests {
     #[test]
     fn a_key_id_that_shares_only_a_prefix_is_no_shared_state() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let keys1 = s.keys.keys().to_vec();
         let pw1 = s.key_file.header().unwrap().pw_id;
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         let forged = [0x63; 32];
         let spec = Spec {
             vault_id: id,
@@ -2077,7 +2092,7 @@ mod tests {
             tombstones: Vec::new(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(&[&[forged][..], &keys1].concat(), None).unwrap();
+        let bundle = Bundle::new(&[&[forged][..], &keys1].concat()).unwrap();
         let (f, _) = keyfile::seal(&spec, &bundle, OLD, Plan::PasswordOnly).unwrap();
         let check = classify(&s, &f).unwrap();
         assert_eq!(
@@ -2122,28 +2137,28 @@ mod tests {
     #[test]
     fn during_a_local_rollback_only_a_descendant_is_taken() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
-        assert_eq!(change(&mut s, &mut codes, OLD, P2), Ok(Rekeyed::Done));
-        assert_eq!(change(&mut s, &mut codes, P2, P3), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, P2), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, P2, P3), Ok(Rekeyed::Done));
         let (k3, v3) = (pc.file("k3.goyokey"), pc.file("v3.goyo"));
         fs::copy(pc.key(), &k3).unwrap();
         fs::copy(pc.vault(), &v3).unwrap();
         let keys3 = s.keys.keys().to_vec();
-        assert_eq!(change(&mut s, &mut codes, P3, P4), Ok(Rekeyed::Done));
-        assert_eq!(change(&mut s, &mut codes, P4, P5), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, P3, P4), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, P4, P5), Ok(Rekeyed::Done));
         let k5 = fs::read(pc.key()).unwrap();
         let keys5 = s.keys.keys().to_vec();
         drop(s);
-        let put_back = |codes: &mut Codes| {
+        let put_back = || {
             fs::copy(&k3, pc.key()).unwrap();
             fs::copy(&v3, pc.vault()).unwrap();
-            let mut s = login(&pc, P3, codes).unwrap();
+            let mut s = login(&pc, P3).unwrap();
             assert!(s.local_rollback());
             s.take_key_notices();
             s
         };
-        let mut s = put_back(&mut codes);
+        let mut s = put_back();
         let (k4b, state4b) = sealed(id, &[&[[0xb4; 32]][..], &keys3].concat(), 4, &[], PB);
         let (fx, _) = sealed(id, &[&[[0xf6; 32]][..], &keys3].concat(), 6, &[], P3);
         let sibling = [&[[0xa6; 32], [0xa5; 32], [0xa4; 32]][..], &keys3].concat();
@@ -2169,18 +2184,18 @@ mod tests {
             tombstones: Vec::new(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(&claim, None).unwrap();
+        let bundle = Bundle::new(&claim).unwrap();
         let claimed = keyfile::seal_claiming(&spec, &bundle, P3, &ids);
         assert_eq!(
             classify(&s, &claimed).map(|c| c.class),
             Ok(AdoptClass::Successor)
         );
-        let taken = take(&mut s, &mut codes, P3, &claimed, P3, defaults);
+        let taken = take(&mut s, P3, &claimed, P3, defaults);
         assert_eq!(taken.err(), Some(AUTH_ERROR));
         assert_eq!(super::super::tests::files(&pc), before);
         assert!(s.local_rollback());
         // This PC's own K5, from a key backup: taken, and the hold lifts.
-        let adopted = take(&mut s, &mut codes, P3, &k5, P5, defaults).unwrap();
+        let adopted = take(&mut s, P3, &k5, P5, defaults).unwrap();
         assert_eq!(adopted.state, keyfile::parse(&k5).unwrap().state());
         assert!(!s.local_rollback());
         assert_eq!(
@@ -2188,32 +2203,32 @@ mod tests {
             adopted.state
         );
         drop(s);
-        let mut s = login(&pc, P5, &mut codes).unwrap();
+        let mut s = login(&pc, P5).unwrap();
         assert_eq!(notices(&mut s), []);
         drop(s);
         // Another PC's K6 on top of K5: it holds e5's key.
-        let mut s = put_back(&mut codes);
+        let mut s = put_back();
         let (k6, state6) = sealed(id, &[&[[0x66; 32]][..], &keys5].concat(), 6, &[], P6);
-        let adopted = take(&mut s, &mut codes, P3, &k6, P6, defaults).unwrap();
+        let adopted = take(&mut s, P3, &k6, P6, defaults).unwrap();
         assert_eq!(adopted.state, state6);
         assert!(!s.local_rollback());
         drop(s);
         // Confirmed by the user, K3 is this PC's state: the change from 3
         // is an ordinary successor.
-        let mut s = put_back(&mut codes);
-        let r = s.reauth(P3, Some(("", otp::now().unwrap())), None).unwrap();
+        let mut s = put_back();
+        let r = s.reauth(P3, None).unwrap();
         s.confirm_key_file(r).unwrap();
         assert_eq!(
             classify(&s, &k4b).map(|c| c.class),
             Ok(AdoptClass::Successor)
         );
-        let adopted = take(&mut s, &mut codes, P3, &k4b, PB, defaults).unwrap();
+        let adopted = take(&mut s, P3, &k4b, PB, defaults).unwrap();
         assert_eq!(adopted.state, state4b);
         drop(s);
         // A Restore with K3 takes no key file.
         pc.here();
         let dest = pc.file("restored.goyo");
-        let r = Session::restore(&v3, &k3, &dest, P3, "").unwrap();
+        let r = Session::restore(&v3, &k3, &dest, P3).unwrap();
         assert!(r.restore_held());
         let anchor = pc.anchor();
         assert_eq!(classify(&r, &k6).err(), Some(RESTORE_OLDKEY));
@@ -2227,24 +2242,24 @@ mod tests {
     #[test]
     fn a_held_session_takes_no_key_file() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let (k1, v1) = (pc.file("k1.goyokey"), pc.file("v1.goyo"));
         fs::copy(pc.key(), &k1).unwrap();
         fs::copy(pc.vault(), &v1).unwrap();
         let other = other_of(&s, What::Successor);
         CRASH.with(|c| c.set(Some("S2v")));
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Err(SIMULATED_CRASH));
+        assert_eq!(change(&mut s, OLD, NEW), Err(SIMULATED_CRASH));
         drop(s);
         pc.here();
         let anchor = pc.anchor();
-        let r = Session::restore(&v1, &k1, &pc.file("r.goyo"), OLD, "").unwrap();
+        let r = Session::restore(&v1, &k1, &pc.file("r.goyo"), OLD).unwrap();
         assert_eq!(classify(&r, &other).err(), Some(RESTORE_PENDING));
         drop(r);
         // The landed key file is away: the change waits for it.
         let away = pc.file("away.goyokey");
         fs::rename(pc.key(), &away).unwrap();
         let prepared = super::super::super::prepare(&pc.vault(), &k1).unwrap();
-        let s = Session::login(prepared, OLD, "", otp::now().unwrap(), None).unwrap();
+        let s = Session::login(prepared, OLD, None).unwrap();
         assert!(s.pending_elsewhere().is_some());
         assert_eq!(classify(&s, &other).err(), Some(PENDING_ELSEWHERE));
         assert_eq!(pc.anchor(), anchor);
@@ -2258,7 +2273,7 @@ mod tests {
     #[test]
     fn a_file_far_ahead_is_refused() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let keys = s.keys.keys().to_vec();
         let later = |n: u8, epoch| sealed(id, &[&[[n; 32]][..], &keys].concat(), epoch, &[], NEW);
@@ -2283,8 +2298,7 @@ mod tests {
             assert_eq!(check.keys.gate, Some(GateKind::G1));
             assert!(check.keys.checked.gates.jump);
             let f = file(&ahead);
-            let (code, typed) = codes.next();
-            let r = s.reauth(OLD, Some((&code, typed)), None).unwrap();
+            let r = s.reauth(OLD, None).unwrap();
             let opened = s.adopt_open(&r, &f, Some(NEW)).unwrap();
             let none = GatePass::none(&check);
             assert_eq!(
@@ -2301,10 +2315,10 @@ mod tests {
                 epoch: c.other.epoch,
                 tag: c.other.tag,
             };
-            take_with(&mut s, &mut codes, OLD, &ahead, NEW, gate, defaults).unwrap()
+            take_with(&mut s, OLD, &ahead, NEW, gate, defaults).unwrap()
         };
         #[cfg(not(feature = "security-key"))]
-        let adopted = take(&mut s, &mut codes, OLD, &ahead, NEW, defaults).unwrap();
+        let adopted = take(&mut s, OLD, &ahead, NEW, defaults).unwrap();
         assert_eq!(adopted.state, state);
         assert_eq!(s.max_epoch(), silent);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
@@ -2318,7 +2332,7 @@ mod tests {
     #[test]
     fn a_removal_this_pc_carries_is_never_dropped() {
         let pc = Pc::new();
-        let (s, mut codes) = setup(&pc, true, false, false);
+        let s = setup(&pc, true, false, false);
         let id = s.id;
         let keys1 = s.keys.keys().to_vec();
         // A GOYOKE03 with a removal, taken silently at login.
@@ -2328,7 +2342,7 @@ mod tests {
         fs::write(pc.key(), &k2).unwrap();
         fs::write(pc.vault(), vault_of(&s, &dk2, state2)).unwrap();
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         pass_gate(&mut s);
         assert_eq!(notices(&mut s), []);
         let lacking = |n: u8, keys: &[[u8; 32]], epoch| {
@@ -2358,7 +2372,7 @@ mod tests {
         assert_eq!(crypto::derive_count(), derived);
         // A fork from before it: joined, the removal kept.
         let before = lacking(0x76, &keys1[1..], 2);
-        let adopted = take(&mut s, &mut codes, NEW, &before, THIRD, defaults).unwrap();
+        let adopted = take(&mut s, NEW, &before, THIRD, defaults).unwrap();
         let h = keyfile::parse(&fs::read(pc.key()).unwrap()).unwrap();
         assert_eq!(h.state(), adopted.state);
         assert_eq!(h.tombstones.len(), 1);
@@ -2374,28 +2388,28 @@ mod tests {
     #[test]
     fn seventy_changes_on_each_branch_keep_both_current_keys() {
         let a = Pc::new();
-        let (mut sa, mut codes) = setup(&a, false, false, false);
+        let mut sa = setup(&a, false, false, false);
         let id = sa.id;
         let id_key = *sa.keys.id_key();
         let b = copy_of(&a);
-        let run = |s: &mut Session, codes: &mut Codes, tag: &str| {
+        let run = |s: &mut Session, tag: &str| {
             let mut password = OLD.to_owned();
             for n in 0..70 {
                 let next = format!("synthetic {tag} password {n}");
-                assert_eq!(change(s, codes, &password, &next), Ok(Rekeyed::Done));
+                assert_eq!(change(s, &password, &next), Ok(Rekeyed::Done));
                 password = next;
             }
             password
         };
-        let pa = run(&mut sa, &mut codes, "branch a");
+        let pa = run(&mut sa, "branch a");
         let keys_a = sa.keys.keys().to_vec();
         drop(sa);
         let ka = fs::read(a.key()).unwrap();
-        let mut sb = login(&b, OLD, &mut codes).unwrap();
-        let pb = run(&mut sb, &mut codes, "branch b");
+        let mut sb = login(&b, OLD).unwrap();
+        let pb = run(&mut sb, "branch b");
         let keys_b = sb.keys.keys().to_vec();
         assert_eq!((keys_a.len(), keys_b.len()), (MAX_KEYS, MAX_KEYS));
-        let adopted = take(&mut sb, &mut codes, &pb, &ka, &pa, defaults).unwrap();
+        let adopted = take(&mut sb, &pb, &ka, &pa, defaults).unwrap();
         assert_eq!(adopted.state.epoch, 71);
         let keys = sb.keys.keys().to_vec();
         assert_eq!(keys.len(), MAX_KEYS);
@@ -2405,8 +2419,8 @@ mod tests {
         let ku = fs::read(b.key()).unwrap();
         assert_eq!(keyfile::parse(&ku).unwrap().key_ids, key_ids(&id, &keys));
         drop(sb);
-        let mut sa = login(&a, &pa, &mut codes).unwrap();
-        let adopted = take(&mut sa, &mut codes, &pa, &ku, &pa, defaults).unwrap();
+        let mut sa = login(&a, &pa).unwrap();
+        let adopted = take(&mut sa, &pa, &ku, &pa, defaults).unwrap();
         assert_eq!(adopted.state, keyfile::parse(&ku).unwrap().state());
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
@@ -2418,13 +2432,13 @@ mod tests {
     #[test]
     fn a_plan_is_bound_to_its_file_and_session() {
         let pc = Pc::new();
-        let (mut s, _codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let before = key_and_anchor(&pc);
         let bytes = other_of(&s, What::Successor);
         let elsewhere = other_of(&s, What::Union);
         let (f, g) = (file(&bytes), file(&elsewhere));
         let check = classify(&s, &bytes).unwrap();
-        let reauth = |s: &mut Session| s.reauth(OLD, Some(("", otp::now().unwrap())), None);
+        let reauth = |s: &mut Session| s.reauth(OLD, None);
         let r = reauth(&mut s).unwrap();
         let another = GatePass::NotNeeded {
             epoch: check.other.epoch,
@@ -2481,28 +2495,28 @@ mod tests {
     fn an_adopt_that_does_not_verify_or_hits_a_gap() {
         for what in [What::Successor, What::Union] {
             let pc = Pc::new();
-            let (mut s, mut codes) = setup(&pc, true, false, false);
+            let mut s = setup(&pc, true, false, false);
             let other = other_of(&s, what);
             let before = super::super::tests::files(&pc);
             for which in ["K", "V"] {
                 CORRUPT.with(|c| c.set(Some(which)));
-                let taken = take(&mut s, &mut codes, OLD, &other, NEW, defaults);
+                let taken = take(&mut s, OLD, &other, NEW, defaults);
                 assert_eq!(taken.err(), Some(NOT_VERIFIED), "{what:?} {which}");
                 assert_eq!(super::super::tests::files(&pc), before, "{what:?} {which}");
             }
             CRASH.with(|c| c.set(Some("S1.gap")));
-            let taken = take(&mut s, &mut codes, OLD, &other, NEW, defaults);
+            let taken = take(&mut s, OLD, &other, NEW, defaults);
             assert_eq!(taken.err(), Some(GAP_NOT_CHANGED), "{what:?}");
             assert_eq!(s.put(None, entry("lost")), Err(GAP_KEPT));
             drop(s);
-            let mut s = login(&pc, OLD, &mut codes).unwrap();
+            let mut s = login(&pc, OLD).unwrap();
             assert!(s.take_recovery().vault);
             assert_eq!(notices(&mut s), [], "{what:?}");
             CRASH.with(|c| c.set(Some("S3.gap")));
-            let adopted = take(&mut s, &mut codes, OLD, &other, NEW, defaults).unwrap();
+            let adopted = take(&mut s, OLD, &other, NEW, defaults).unwrap();
             assert!(adopted.gap_kept && s.gap_kept(), "{what:?}");
             drop(s);
-            let mut s = login(&pc, NEW, &mut codes).unwrap();
+            let mut s = login(&pc, NEW).unwrap();
             assert!(s.take_recovery().vault);
             assert_eq!(notices(&mut s), [], "{what:?}");
             assert_eq!(s.key_state(), adopted.state);
@@ -2519,7 +2533,7 @@ mod tests {
     #[test]
     fn an_adopt_runs_while_a_promotion_waits_in_memory() {
         let pc = Pc::new();
-        let (mut s, mut codes) = setup(&pc, true, false, false);
+        let mut s = setup(&pc, true, false, false);
         let id = s.id;
         let lock = Rc::new(RefCell::new(None));
         let hold = lock.clone();
@@ -2527,7 +2541,7 @@ mod tests {
         set_before("S3", move || {
             *hold.borrow_mut() = Some(anchor::hold_lock(&dir))
         });
-        assert_eq!(change(&mut s, &mut codes, OLD, NEW), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, OLD, NEW), Ok(Rekeyed::Done));
         assert_eq!(s.take_key_notices(), [KeyNotice::SidecarFailed]);
         assert_eq!(
             pc.lines(&id).pending.unwrap().state.key_state(),
@@ -2535,7 +2549,7 @@ mod tests {
         );
         drop(lock.borrow_mut().take());
         let other = other_of(&s, What::Successor);
-        let adopted = take(&mut s, &mut codes, NEW, &other, NEW, defaults).unwrap();
+        let adopted = take(&mut s, NEW, &other, NEW, defaults).unwrap();
         let lines = pc.lines(&id);
         assert!(lines.pending.is_none());
         assert_eq!(lines.vault.unwrap().state.key_state(), adopted.state);
@@ -2546,12 +2560,12 @@ mod tests {
         set_before("S3", move || {
             *hold.borrow_mut() = Some(anchor::hold_lock(&dir))
         });
-        assert_eq!(change(&mut s, &mut codes, NEW, THIRD), Ok(Rekeyed::Done));
+        assert_eq!(change(&mut s, NEW, THIRD), Ok(Rekeyed::Done));
         drop(s);
-        let mut s = login(&pc, THIRD, &mut codes).unwrap();
+        let mut s = login(&pc, THIRD).unwrap();
         assert!(s.take_key_notices().contains(&KeyNotice::SidecarFailed));
         let other = other_of(&s, What::Union);
-        let adopted = take(&mut s, &mut codes, THIRD, &other, NEW, defaults).unwrap();
+        let adopted = take(&mut s, THIRD, &other, NEW, defaults).unwrap();
         assert_eq!(s.key_state(), adopted.state);
         drop(lock.borrow_mut().take());
         let _ = s.poll_sync();
@@ -2559,7 +2573,7 @@ mod tests {
         assert!(lines.pending.is_none());
         assert_eq!(lines.vault.unwrap().state.key_state(), adopted.state);
         drop(s);
-        let mut s = login(&pc, NEW, &mut codes).unwrap();
+        let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }

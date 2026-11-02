@@ -13,12 +13,11 @@ use goyo_vault::fido::{
     AssertRequest, Authenticator, CancelToken, FidoError, Touch, check_assertion,
 };
 use goyo_vault::{
-    crypto, otp, syncfile,
+    crypto, syncfile,
     vault::{
         self, AdoptClass, Entry, Format, GAP_KEPT, GatePass, KeyInfo, KeyNotice, LEFTOVER_TEMP,
-        OtpSetup, Prepared, Provision, Recovery, Session, Source, SyncBadge, SyncNotice,
-        VaultClass, key_candidate, key_info, keyfile::KeyFile, leftover_temp, vault_candidates,
-        vault_tag,
+        Prepared, Provision, Recovery, Session, Source, SyncBadge, SyncNotice, VaultClass,
+        key_candidate, key_info, keyfile::KeyFile, leftover_temp, vault_candidates,
     },
 };
 use i18n::{fill, tr};
@@ -84,7 +83,6 @@ const VPATH: i32 = 201;
 const KPATH: i32 = 202;
 const PASS: i32 = 203;
 const CONFIRM: i32 = 204;
-const OTP: i32 = 205;
 const DEST: i32 = 206;
 const CURRENT_PASS: i32 = 207;
 const LIST: i32 = 210;
@@ -153,12 +151,6 @@ const AUTO_LOCK: i32 = 139;
 const AUTO_LOCK_LAST: i32 = AUTO_LOCK + AUTO_LOCKS.len() as i32 - 1;
 /// Bottom right of the vault screen, next to its "자동 잠금" label.
 const AUTO_LOCK_SWITCH: (i32, i32, i32, i32) = (634, 640, 202, 36);
-/// The OTP backup QR closes after this long without use, whatever the
-/// auto-lock setting; scanning it takes longer than the shortest setting.
-const OTP_QR_IDLE: Duration = Duration::from_secs(120);
-const OTP_SETUP: i32 = 135;
-/// Create: turns the optional OTP on or off.
-const OTP_TOGGLE: i32 = 136;
 /// Language switch next to the theme switch.
 const LANG_KO: i32 = 137;
 const LANG_EN: i32 = 138;
@@ -203,8 +195,8 @@ const LANG_SWITCH: (i32, i32, i32, i32) = (554, 21, 146, 36);
 const PILL_RIGHT: i32 = LANG_SWITCH.0 - 108;
 /// The sync folder is polled on every 4th timer tick (2 s).
 const SYNC_TICKS: u32 = 4;
-/// Create with the OTP off: the painted card that recommends it.
-const CREATE_OTP_CARD: (i32, i32, i32, i32) = (AX, 374, AW, 124);
+/// Top of the painted note card on Password.
+const PASSWORD_CARD_Y: i32 = 384;
 /// Divider above the "새 금고 만들기 · 백업 파일로 되살리기" links on Login.
 const LOGIN_LINKS: (i32, i32, i32, i32) = (AX, 500, AW, 1);
 #[derive(Clone, Copy, PartialEq)]
@@ -217,8 +209,6 @@ enum Screen {
     Vault,
     Edit,
     Password,
-    /// The OTP QR again, for a spare phone or app (vault open, password asked).
-    OtpBackup,
     /// "열쇠 관리": the password change, another PC's key file, the key
     /// backup and code, and what holds key changes (spec §9.1).
     Keys,
@@ -258,9 +248,6 @@ struct App {
     screen: Screen,
     session: Option<Session>,
     provision: Option<Provision>,
-    /// Create: the new vault will also ask for the phone's OTP. Off by
-    /// default; the provision keeps one OTP secret either way.
-    create_otp: bool,
     selected: Option<usize>,
     editing: Option<usize>,
     /// Folder of the executable; default home of new and restored vaults.
@@ -299,8 +286,6 @@ struct App {
     /// Login was opened from Welcome ("금고 파일 열기"), so it
     /// offers a way back instead of being the home screen.
     from_welcome: bool,
-    /// OTP secret shown on OtpBackup after the password check.
-    otp_setup: Option<OtpSetup>,
     /// When another app took focus while a vault was open.
     away_since: Option<Instant>,
     /// Another app is in front (see deactivated/activated).
@@ -354,7 +339,6 @@ struct Flow {
     /// screen, so with the serial this names the session.
     session: bool,
     pass: Zeroizing<String>,
-    otp: Zeroizing<String>,
     /// Password: the current password.
     current: Zeroizing<String>,
     /// Login: what a failed authentication says instead of the AUTH text
@@ -370,9 +354,6 @@ struct Flow {
     /// Login: the key file and the vault file's precheck (spec §5.1). Phase
     /// 3 opens exactly the key file read here.
     prepared: Option<Prepared>,
-    /// When the OTP code was taken: a question in between must not let it
-    /// expire (spec §5.2 step 6).
-    otp_time: u64,
     /// Login: the user agreed to open this older-key vault file (S-OLDER).
     confirmed_older: Option<[u8; 32]>,
     /// Login with a key file that has security keys: the touch of the
@@ -587,7 +568,7 @@ const RESTORE_NOTE: &str = "'금고 백업'으로 만든 파일을 새 금고 �
 const KEY_MISSING_NOTE: &str = "열쇠 파일이 이 PC에 없습니다. 다른 PC에서 가져온 금고라면 그 PC의 열쇠 파일을 USB로 가져와 이 금고 옆에 {name} 이름으로 두세요.";
 /// The same for a key file kept elsewhere (a USB stick not plugged in).
 const KEY_ELSEWHERE_NOTE: &str = "열쇠 파일 {name}이(가) 보이지 않습니다. USB 등에 두었다면 꽂은 뒤 여세요. 다른 곳에 있으면 '찾기'로 고르세요.";
-const LOGIN_PLAIN_NOTE: &str = "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠·OTP를 우회하는 복구 기능은 없습니다.";
+const LOGIN_PLAIN_NOTE: &str = "열쇠 파일은 비밀번호로 암호화되어 있습니다. 금고와 분리 보관하면 보호가 강화됩니다.\r\n분실한 비밀번호·열쇠를 우회하는 복구 기능은 없습니다.";
 /// S-OLDER (spec §5.1): asked before a login opens a vault file saved
 /// under an older key of the key file, default No.
 const OLDER_QUESTION: &str = "이 금고 파일은 이 열쇠 파일의 예전 열쇠로 저장되어 있습니다.\n다른 PC에서 열쇠를 바꾼 뒤 이 PC에서 처음 여는 것이라면 정상입니다(같은 열쇠 파일을 함께 쓰거나 새 열쇠 파일을 옮겨 온 경우).\n그런 일이 없었다면 예전 열쇠를 가진 누군가가 금고 파일을 바꿔 넣었을 수 있습니다. 그 경우 '아니요'를 누르고 백업이나 서버 기록을 확인하세요.\n이 파일을 열고 새 열쇠로 다시 저장할까요?";
@@ -678,7 +659,6 @@ impl App {
             screen: Screen::Login,
             session: None,
             provision: None,
-            create_otp: false,
             selected: None,
             editing: None,
             vault_path: base.join("vault.goyo"),
@@ -702,7 +682,6 @@ impl App {
             auth_dirty: false,
             input_failed: false,
             from_welcome: false,
-            otp_setup: None,
             away_since: None,
             inactive: false,
             shown: [false; 3],
@@ -889,8 +868,6 @@ impl App {
                 0xc5,
                 if matches!(id, PASS | CONFIRM | CURRENT_PASS) {
                     1024
-                } else if id == OTP {
-                    6
                 } else if id == TITLE {
                     256
                 } else if id == KIND {
@@ -972,24 +949,6 @@ impl App {
             }
         }
     }
-    /// Login and Restore show the OTP field only for a key file that uses
-    /// one. When the chosen key file needs the other layout, rebuilds the
-    /// form keeping the typed password. True if the OTP field was added.
-    fn fit_otp_field(&mut self) -> bool {
-        #[cfg(feature = "security-key")]
-        let fetched = self.screen == Screen::Fetched;
-        #[cfg(not(feature = "security-key"))]
-        let fetched = false;
-        if !matches!(self.screen, Screen::Login | Screen::Restore) && !fetched {
-            return false;
-        }
-        let wanted = self.key_otp();
-        if wanted == (self.handle(OTP) != 0) {
-            return false;
-        }
-        self.rebuild_keeping(&[PASS]);
-        wanted
-    }
     /// What the key file an unlock reads states before any password: the
     /// chosen one, or the temp file an interrupted save left in its place.
     fn unlock_key_info(&self) -> Option<KeyInfo> {
@@ -1006,10 +965,6 @@ impl App {
         }
         let key = key_candidate(vault, &self.key_path).unwrap_or_else(|| self.key_path.clone());
         key_info(&key)
-    }
-    /// Whether the key file an unlock reads asks for an OTP code.
-    fn key_otp(&self) -> bool {
-        self.unlock_key_info().is_some_and(|i| i.otp)
     }
     /// Masks every password field, whatever its recorded state, and never
     /// moves focus, so it is safe while another app is being activated.
@@ -1312,44 +1267,6 @@ impl App {
             Screen::Welcome
         }
     }
-    /// OTP card: QR on the left, instructions and key on the right.
-    fn enroll(&self) -> (i32, i32, i32, i32) {
-        let y = if self.screen == Screen::OtpBackup {
-            150
-        } else {
-            374
-        };
-        (AX, y, AW, 226)
-    }
-    /// Labels of the OTP card; the frame, QR and key are painted.
-    fn enrollment_labels(&mut self, tag: &str, footer: &str) {
-        let strong = self.font_of(|t| t.strong());
-        let (cx, cy, cw, _) = self.enroll();
-        let (rx, rw) = (cx + 180, cw - 196);
-        // Create keeps room for the "OTP 끄기" button at the top right.
-        let head = if self.screen == Screen::Create {
-            rw - 112
-        } else {
-            rw
-        };
-        self.text(
-            0,
-            &fill("휴대폰 OTP 등록 · {tag}", &[&tag]),
-            (rx, cy + 14, head, 22),
-            strong,
-            TONE_TEXT,
-            0,
-        );
-        self.note(
-            "Google Authenticator → + → QR 코드 스캔\r\nOTP 앱 안의 스캐너로만 찍고, 사진으로 남기지 마세요.",
-            rx,
-            cy + 40,
-            rw,
-            40,
-        );
-        self.note("스캔이 안 되면 '설정 키 입력'에:", rx, cy + 84, rw, 18);
-        self.note(footer, cx + 16, cy + 172, cw - 32, 40);
-    }
     /// Suggests file names that do not exist yet for Create and Restore.
     fn default_paths(&mut self) {
         let dir = self.home_dir.clone();
@@ -1406,7 +1323,6 @@ impl App {
             Screen::Vault => self.build_vault(),
             Screen::Edit => self.build_edit(),
             Screen::Password => self.build_password(),
-            Screen::OtpBackup => self.build_otp_backup(),
             Screen::Keys => self.build_keys(),
             Screen::Adopt => self.build_adopt(),
             #[cfg(feature = "security-key")]
@@ -1507,7 +1423,7 @@ impl App {
         i18n::set_english(english);
         save_language(english);
         self.status_tone = unsafe { GetWindowLongPtrW(self.handle(STATUS), -21) };
-        let typed: Vec<i32> = [PASS, CONFIRM, OTP, CURRENT_PASS, TITLE, KIND, SECRET, NOTES]
+        let typed: Vec<i32> = [PASS, CONFIRM, CURRENT_PASS, TITLE, KIND, SECRET, NOTES]
             .into_iter()
             .filter(|&id| self.handle(id) != 0)
             .collect();
@@ -1600,81 +1516,10 @@ impl App {
             let half = (AW - 16) / 2;
             self.password_field(PASS, "비밀번호 · 12자 이상", AX, y, half);
             self.password_field(CONFIRM, "비밀번호 확인", AX + half + 16, y, half);
-            if self.create_otp {
-                // Enrollment card: QR, setup key and frame are painted.
-                let tag = self.provision.as_ref().map(|p| p.tag()).unwrap_or_default();
-                self.enrollment_labels(
-                    &tag,
-                    "휴대폰을 잃으면 금고를 열 수 없으니 예비 기기에도 등록해 두세요.\r\n금고를 연 뒤 아래쪽 'OTP 백업'에서 이 QR을 다시 볼 수 있습니다.",
-                );
-                let (cx, cy, cw, _) = self.enroll();
-                self.button(
-                    OTP_TOGGLE,
-                    "OTP 끄기",
-                    cx + cw - 104,
-                    cy + 10,
-                    88,
-                    30,
-                    theme::GHOST,
-                );
-                self.field(OTP, "앱에 표시된 6자리", "", AX, 616, 180, true);
-                self.button(
-                    SUBMIT,
-                    "등록 확인 · 금고 만들기",
-                    AX + 196,
-                    638,
-                    AW - 196,
-                    40,
-                    theme::PRIMARY,
-                );
-            } else {
-                // Off by default but recommended: the card's frame, heading
-                // and "권장" badge are painted (see draw_otp_offer).
-                let (cx, cy, cw, ch) = CREATE_OTP_CARD;
-                self.button(
-                    OTP_TOGGLE,
-                    "OTP 켜기",
-                    cx + cw - 136,
-                    cy + 14,
-                    120,
-                    36,
-                    theme::ACCENT,
-                );
-                self.note(
-                    "켜 두면 비밀번호가 새어도 휴대폰 없이는 이 앱으로 금고를 열 수 없습니다.\r\n금고를 열 때마다 휴대폰 OTP 앱의 6자리를 함께 입력합니다.\r\n금고·열쇠 파일을 통째로 복사해 가는 것은 막지 못하니, 열쇠 파일은 따로 두세요.",
-                    cx + 20,
-                    cy + 54,
-                    cw - 40,
-                    60,
-                );
-                self.button(
-                    SUBMIT,
-                    "OTP 없이 금고 만들기",
-                    AX,
-                    cy + ch + 20,
-                    AW,
-                    46,
-                    theme::PRIMARY,
-                );
-            }
+            self.button(SUBMIT, "금고 만들기", AX, y + 88, AW, 46, theme::PRIMARY);
         } else {
             self.refresh_key_note();
-            // Only a key file that uses an OTP gets the OTP field; a key
-            // chosen later is handled by fit_otp_field.
-            let otp = self.key_otp();
-            self.password_field(PASS, "비밀번호", AX, y, if otp { AW - 196 } else { AW });
-            if otp {
-                let source = if restore {
-                    &self.backup_path
-                } else {
-                    &self.vault_path
-                };
-                let caption = match vault_tag(source) {
-                    Some(tag) => fill("OTP 6자리 · {tag}", &[&tag]),
-                    None => "Google OTP 6자리".into(),
-                };
-                self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
-            }
+            self.password_field(PASS, "비밀번호", AX, y, AW);
             y += 88;
             let submit = if restore {
                 "확인 · 새 파일로 복원"
@@ -1811,9 +1656,6 @@ impl App {
         self.button(BACKUP, "금고 백업", 40, 642, 112, 34, theme::SECONDARY);
         self.button(KEYBACKUP, "열쇠 백업", 160, 642, 104, 34, theme::SECONDARY);
         self.button(CHANGE, "열쇠 관리", 272, 642, 148, 34, theme::SECONDARY);
-        if self.session.as_ref().is_some_and(Session::uses_otp) {
-            self.button(OTP_SETUP, "OTP 백업", 428, 642, 104, 34, theme::SECONDARY);
-        }
         self.text(0, "자동 잠금", (536, 650, 90, 20), small, TONE_MUTED, 2);
         let (x, y, _, _) = AUTO_LOCK_SWITCH;
         for (i, (name, ..)) in AUTO_LOCKS.iter().enumerate() {
@@ -1900,28 +1742,11 @@ impl App {
             SetFocus(self.handle(TITLE));
         }
     }
-    /// Top of the painted note card on Password, below the OTP field if any.
-    fn password_card_y(&self) -> i32 {
-        if self.session.as_ref().is_some_and(Session::uses_otp) {
-            456
-        } else {
-            384
-        }
-    }
     fn build_password(&mut self) {
         let title = self.font_of(|t| t.title());
         self.text(0, "비밀번호 변경", (AX, 80, AW, 34), title, TONE_TEXT, 0);
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
         self.note(
-            if otp.is_some() {
-                "현재 비밀번호와 새 OTP 번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다."
-            } else {
-                "현재 비밀번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다."
-            },
+            "현재 비밀번호를 확인한 뒤 새 열쇠로 금고를 다시 암호화합니다.",
             AX,
             118,
             AW,
@@ -1930,18 +1755,7 @@ impl App {
         self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 160, AW);
         self.password_field(PASS, "새 비밀번호 · 12자 이상", AX, 232, AW);
         self.password_field(CONFIRM, "새 비밀번호 확인", AX, 304, AW);
-        if let Some(tag) = otp {
-            self.field(
-                OTP,
-                &fill("새 OTP 6자리 · {tag}", &[&tag]),
-                "",
-                AX,
-                376,
-                180,
-                true,
-            );
-        }
-        let y = self.password_card_y();
+        let y = PASSWORD_CARD_Y;
         self.note(
             "새 데이터 키로 금고를 다시 암호화하고 새 열쇠 파일을 씁니다. 예전 열쇠 파일과 예전 비밀번호로는 앞으로 저장하는 내용을 열 수 없습니다. 바꾼 뒤 새 열쇠 파일을 백업하세요.",
             AX + 18,
@@ -2064,14 +1878,14 @@ impl App {
                     self.button(id, label, AX + AW - 400, 516, 400, 40, theme::PRIMARY);
                     focus = self.handle(id);
                     // Gate-pending mode also offers the per-vault forget,
-                    // whose Reauth needs the password (and OTP).
+                    // whose Reauth needs the password.
                     if id == keys_ui::KEY_ACCEPT {
                         self.build_forget_held();
                     }
                     None
                 }
                 // [서버의 새 열쇠 파일 받기…], whose Reauth reads the
-                // password (and OTP), and under it the head override while
+                // password, and under it the head override while
                 // a server copy halts sync.
                 Some((id, label)) if id == keys_ui::KEY_SERVER_TAKE => {
                     self.reauth_row(516);
@@ -2093,7 +1907,7 @@ impl App {
                 other => other,
             };
             if let Some((id, label)) = action {
-                // The button's flow checks the password (and OTP) again.
+                // The button's flow checks the password again.
                 self.reauth_row(516);
                 self.button(id, label, AX + AW - 400, 592, 400, 40, theme::DANGER_GHOST);
                 focus = self.handle(CURRENT_PASS);
@@ -2103,20 +1917,10 @@ impl App {
             SetFocus(focus);
         }
     }
-    /// The Keys screen's current password (and new OTP code) at `y`, which
-    /// a hold's button reads for its re-authentication.
+    /// The Keys screen's current password at `y`, which a hold's button
+    /// reads for its re-authentication.
     fn reauth_row(&mut self, y: i32) {
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
-        let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, y, w);
-        if let Some(tag) = otp {
-            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-            self.field(OTP, &caption, "", AX + AW - 180, y, 180, true);
-        }
+        self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, y, AW);
     }
     /// Where the edit screen goes back to (the security-key build's goes
     /// back to the review it was opened from).
@@ -2186,7 +1990,7 @@ impl App {
             }
             self.status_tone = GetWindowLongPtrW(self.handle(STATUS), -21);
         }
-        self.rebuild_keeping(&[CURRENT_PASS, OTP, PASS, CONFIRM]);
+        self.rebuild_keeping(&[CURRENT_PASS, PASS, CONFIRM]);
         unsafe {
             #[cfg(feature = "security-key")]
             if top > 0 {
@@ -2202,7 +2006,7 @@ impl App {
         }
     }
     /// "새 열쇠 파일 받기" (spec §9.1): the chosen file, read-only, its
-    /// revision, and this PC's password (and OTP) for [열기], which runs the
+    /// revision, and this PC's password for [열기], which runs the
     /// whole adopt as one flow (see adopt_flow).
     fn build_adopt(&mut self) {
         let (title, body) = (self.font_of(|t| t.title()), self.font_of(|t| t.body()));
@@ -2236,17 +2040,7 @@ impl App {
         };
         let small = self.font_of(|t| t.small());
         self.text(0, &info, (AX, 230, AW, 20), small, TONE_MUTED, 0);
-        let otp = self
-            .session
-            .as_ref()
-            .filter(|s| s.uses_otp())
-            .map(|s| s.tag());
-        let w = if otp.is_some() { AW - 196 } else { AW };
-        self.password_field(CURRENT_PASS, REAUTH_LABEL_ADOPT, AX, 268, w);
-        if let Some(tag) = otp {
-            let caption = fill("새 OTP 6자리 · {tag}", &[&tag]);
-            self.field(OTP, &caption, "", AX + AW - 180, 268, 180, true);
-        }
+        self.password_field(CURRENT_PASS, REAUTH_LABEL_ADOPT, AX, 268, AW);
         self.button(SUBMIT, "열기", AX, 356, AW, 46, theme::PRIMARY);
         self.note(
             "받을 열쇠 파일의 비밀번호가 이 PC와 다르면 열 때 그 비밀번호를 묻습니다.",
@@ -2257,67 +2051,6 @@ impl App {
         );
         unsafe {
             SetFocus(self.handle(CURRENT_PASS));
-        }
-    }
-    /// Shows the OTP QR again so a spare phone or app can be enrolled while
-    /// the current one still works. Asks for the password first.
-    fn build_otp_backup(&mut self) {
-        let title = self.font_of(|t| t.title());
-        self.text(0, "OTP 백업", (AX, 80, AW, 34), title, TONE_TEXT, 0);
-        if self.otp_setup.is_some() {
-            self.note(
-                "예비 휴대폰이나 다른 OTP 앱에 등록하면 지금 휴대폰과 같은 번호가 나옵니다.",
-                AX,
-                118,
-                AW,
-                22,
-            );
-            let tag = self.otp_setup.as_ref().map(|s| s.tag()).unwrap_or_default();
-            self.enrollment_labels(
-                &tag,
-                "등록 키를 종이에 적어 두어도 됩니다. 사진으로는 남기지 마세요.\r\n다른 앱으로 전환하면 이 QR은 바로 닫힙니다.",
-            );
-            self.button(CANCEL, "닫기", AX + AW - 160, 400, 160, 42, theme::PRIMARY);
-            unsafe {
-                SetFocus(self.handle(CANCEL));
-            }
-        } else {
-            self.note(
-                "휴대폰을 잃어도 금고를 열 수 있도록, 지금 쓰는 OTP를 예비 휴대폰이나\r\n다른 OTP 앱에도 등록해 둡니다. 휴대폰을 잃은 뒤에는 이 화면을 열 수 없습니다.",
-                AX,
-                118,
-                AW,
-                40,
-            );
-            self.password_field(CURRENT_PASS, REAUTH_LABEL, AX, 172, AW);
-            self.note(
-                "OTP 등록 정보는 두 번째 잠금 수단이라 금고가 열려 있어도 비밀번호를 다시 확인합니다.",
-                AX,
-                244,
-                AW,
-                22,
-            );
-            self.button(
-                CANCEL,
-                "취소",
-                AX + AW - 268,
-                290,
-                100,
-                42,
-                theme::SECONDARY,
-            );
-            self.button(
-                SUBMIT,
-                "QR 보기",
-                AX + AW - 160,
-                290,
-                160,
-                42,
-                theme::PRIMARY,
-            );
-            unsafe {
-                SetFocus(self.handle(CURRENT_PASS));
-            }
         }
     }
     /// Shows the detail-card controls that apply to the current selection.
@@ -2385,18 +2118,13 @@ impl App {
         }
     }
     /// Another app is in front. Nothing revealed stays on screen while the
-    /// user is elsewhere: passwords shown with the eye are masked and the new
-    /// vault's OTP QR is hidden; with a vault open the 15-second view and copy
-    /// permission also end and the OTP backup QR closes. Pre-unlock forms are
-    /// kept. An open vault locks per the auto-lock setting (see timer). Runs on
+    /// user is elsewhere: passwords shown with the eye are masked; with a
+    /// vault open the 15-second view and copy permission also end.
+    /// Pre-unlock forms are kept. An open vault locks per the auto-lock setting (see timer). Runs on
     /// WM_ACTIVATEAPP and from the timer, which also catches missed messages.
     fn deactivated(&mut self) {
         self.mask_passwords();
-        if !std::mem::replace(&mut self.inactive, true) && self.provision.is_some() {
-            unsafe {
-                InvalidateRect(self.hwnd, null(), 0);
-            }
-        }
+        self.inactive = true;
         if self.session.is_none() {
             return;
         }
@@ -2407,11 +2135,6 @@ impl App {
             unsafe {
                 InvalidateRect(self.hwnd, null(), 0);
             }
-        }
-        if self.otp_setup.take().is_some() {
-            self.show(Screen::Vault);
-            self.status = line("다른 앱으로 전환되어 OTP 화면을 닫았습니다.");
-            self.build();
         }
     }
     /// Back in front. Trusts only the real foreground window, so a
@@ -2470,7 +2193,6 @@ impl App {
         };
         self.session = None;
         self.provision = None;
-        self.otp_setup = None;
         self.adopt_source = None;
         // A flow's input dialog goes too, with what was typed into it.
         cancel_input();
@@ -2497,7 +2219,7 @@ impl App {
         self.status = line(why);
         self.build();
     }
-    /// Drops the keys, the OTP secret and any reveal or copy permission
+    /// Drops the keys and any reveal or copy permission
     /// without touching the controls; a pending lock rebuilds the screen
     /// moments later (see window_proc).
     fn scrub(&mut self) {
@@ -2506,7 +2228,6 @@ impl App {
         self.serial += 1;
         self.session = None;
         self.provision = None;
-        self.otp_setup = None;
         self.adopt_source = None;
         cancel_input();
         self.reveal_until = None;
@@ -2566,37 +2287,6 @@ impl App {
         }
         self.paths()?;
         let pass = self.read(PASS)?;
-        let otp = self.read(OTP)?;
-        if self.screen == Screen::OtpBackup {
-            if self.otp_setup.is_some() {
-                return Ok(());
-            }
-            let current = self.read(CURRENT_PASS)?;
-            self.status("비밀번호 확인 중입니다…");
-            unsafe {
-                UpdateWindow(self.hwnd);
-            }
-            let result = self
-                .session
-                .as_ref()
-                .ok_or("먼저 금고를 열어주세요.")?
-                .otp_setup(&current);
-            return match result {
-                Ok(setup) => {
-                    self.failed = 0;
-                    self.otp_setup = Some(setup);
-                    self.status = line("예비 기기에 등록한 뒤 '닫기'를 누르세요.");
-                    self.build();
-                    Ok(())
-                }
-                Err(_) => {
-                    self.failed = self.failed.saturating_add(1);
-                    self.retry =
-                        Instant::now() + Duration::from_secs((1u64 << self.failed.min(6)).min(60));
-                    Err("비밀번호가 맞지 않습니다.")
-                }
-            };
-        }
         self.check_files()?;
         if self.screen == Screen::Create && pass.as_str() != self.read(CONFIRM)?.as_str() {
             return Err("비밀번호 확인이 일치하지 않습니다.");
@@ -2608,7 +2298,6 @@ impl App {
             Screen::Create => None,
             _ => Some(vault::prepare_restore(&self.backup_path, &self.key_path)?),
         };
-        let otp_time = otp::now()?;
         let auth_failure = prepared.as_ref().and_then(Prepared::auth_failure);
         self.working();
         unsafe {
@@ -2618,18 +2307,13 @@ impl App {
         let result = match prepared {
             None => {
                 goyo_vault::vault::password_policy(&pass)?;
-                // Verify before consuming the provisioning object; a typo must
-                // not replace the enrollment secret already entered on the phone.
                 let provision = self
                     .provision
                     .as_ref()
                     .ok_or("새 금고 등록을 다시 시작하세요.")?;
-                let code = self.create_otp.then_some(otp.as_str());
-                provision.finish(&self.new_vault_path, &self.new_key_path, &pass, code)
+                provision.finish(&self.new_vault_path, &self.new_key_path, &pass)
             }
-            Some(prepared) => {
-                Session::restore_from(prepared, &self.dest_path, &pass, &otp, otp_time)
-            }
+            Some(prepared) => Session::restore_from(prepared, &self.dest_path, &pass),
         };
         self.opened(screen, result, auth_failure)
     }
@@ -2659,7 +2343,6 @@ impl App {
         self.enter(id)?;
         self.paths()?;
         let pass = self.read(PASS)?;
-        let otp = self.read(OTP)?;
         let mut current = Zeroizing::new(String::new());
         let mut auth_failure = None;
         let (mut question, mut gate) = (None, None);
@@ -2677,7 +2360,7 @@ impl App {
                 return Err("비밀번호 확인이 일치하지 않습니다.");
             }
             current = self.read(CURRENT_PASS)?;
-            // Before the code is spent on the re-authentication.
+            // Before the slow re-authentication.
             goyo_vault::vault::password_policy(&pass)?;
             if pass.as_str() == current.as_str() {
                 return Err(vault::SAMEPASS);
@@ -2704,14 +2387,12 @@ impl App {
             serial: self.serial,
             session: self.session.is_some(),
             pass,
-            otp,
             current,
             auth_failure,
             question,
             gate,
             answered: None,
             prepared,
-            otp_time: otp::now()?,
             confirmed_older: None,
             #[cfg(feature = "security-key")]
             touch: None,
@@ -2741,8 +2422,6 @@ impl App {
             let Flow {
                 prepared,
                 pass,
-                otp,
-                otp_time,
                 confirmed_older,
                 auth_failure,
                 #[cfg(feature = "security-key")]
@@ -2752,8 +2431,7 @@ impl App {
             let prepared = prepared.ok_or("화면 작업 중입니다.")?;
             #[cfg(feature = "security-key")]
             if let Some(touch) = touch {
-                let result =
-                    Session::login_proved(prepared, &pass, &otp, otp_time, confirmed_older, &touch);
+                let result = Session::login_proved(prepared, &pass, confirmed_older, &touch);
                 out.touch = Some(touch);
                 let result = match result {
                     Ok((s, proof)) => {
@@ -2769,16 +2447,16 @@ impl App {
                     .opened(Screen::Login, result, auth_failure)
                     .map(|_| false);
             }
-            let result = Session::login(prepared, &pass, &otp, otp_time, confirmed_older);
+            let result = Session::login(prepared, &pass, confirmed_older);
             return self
                 .opened(Screen::Login, result, auth_failure)
                 .map(|_| false);
         }
         // The password change (spec §5.5): a re-authentication with the
-        // current password and the OTP code, then the key change itself,
-        // past the gate the user answered and no other. A gate that came up
-        // since was asked in between (gate_now): one that still differs is
-        // refused before the code is spent.
+        // current password, then the key change itself, past the gate the
+        // user answered and no other. A gate that came up since was asked in
+        // between (gate_now): one that still differs is refused before the
+        // re-authentication.
         let serial = self.serial;
         let s = self.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
         let gate = s.password_change()?;
@@ -2786,19 +2464,17 @@ impl App {
             return Err(gate.question());
         }
         let override_gate = gate.is_some();
-        let result = s
-            .reauth(&flow.current, Some((&flow.otp, flow.otp_time)), None)
-            .and_then(|mut r| {
-                r.app_serial = serial;
-                let change = vault::Change::Password(flow.pass.clone());
-                s.rekey(
-                    r,
-                    Vec::new(),
-                    change,
-                    vault::Consent::default(),
-                    override_gate,
-                )
-            });
+        let result = s.reauth(&flow.current, None).and_then(|mut r| {
+            r.app_serial = serial;
+            let change = vault::Change::Password(flow.pass.clone());
+            s.rekey(
+                r,
+                Vec::new(),
+                change,
+                vault::Consent::default(),
+                override_gate,
+            )
+        });
         let notices: Vec<(Zeroizing<String>, isize)> =
             s.take_key_notices().iter().map(key_line).collect();
         let code = s.key_code();
@@ -2839,7 +2515,7 @@ impl App {
     /// The gate a password change meets now, when it is not the one the
     /// user answered (spec §7.5): a poll that halted sync, or a helper that
     /// stopped, while a question was open. Asked before the re-
-    /// authentication spends the OTP code. None for a flow that no longer
+    /// authentication. None for a flow that no longer
     /// stands (finish then does nothing) or with no other gate; a hold
     /// that came up is its refusal.
     fn gate_now(&mut self, flow: &Flow) -> crypto::Result<Option<vault::Gate>> {
@@ -2923,16 +2599,11 @@ impl App {
             _ => {}
         }
         // A key file this build cannot open is refused first, also one typed
-        // in by path, so no OTP code is asked for it (spec §4.7, §5.1).
+        // in by path (spec §4.7, §5.1).
         if matches!(self.screen, Screen::Login | Screen::Restore)
             && let Some(refusal) = self.unlock_key_info().and_then(|i| i.refusal())
         {
             return Err(refusal);
-        }
-        // A key file typed in by path may be one that uses an OTP: ask for
-        // the code instead of failing the authentication.
-        if self.fit_otp_field() {
-            return Err("이 열쇠 파일은 OTP를 씁니다. 휴대폰 OTP 앱의 6자리도 입력하세요.");
         }
         Ok(())
     }
@@ -2987,7 +2658,9 @@ impl App {
                     save_paths(&s.path, &self.key_path);
                 }
                 let warning = placement_warning(&s.path, &s.key_path);
-                let uses_otp = s.uses_otp();
+                // Once per PC and vault: the OTP is gone, and so is its
+                // secret at the next key change (Session::otp_note).
+                let otp_note = s.otp_note();
                 // Only opening a vault looks at its sync folder.
                 let login = screen == Screen::Login;
                 let notice = if login { s.take_unlock_notice() } else { None };
@@ -3002,18 +2675,14 @@ impl App {
                 self.sync_badge = s.badge();
                 self.session = Some(s);
                 self.provision = None;
-                self.create_otp = false;
                 self.failed = 0;
                 self.show(Screen::Vault);
-                let first = match (screen == Screen::Create, uses_otp) {
-                    (true, true) => {
-                        "새 금고를 만들었습니다. 휴대폰 분실에 대비해 아래 'OTP 백업'으로 예비 기기에도 등록해 두세요."
-                    }
-                    (true, false) => {
-                        "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요."
-                    }
-                    _ if AUTO_LOCKS[self.auto_lock].1.is_none() => UNLOCKED_NO_AUTO_LOCK,
-                    _ => UNLOCKED,
+                let first = if screen == Screen::Create {
+                    "새 금고를 만들었습니다. 아래 '열쇠 백업'으로 열쇠 파일 사본을 금고와 다른 곳에 두세요."
+                } else if AUTO_LOCKS[self.auto_lock].1.is_none() {
+                    UNLOCKED_NO_AUTO_LOCK
+                } else {
+                    UNLOCKED
                 };
                 // What the unlock took back from temp files, what it did with
                 // the vault file's key and what it found in the sync folder
@@ -3030,7 +2699,7 @@ impl App {
                 }
                 let mut lines: Vec<&str> = recovered.iter().map(|l| l.as_str()).collect();
                 lines.extend(key_notices.iter().map(|(text, _)| text.as_str()));
-                self.status = if lines.is_empty() && warning.is_none() {
+                self.status = if lines.is_empty() && warning.is_none() && !otp_note {
                     first
                 } else {
                     let mut parts = lines;
@@ -3038,6 +2707,7 @@ impl App {
                         parts.push(&first);
                     }
                     parts.extend(warning.map(Placement::message));
+                    parts.extend(otp_note.then_some(vault::OTP_REMOVED));
                     joined(&parts)
                 };
                 self.status_tone = tone;
@@ -3063,18 +2733,12 @@ impl App {
     }
     fn command(&mut self, id: i32, notify: u16) -> crypto::Result<()> {
         let id = match (id, self.screen) {
-            (1, Screen::OtpBackup) if self.otp_setup.is_some() => CANCEL,
             (
                 1,
-                Screen::Login
-                | Screen::Create
-                | Screen::Restore
-                | Screen::Password
-                | Screen::OtpBackup
-                | Screen::Adopt,
+                Screen::Login | Screen::Create | Screen::Restore | Screen::Password | Screen::Adopt,
             ) => SUBMIT,
             (1, Screen::Edit) => SAVE,
-            (2, Screen::Edit | Screen::Password | Screen::OtpBackup) => CANCEL,
+            (2, Screen::Edit | Screen::Password) => CANCEL,
             (2, Screen::Keys | Screen::Adopt) => BACK,
             #[cfg(feature = "security-key")]
             (1, Screen::Pair | Screen::LostKey | Screen::KeyRemove | Screen::Fetched) => SUBMIT,
@@ -3096,7 +2760,7 @@ impl App {
             return Err("클립보드 정리 후 종료를 기다리고 있습니다.");
         }
         self.activity = Instant::now();
-        if notify == 0x300 && matches!(id, PASS | CONFIRM | OTP | CURRENT_PASS) {
+        if notify == 0x300 && matches!(id, PASS | CONFIRM | CURRENT_PASS) {
             self.auth_dirty = true;
         }
         if notify == 0x300 && matches!(id, VPATH | KPATH) {
@@ -3164,12 +2828,9 @@ impl App {
                 check_environment(self.hwnd)?;
                 self.paths()?;
                 // Generate before switching so a failure leaves the screen as is.
-                // Back or Esc keeps it: the QR may already be on the phone, and a
-                // new one would silently make that entry useless. Lock and the
-                // idle timeout still drop it.
+                // Back or Esc keeps it; lock and the idle timeout drop it.
                 if id == CREATE && self.provision.is_none() {
                     self.provision = Some(Provision::new()?);
-                    self.create_otp = false;
                 }
                 self.copy_until = None;
                 self.reveal_until = None;
@@ -3205,7 +2866,6 @@ impl App {
             // The password change returns to Keys, where it was started,
             // and an entry opened from the review to the review.
             CANCEL => {
-                self.otp_setup = None;
                 let back = if self.screen == Screen::Password {
                     Screen::Keys
                 } else {
@@ -3213,33 +2873,6 @@ impl App {
                 };
                 self.show(back);
                 self.build();
-            }
-            OTP_SETUP => {
-                self.reset_copy();
-                self.reveal_until = None;
-                self.otp_setup = None;
-                self.show(Screen::OtpBackup);
-                self.build();
-            }
-            OTP_TOGGLE => {
-                self.create_otp = !self.create_otp;
-                self.status = line(if self.create_otp {
-                    "휴대폰 OTP 앱으로 QR을 등록하고, 앱에 표시된 6자리를 입력하세요."
-                } else {
-                    "OTP 없이 비밀번호와 열쇠 파일로만 여는 금고를 만듭니다. 이 PC를 다른 사람도 쓸 수 있다면 OTP를 켜 두세요."
-                });
-                // Same OTP secret either way, so a QR already scanned stays valid.
-                self.rebuild_keeping(&[PASS, CONFIRM]);
-                let next = if self.read(PASS)?.is_empty() {
-                    PASS
-                } else if self.create_otp {
-                    OTP
-                } else {
-                    SUBMIT
-                };
-                unsafe {
-                    SetFocus(self.handle(next));
-                }
             }
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
             LANG_KO | LANG_EN => self.set_language(id == LANG_EN),
@@ -3348,12 +2981,7 @@ impl App {
     fn allows(&self, id: i32) -> bool {
         if matches!(
             self.screen,
-            Screen::Vault
-                | Screen::Edit
-                | Screen::Password
-                | Screen::OtpBackup
-                | Screen::Keys
-                | Screen::Adopt
+            Screen::Vault | Screen::Edit | Screen::Password | Screen::Keys | Screen::Adopt
         ) && self.session.is_none()
         {
             return false;
@@ -3373,9 +3001,6 @@ impl App {
         if let Some(allowed) = self.allows_sk(id) {
             return allowed;
         }
-        if id == OTP_SETUP && !self.session.as_ref().is_some_and(Session::uses_otp) {
-            return false;
-        }
         match self.screen {
             Screen::Welcome => matches!(id, CREATE | RESTORE | OPEN),
             Screen::Login => matches!(
@@ -3390,12 +3015,10 @@ impl App {
                     | KPATH
                     | PASS
                     | PEEK_PASS
-                    | OTP
             ),
             Screen::Create => matches!(
                 id,
                 BACK | SUBMIT
-                    | OTP_TOGGLE
                     | BROWSE_V
                     | BROWSE_K
                     | VPATH
@@ -3404,7 +3027,6 @@ impl App {
                     | CONFIRM
                     | PEEK_PASS
                     | PEEK_CONFIRM
-                    | OTP
             ),
             Screen::Restore => matches!(
                 id,
@@ -3417,14 +3039,12 @@ impl App {
                     | DEST
                     | PASS
                     | PEEK_PASS
-                    | OTP
             ),
             Screen::Vault => matches!(
                 id,
                 LOCK | BACKUP
                     | KEYBACKUP
                     | CHANGE
-                    | OTP_SETUP
                     | LIST
                     | NEW
                     | EDIT
@@ -3447,11 +3067,9 @@ impl App {
                     | PEEK_PASS
                     | PEEK_CONFIRM
                     | PEEK_CURRENT
-                    | OTP
                     | SUBMIT
                     | CANCEL
             ),
-            Screen::OtpBackup => matches!(id, CURRENT_PASS | PEEK_CURRENT | SUBMIT | CANCEL),
             Screen::Keys => matches!(
                 id,
                 BACK | KEY_PASSWORD
@@ -3462,9 +3080,8 @@ impl App {
                     | PENDING_FORGET
                     | CURRENT_PASS
                     | PEEK_CURRENT
-                    | OTP
             ),
-            Screen::Adopt => matches!(id, BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT | OTP),
+            Screen::Adopt => matches!(id, BACK | SUBMIT | CURRENT_PASS | PEEK_CURRENT),
             // Decided by allows_sk.
             #[cfg(feature = "security-key")]
             Screen::Pair
@@ -3560,15 +3177,13 @@ impl App {
             }
             let idle = now.duration_since(self.activity);
             // Typed forms before a vault is open are cleared on fixed times;
-            // copying the new key onto paper or scanning a QR takes longer,
-            // and so does answering a flow's questions, which may mean
-            // reading a code on another PC (spec §9.2a). "Off" stays off.
+            // making a vault takes longer, and so does answering a flow's
+            // questions, which may mean reading a code on another PC (spec
+            // §9.2a). "Off" stays off.
             let limit = if self.provision.is_some() {
                 Some(Duration::from_secs(300))
             } else if self.session.is_none() {
                 Some(Duration::from_secs(60))
-            } else if self.otp_setup.is_some() {
-                AUTO_LOCKS[self.auto_lock].1.map(|l| l.max(OTP_QR_IDLE))
             } else {
                 AUTO_LOCKS[self.auto_lock].1
             };
@@ -3580,12 +3195,6 @@ impl App {
             if limit.is_some_and(|l| idle.max(away) >= l) {
                 self.lock("미사용 시간이 지나 자동으로 잠갔습니다.", true);
                 return;
-            }
-            if self.otp_setup.is_some() && idle >= OTP_QR_IDLE {
-                self.otp_setup = None;
-                self.show(Screen::Vault);
-                self.status = line("2분 동안 쓰지 않아 OTP 화면을 닫았습니다.");
-                self.build();
             }
         }
         // Merges wait while an entry is edited, another screen is shown or a
@@ -3770,7 +3379,7 @@ impl App {
         }
     }
     unsafe fn draw_screen(&self, dc: isize) {
-        let Some((title, small, code)) = theme::with(|t| (t.title(), t.small(), t.code)) else {
+        let Some((title, small)) = theme::with(|t| (t.title(), t.small())) else {
             return;
         };
         let p = theme::palette();
@@ -3840,7 +3449,7 @@ impl App {
                     theme::fill(dc, &self.r(x, y, w, h), p.border);
                 }
                 Screen::Password => {
-                    let card = self.r(AX, self.password_card_y(), AW, 80);
+                    let card = self.r(AX, PASSWORD_CARD_Y, AW, 80);
                     theme::round(dc, &card, self.px(10), Some(p.bg), Some(p.border));
                 }
                 #[cfg(feature = "security-key")]
@@ -3848,23 +3457,7 @@ impl App {
                     let (x, y, w, h) = LOGIN_LINKS;
                     theme::fill(dc, &self.r(x, y, w, h), p.border);
                 }
-                Screen::Create if !self.create_otp => self.draw_otp_offer(dc, &p, small),
                 _ => {}
-            }
-            if self.screen == Screen::Create
-                && self.create_otp
-                && let Some(provision) = &self.provision
-            {
-                if self.inactive {
-                    self.draw_enrollment_hidden(dc, &p, small);
-                } else {
-                    self.draw_enrollment(dc, &provision.setup(), &p, code);
-                }
-            }
-            if self.screen == Screen::OtpBackup
-                && let Some(setup) = &self.otp_setup
-            {
-                self.draw_enrollment(dc, setup, &p, code);
             }
             if self.screen == Screen::Vault {
                 self.draw_detail(dc, small, title);
@@ -3882,116 +3475,6 @@ impl App {
                 let r = self.scaled(frame);
                 theme::round(dc, &r, self.px(8), Some(p.bg), Some(border));
             }
-        }
-    }
-    /// Create with the OTP off: an accent frame, the heading and a "권장"
-    /// badge, painted so the badge can sit right after the heading.
-    unsafe fn draw_otp_offer(&self, dc: isize, p: &theme::Palette, small: isize) {
-        let Some(strong) = theme::with(|t| t.strong()) else {
-            return;
-        };
-        let (x, y, w, h) = CREATE_OTP_CARD;
-        unsafe {
-            theme::round(
-                dc,
-                &self.r(x, y, w, h),
-                self.px(12),
-                Some(p.bg),
-                Some(p.accent),
-            );
-            let heading = tr("휴대폰 OTP로 한 번 더 잠그기");
-            theme::text(
-                dc,
-                heading,
-                &self.r(x + 20, y + 20, w - 180, 24),
-                strong,
-                p.text,
-                LINE,
-            );
-            let left = self.px(x + 20) + theme::text_width(dc, heading, strong) + self.px(10);
-            let badge = Rect {
-                left,
-                top: self.px(y + 22),
-                right: left + theme::text_width(dc, tr("권장"), small) + self.px(18),
-                bottom: self.px(y + 42),
-            };
-            theme::round(dc, &badge, self.px(10), None, Some(p.accent));
-            theme::text(dc, tr("권장"), &badge, small, p.accent, DT_CENTER | LINE);
-        }
-    }
-    /// While another app is in front the card shows no QR and no key.
-    unsafe fn draw_enrollment_hidden(&self, dc: isize, p: &theme::Palette, small: isize) {
-        let (cx, cy, _, _) = self.enroll();
-        unsafe {
-            let tile = self.r(cx + 16, cy + 16, 148, 148);
-            theme::round(dc, &tile, self.px(8), Some(p.surface), None);
-            theme::text(
-                dc,
-                tr("창을 선택하면\nQR이 다시 보입니다"),
-                &tile,
-                small,
-                p.muted,
-                DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
-            );
-            let key = self.r(cx + 180, cy + 106, self.enroll().2 - 196, 58);
-            theme::round(dc, &key, self.px(8), Some(p.surface), None);
-        }
-    }
-    /// QR for authenticator apps plus the same key as text for manual entry.
-    unsafe fn draw_enrollment(&self, dc: isize, setup: &OtpSetup, p: &theme::Palette, code: isize) {
-        let (cx, cy, cw, ch) = self.enroll();
-        unsafe {
-            theme::round(
-                dc,
-                &self.r(cx, cy, cw, ch),
-                self.px(12),
-                Some(p.bg),
-                Some(p.border),
-            );
-            // Black on white in both themes: scanners expect dark modules on light.
-            let tile = self.r(cx + 16, cy + 16, 148, 148);
-            theme::round(dc, &tile, self.px(8), Some(theme::rgb(255, 255, 255)), None);
-            let uri = setup.uri();
-            if let Ok(qr) = goyo_vault::qr::encode(uri.as_bytes()) {
-                // Whole pixels per module keep edges sharp; 4-module quiet zone.
-                let span = goyo_vault::qr::SIZE as i32 + 8;
-                let side = tile.right - tile.left;
-                let m = (side / span).max(1);
-                let left = tile.left + (side - m * span) / 2 + 4 * m;
-                let top = tile.top + (side - m * span) / 2 + 4 * m;
-                let ink = CreateSolidBrush(theme::rgb(0, 0, 0));
-                for y in 0..goyo_vault::qr::SIZE {
-                    for x in 0..goyo_vault::qr::SIZE {
-                        if qr.dark(x, y) {
-                            let (x, y) = (x as i32, y as i32);
-                            let r = Rect {
-                                left: left + x * m,
-                                top: top + y * m,
-                                right: left + (x + 1) * m,
-                                bottom: top + (y + 1) * m,
-                            };
-                            FillRect(dc, &r, ink);
-                        }
-                    }
-                }
-                DeleteObject(ink);
-            }
-            // Two lines of four groups; authenticator apps ignore the spaces.
-            let (rx, rw) = (cx + 180, cw - 196);
-            let key = self.r(rx, cy + 106, rw, 58);
-            theme::round(dc, &key, self.px(8), Some(p.surface), None);
-            let raw = setup.code();
-            let mut grouped = Zeroizing::new(String::with_capacity(raw.len() * 2));
-            for (i, c) in raw.chars().enumerate() {
-                if i > 0 && i % 16 == 0 {
-                    grouped.push('\n');
-                } else if i > 0 && i % 4 == 0 {
-                    grouped.push(' ');
-                }
-                grouped.push(c);
-            }
-            let inner = theme::inset(&key, 0, self.px(5));
-            theme::text(dc, &grouped, &inner, code, p.text, DT_CENTER | DT_NOPREFIX);
         }
     }
     unsafe fn draw_welcome(&self, dc: isize, p: &theme::Palette) {
@@ -4033,7 +3516,6 @@ impl App {
                 ("금고 파일", "암호화된 항목\n(.goyo)"),
                 ("열쇠 파일", "금고와 따로 보관\n(.goyokey)"),
                 ("비밀번호", "12자 이상의\n긴 문장"),
-                ("휴대폰 OTP", "켜기 권장\n켠 금고만 필요"),
             ]
             .into_iter()
             .enumerate()
@@ -4576,15 +4058,10 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                     a.lock(vault::KEY_DAMAGED_LOCKED, true);
                     return Ok(());
                 }
-                let uses_otp = s.uses_otp();
-                a.status(match (id == BACKUP, uses_otp) {
-                    (true, true) => {
-                        "금고 백업을 저장했습니다. 열 때 열쇠 파일, 비밀번호, OTP도 필요합니다."
-                    }
-                    (true, false) => {
-                        "금고 백업을 저장했습니다. 열 때 열쇠 파일과 비밀번호도 필요합니다."
-                    }
-                    _ => KEY_BACKED_UP,
+                a.status(if id == BACKUP {
+                    "금고 백업을 저장했습니다. 열 때 열쇠 파일과 비밀번호도 필요합니다."
+                } else {
+                    KEY_BACKED_UP
                 });
             }
             // Another PC's key file, for Screen::Adopt. A file this build
@@ -4617,9 +4094,7 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
                     SetWindowTextW(a.handle(field), text.as_ptr());
                 }
                 // The change notice arrived while the state was busy.
-                if !(field == KPATH && a.fit_otp_field()) {
-                    a.refresh_key_note();
-                }
+                a.refresh_key_note();
                 #[cfg(feature = "security-key")]
                 if field == VPATH {
                     a.route_picked_vault();
@@ -4641,7 +4116,7 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
 /// still lock; phase 3 makes the library call under a borrow, and only if
 /// nothing changed meanwhile, else the flow and its secrets are dropped.
 /// The commands routed here (see phased) are SUBMIT on Login, Password,
-/// Adopt, Create, Restore and OtpBackup and the Keys screen's buttons that
+/// Adopt, Create and Restore and the Keys screen's buttons that
 /// change what holds key changes.
 /// App::flow is set from phase 1 to the end. It returns before
 /// window_proc's tail, so it drains the deferred events and makes the sync
@@ -4662,17 +4137,14 @@ fn phased_command(h: Hwnd, id: i32) -> crypto::Result<()> {
     let theirs = APP.with(|cell| {
         cell.try_borrow()
             .is_ok_and(|b| b.as_ref().is_some_and(|a| keys_ui::phased(a, id)))
-    }) || matches!(
-        screen,
-        Some(Screen::Create | Screen::Restore | Screen::OtpBackup)
-    );
+    }) || matches!(screen, Some(Screen::Create | Screen::Restore));
     #[cfg(not(feature = "security-key"))]
     let theirs = false;
     let result = match screen {
         #[cfg(feature = "security-key")]
         _ if theirs => keys_ui::flow(h, id),
         #[cfg(not(feature = "security-key"))]
-        Some(Screen::Create | Screen::Restore | Screen::OtpBackup) => plain_flow(h),
+        Some(Screen::Create | Screen::Restore) => plain_flow(h),
         Some(Screen::Adopt) => adopt_flow(h),
         Some(Screen::Keys) => keys_flow(h, id),
         _ => submit_flow(h, id),
@@ -4737,7 +4209,7 @@ fn told_how_it_ended(start: (u64, u64)) {
         a.set_status(text, TONE_MUTED);
     });
 }
-/// SUBMIT on Create, Restore and OtpBackup (spec §9.2a, S45-1 #13, S45-2
+/// SUBMIT on Create and Restore (spec §9.2a, S45-1 #13, S45-2
 /// #17): the same command as before, under one borrow, as a flow; the
 /// security-key build's registrations and touches run in keys_ui's flows
 /// instead. These flows have no question and no ceremony here.
@@ -4802,9 +4274,10 @@ fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
                     && login_gate.is_none()
                     && flow.prepared.as_ref().is_some_and(|p| p.offers_other_key()) =>
             {
-                let entry = flow.prepared.take().and_then(|p| {
-                    p.other_key_entry(&flow.pass, &flow.otp, flow.otp_time, flow.confirmed_older)
-                });
+                let entry = flow
+                    .prepared
+                    .take()
+                    .and_then(|p| p.other_key_entry(&flow.pass, flow.confirmed_older));
                 if let Some(entry) = entry {
                     keys_ui::try_other_key(h, flow.screen, flow.serial, entry);
                 }
@@ -4911,7 +4384,7 @@ fn opened_session() -> bool {
 }
 /// [열기] on Screen::Adopt (spec §9.2 "Adopt", §5.8): the whole adopt as
 /// one flow, from the public checks to the write, with one
-/// re-authentication and so one OTP code. The Reauth, the other file's
+/// re-authentication. The Reauth, the other file's
 /// password and its opened keys live only in this frame and are wiped when
 /// it returns. [취소], a No or a lock anywhere writes nothing.
 fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
@@ -4935,12 +4408,12 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
             a.status(same);
             return Ok(None);
         }
-        let (current, otp) = (a.read(CURRENT_PASS)?, a.read(OTP)?);
+        let current = a.read(CURRENT_PASS)?;
         a.flow = Some(SUBMIT);
-        Ok(Some((a.serial, other, check, current, otp, otp::now()?)))
+        Ok(Some((a.serial, other, check, current)))
     });
     drain_pending(h);
-    let Some((serial, other, check, current, otp, otp_time)) = p1? else {
+    let Some((serial, other, check, current)) = p1? else {
         return Ok(());
     };
     // P3: the re-authentication, and the other file opened with this PC's
@@ -4952,7 +4425,7 @@ fn adopt_flow(h: Hwnd) -> crypto::Result<()> {
             .as_mut()
             .ok_or("금고가 잠겼습니다.")
             .and_then(|s| {
-                let mut r = s.reauth(&current, Some((&otp, otp_time)), None)?;
+                let mut r = s.reauth(&current, None)?;
                 r.app_serial = serial;
                 let opened = s.adopt_open(&r, &other, None);
                 Ok((r, opened))
@@ -5131,7 +4604,7 @@ fn preview_text(p: &vault::Preview, same_password: bool) -> String {
 /// or [끝나지 않은 열쇠 변경 버리기…] (§5.10). Its question (danger,
 /// default No), then (security-key build, a key file with keys) the touch
 /// of one of its live, non-suspended keys, then a re-authentication with
-/// the password (and OTP) typed on the screen, and the library call, which
+/// the password typed on the screen, and the library call, which
 /// checks the hold again.
 fn keys_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     let p1 = APP.with(|cell| -> crypto::Result<_> {
@@ -5173,12 +4646,12 @@ fn keys_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         };
         #[cfg(not(feature = "security-key"))]
         let request: Option<()> = None;
-        let (current, otp) = (a.read(CURRENT_PASS)?, a.read(OTP)?);
+        let current = a.read(CURRENT_PASS)?;
         a.flow = Some(id);
-        Ok((a.serial, question, head, current, otp, otp::now()?, request))
+        Ok((a.serial, question, head, current, request))
     });
     drain_pending(h);
-    let (serial, question, head, current, otp, otp_time, request) = p1?;
+    let (serial, question, head, current, request) = p1?;
     if !ask(h, &question) {
         return Ok(());
     }
@@ -5200,16 +4673,14 @@ fn keys_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
         let touched = touch.as_ref();
         #[cfg(not(feature = "security-key"))]
         let touched = None;
-        let result = s
-            .reauth(&current, Some((&otp, otp_time)), touched)
-            .and_then(|mut r| {
-                r.app_serial = serial;
-                match (id, &head) {
-                    (KEY_OVERRIDE_HEAD, Some(head)) => s.override_head(r, head),
-                    (KEY_LOCAL_OK, _) => s.confirm_key_file(r),
-                    _ => s.forget_pending(r),
-                }
-            });
+        let result = s.reauth(&current, touched).and_then(|mut r| {
+            r.app_serial = serial;
+            match (id, &head) {
+                (KEY_OVERRIDE_HEAD, Some(head)) => s.override_head(r, head),
+                (KEY_LOCAL_OK, _) => s.confirm_key_file(r),
+                _ => s.forget_pending(r),
+            }
+        });
         let notices: Vec<(Zeroizing<String>, isize)> =
             s.take_key_notices().iter().map(key_line).collect();
         let badge = s.badge();
@@ -5314,7 +4785,7 @@ fn save_damaged_key(h: Hwnd) {
     }
 }
 /// Whether window_proc hands command `id` to phased_command: SUBMIT (or
-/// Enter) on Login, Password, Adopt, Create, Restore and OtpBackup (spec
+/// Enter) on Login, Password, Adopt, Create and Restore (spec
 /// §9.2a; S45-1 #13, S45-2 #17), the Keys screen's buttons that act on
 /// what holds key changes, and the flows of the security-key build.
 /// Anything else, or a busy app, goes the usual way.
@@ -5329,8 +4800,6 @@ fn phased(id: i32) -> bool {
                 | Screen::Adopt
                 | Screen::Create
                 | Screen::Restore => matches!(id, 1 | SUBMIT),
-                // Enter on the QR closes it (command's CANCEL).
-                Screen::OtpBackup => matches!(id, 1 | SUBMIT) && a.otp_setup.is_none(),
                 Screen::Keys => matches!(id, KEY_OVERRIDE_HEAD | KEY_LOCAL_OK | PENDING_FORGET),
                 _ => false,
             })
@@ -7306,9 +6775,9 @@ mod tests {
         }
     }
     /// Builds every screen with synthetic data and calls `visit` on each:
-    /// first run, open, restore, create with and without the OTP, the vault
-    /// empty, with a shown entry and syncing (each pill word), edit,
-    /// password change, OTP backup with and without the QR, key management
+    /// first run, open, restore, create, the vault empty, with a shown
+    /// entry and syncing (each pill word), edit, password change, key
+    /// management
     /// with each thing that holds key changes, and adopt.
     unsafe fn each_screen(dir: &std::path::Path, visit: &mut dyn FnMut(&mut App, &str)) {
         let mut session = synthetic_session(dir, "synthetic layout password");
@@ -7339,26 +6808,16 @@ mod tests {
             visit(&mut app, "login-no-key");
             app.key_path = key;
             app.provision = Some(Provision::new().unwrap());
-            for otp in [false, true] {
-                app.screen = Screen::Create;
-                app.create_otp = otp;
+            app.screen = Screen::Create;
+            app.build();
+            visit(&mut app, "create");
+            // With security keys and their PIN toggle.
+            #[cfg(feature = "security-key")]
+            {
+                app.toggles.create = true;
                 app.build();
-                visit(&mut app, if otp { "create-otp" } else { "create" });
-                // With security keys and their PIN toggle.
-                #[cfg(feature = "security-key")]
-                {
-                    app.toggles.create = true;
-                    app.build();
-                    visit(
-                        &mut app,
-                        if otp {
-                            "create-otp-keys"
-                        } else {
-                            "create-keys"
-                        },
-                    );
-                    app.toggles.create = false;
-                }
+                visit(&mut app, "create-keys");
+                app.toggles.create = false;
             }
             app.provision = None;
             app.screen = Screen::Vault;
@@ -7435,25 +6894,11 @@ mod tests {
                 visit(&mut app, &format!("edit-auto-lock-{choice}"));
             }
             app.auto_lock = 0;
-            for (screen, name) in [
-                (Screen::Edit, "edit"),
-                (Screen::Password, "password"),
-                (Screen::OtpBackup, "otp-backup"),
-            ] {
+            for (screen, name) in [(Screen::Edit, "edit"), (Screen::Password, "password")] {
                 app.screen = screen;
                 app.build();
                 visit(&mut app, name);
             }
-            app.otp_setup = Some(
-                app.session
-                    .as_ref()
-                    .unwrap()
-                    .otp_setup("synthetic layout password")
-                    .unwrap(),
-            );
-            app.build();
-            visit(&mut app, "otp-backup-qr");
-            app.otp_setup = None;
             // Keys as this 0.8 key file shows it, then a KF2 key file's code
             // with each hold, filled with long values.
             app.screen = Screen::Keys;
@@ -7846,9 +7291,8 @@ mod tests {
     }
     /// Every label's text fits its box at this machine's DPI, in both
     /// languages: a STATIC clips whatever does not fit and an owner-drawn
-    /// button cuts its caption, so a cut-off line would go unnoticed. Labels
-    /// on the OTP card end clear of its painted border, and every message
-    /// fits the status line.
+    /// button cuts its caption, so a cut-off line would go unnoticed, and
+    /// every message fits the status line.
     #[test]
     fn labels_fit_their_boxes() {
         let _korean = KoreanAfter::hold();
@@ -7896,7 +7340,7 @@ mod tests {
                             continue;
                         }
                         let font = theme::with(|t| match variant {
-                            theme::PRIMARY | theme::ACCENT | theme::TAB_ON => t.strong(),
+                            theme::PRIMARY | theme::TAB_ON => t.strong(),
                             theme::LINK | theme::CHIP => t.small(),
                             _ => t.body(),
                         })
@@ -7916,31 +7360,6 @@ mod tests {
                         continue;
                     } else {
                         continue;
-                    }
-                    let card =
-                        (app.provision.is_some() && app.create_otp) || app.otp_setup.is_some();
-                    if card {
-                        let (x, y, w, h) = app.enroll();
-                        let frame = app.r(x, y, w, h);
-                        let mut r = Rect::default();
-                        GetWindowRect(child, &mut r);
-                        let mut pts = [
-                            Point {
-                                x: r.left,
-                                y: r.top,
-                            },
-                            Point {
-                                x: r.right,
-                                y: r.bottom,
-                            },
-                        ];
-                        MapWindowPoints(0, app.hwnd, pts.as_mut_ptr(), 2);
-                        let inside = pts[0].y >= frame.top && pts[0].y < frame.bottom;
-                        if inside && pts[1].y > frame.bottom - app.px(8) {
-                            failures.push(format!(
-                                "{language} {name}: touches the card border: {text:?}"
-                            ));
-                        }
                     }
                 }
                 // Every one-line message in the status line.
@@ -8053,7 +7472,7 @@ mod tests {
     }
     /// The source files whose Korean literals english_is_complete checks,
     /// by their path under src/ (spec §9.3).
-    const SCANNED: [(&str, &str); 15] = [
+    const SCANNED: [(&str, &str); 14] = [
         ("main.rs", include_str!("main.rs")),
         ("win.rs", include_str!("win.rs")),
         ("theme.rs", include_str!("theme.rs")),
@@ -8068,9 +7487,8 @@ mod tests {
         ),
         ("vault/sync.rs", include_str!("vault/sync.rs")),
         ("merge.rs", include_str!("merge.rs")),
-        ("qr.rs", include_str!("qr.rs")),
         ("crypto.rs", include_str!("crypto.rs")),
-        ("otp.rs", include_str!("otp.rs")),
+        ("clock.rs", include_str!("clock.rs")),
         // goyo-sync's settings window draws with this app's i18n.rs.
         ("bin/goyo-sync/gui.rs", include_str!("bin/goyo-sync/gui.rs")),
     ];
@@ -8370,13 +7788,13 @@ mod tests {
             app.screen = app.home();
             app.build();
             app.command(CREATE, 0).unwrap();
-            let code = app.provision.as_ref().unwrap().setup_code();
+            let tag = app.provision.as_ref().unwrap().tag();
             SetWindowTextW(app.handle(PASS), wide("synthetic switch password").as_ptr());
             app.command(LANG_EN, 0).unwrap();
             assert!(i18n::english() && app.screen == Screen::Create);
-            assert_eq!(caption(app.handle(SUBMIT)), "Create vault without OTP");
+            assert_eq!(caption(app.handle(SUBMIT)), "Create vault");
             assert_eq!(&*app.read(PASS).unwrap(), "synthetic switch password");
-            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            assert_eq!(app.provision.as_ref().unwrap().tag(), tag);
             assert_eq!(GetWindowLongPtrW(app.handle(LANG_EN), -21), theme::TAB_ON);
             // The status line follows the language; its Korean source is kept.
             app.status("수동으로 잠갔습니다.");
@@ -8390,18 +7808,14 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-    /// Synthetic vault on disk with a fresh OTP code that opens it.
+    /// Synthetic vault on disk, open.
     fn synthetic_session(dir: &std::path::Path, password: &str) -> Session {
-        let provision = Provision::new().unwrap();
-        let secret = base32_decode(&provision.setup_code());
-        let now = goyo_vault::otp::now().unwrap();
-        let code = format!("{:06}", goyo_vault::otp::code(&secret, now / 30, 6));
-        provision
+        Provision::new()
+            .unwrap()
             .finish(
                 &dir.join("vault.goyo"),
                 &dir.join("vault.goyokey"),
                 password,
-                Some(&code),
             )
             .unwrap()
     }
@@ -8542,7 +7956,6 @@ mod tests {
                 &a.join("vault.goyo"),
                 &a.join("vault.goyokey"),
                 SYNC_PASSWORD,
-                None,
             )
             .unwrap();
         for title in titles {
@@ -8556,7 +7969,7 @@ mod tests {
         std::fs::copy(&sa.key_path, &key).unwrap();
         let fetched = b.join("from-server.goyo");
         std::fs::write(&fetched, &server.versions[0]).unwrap();
-        drop(Session::restore(&fetched, &key, &vault, SYNC_PASSWORD, "").unwrap());
+        drop(Session::restore(&fetched, &key, &vault, SYNC_PASSWORD).unwrap());
         server.helper(&vault);
         server.pass(&vault);
         (sa, vault, key)
@@ -8716,53 +8129,38 @@ mod tests {
             SyncNotice::KeyChangedServerPwOnly,
         ]
     }
-    fn base32_decode(s: &str) -> Vec<u8> {
-        let (mut acc, mut bits, mut out) = (0u32, 0u32, vec![]);
-        for c in s.bytes() {
-            let v = match c {
-                b'A'..=b'Z' => c - b'A',
-                b'2'..=b'7' => c - b'2' + 26,
-                _ => continue,
-            } as u32;
-            acc = (acc << 5) | v;
-            bits += 5;
-            if bits >= 8 {
-                bits -= 8;
-                out.push((acc >> bits) as u8);
-                acc &= (1 << bits) - 1;
-            }
-        }
-        out
+    /// Turns the GOYOKE02 key file at `key` into the GOYOKE01 that a vault
+    /// made with the removed OTP has: the same data key, sealed under the
+    /// same password with a TOTP secret after it.
+    fn old_otp_key_file(key: &std::path::Path, password: &str) {
+        let bytes = std::fs::read(key).unwrap();
+        assert_eq!((&bytes[..8], bytes.len()), (&b"GOYOKE02"[..], 128));
+        let salt: [u8; 32] = bytes[24..56].try_into().unwrap();
+        let nonce: [u8; 24] = bytes[56..80].try_into().unwrap();
+        let wrapping = crypto::derive(password.as_bytes(), &salt).unwrap();
+        let data_key = crypto::open(&wrapping, &nonce, &bytes[..80], &bytes[80..]).unwrap();
+        let nonce = crypto::random::<24>().unwrap();
+        let mut header = b"GOYOKE01".to_vec();
+        header.extend_from_slice(&bytes[8..56]);
+        header.extend_from_slice(nonce.as_slice());
+        let plain = [&data_key[..], &[0x5c; 20]].concat();
+        let body = crypto::seal(&wrapping, &nonce, &header, &plain).unwrap();
+        std::fs::write(key, [header, body].concat()).unwrap();
     }
-    /// The OTP is optional and off by default. Switching it keeps the typed
-    /// passwords and the enrollment secret; a vault made without it opens
-    /// with the password alone and offers no OTP backup. A key file that uses
-    /// an OTP, typed in by path, gets the OTP field instead of a failed login.
+    /// Create asks for the password twice and nothing else; the vault opens
+    /// with the password and key file alone, also on the Keys and password
+    /// screens. A vault made with the removed OTP (GOYOKE01), typed in by
+    /// path, opens with the password alone too, and says once on this PC
+    /// that the OTP is gone; its files stay byte for byte.
     #[test]
-    fn optional_otp_create_and_open() {
-        let dir = std::env::temp_dir().join(format!(
-            "goyo-optional-otp-{:x}",
-            u64::from_le_bytes(*crypto::random::<8>().unwrap())
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let pass = "synthetic optional otp passphrase";
+    fn create_and_open_ask_for_no_code_and_an_old_otp_vault_says_so_once() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let dir = test_dir("no-otp");
+        let pass = "synthetic no otp passphrase";
         unsafe {
             SetProcessDPIAware();
-            let h = CreateWindowExW(
-                0,
-                wide("STATIC").as_ptr(),
-                wide("Goyo optional OTP test").as_ptr(),
-                0x00ca0000,
-                0,
-                0,
-                900,
-                800,
-                0,
-                0,
-                GetModuleHandleW(null()),
-                null_mut(),
-            );
-            assert_ne!(h, 0);
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
             assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
             let mut app = App::new(h);
             app.home_dir = dir.clone();
@@ -8771,93 +8169,79 @@ mod tests {
             app.screen = app.home();
             app.build();
             app.command(CREATE, 0).unwrap();
-            assert!(app.screen == Screen::Create && !app.create_otp);
-            assert_eq!(app.handle(OTP), 0);
-            // Off, but offered as the recommended choice.
-            assert_eq!(
-                GetWindowLongPtrW(app.handle(OTP_TOGGLE), -21),
-                theme::ACCENT
-            );
-            let code = app.provision.as_ref().unwrap().setup_code();
+            assert!(app.screen == Screen::Create);
+            assert_eq!(caption(app.handle(SUBMIT)), "금고 만들기");
             for id in [PASS, CONFIRM] {
                 SetWindowTextW(app.handle(id), wide(pass).as_ptr());
             }
-            app.command(OTP_TOGGLE, 0).unwrap();
-            assert!(app.create_otp && app.handle(OTP) != 0);
-            assert_eq!(GetFocus(), app.handle(OTP));
-            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
-            app.command(OTP_TOGGLE, 0).unwrap();
-            assert!(!app.create_otp && app.handle(OTP) == 0);
-            for id in [PASS, CONFIRM] {
-                assert_eq!(&*app.read(id).unwrap(), pass);
-            }
-            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
             app.command(SUBMIT, 0).unwrap();
             assert!(app.screen == Screen::Vault);
-            assert!(!app.session.as_ref().unwrap().uses_otp());
-            assert_eq!(app.handle(OTP_SETUP), 0);
-            assert!(!app.allows(OTP_SETUP));
-            // "열쇠 관리" leads to the password change, and back; neither
-            // asks for an OTP code.
+            let made = app.session.as_ref().unwrap();
+            assert_eq!(std::fs::read(&made.key_path).unwrap().len(), 128);
+            assert!(!caption(app.handle(STATUS)).contains("OTP"));
             app.command(CHANGE, 0).unwrap();
-            assert!(app.screen == Screen::Keys && app.handle(OTP) == 0);
-            app.command(KEY_PASSWORD, 0).unwrap();
-            assert!(app.screen == Screen::Password && app.handle(OTP) == 0);
-            app.command(CANCEL, 0).unwrap();
             assert!(app.screen == Screen::Keys);
+            app.command(KEY_PASSWORD, 0).unwrap();
+            assert!(app.screen == Screen::Password);
+            app.command(CANCEL, 0).unwrap();
             app.command(2, 0).unwrap();
             assert!(app.screen == Screen::Vault);
             // Opens again with the password alone.
             app.lock("synthetic lock", true);
-            assert!(app.screen == Screen::Login && app.handle(OTP) == 0);
+            assert!(app.screen == Screen::Login);
             SetWindowTextW(app.handle(PASS), wide(pass).as_ptr());
             app.command(SUBMIT, 0).unwrap();
             assert!(app.session.is_some());
             app.lock("synthetic lock", true);
-            // An OTP vault chosen by typing its paths: the first try asks for
-            // the code, keeps the password and is not a failed attempt.
+            // A vault made with the removed OTP, chosen by typing its paths.
             let other = dir.join("otp");
             std::fs::create_dir(&other).unwrap();
             drop(synthetic_session(&other, pass));
-            let other_vault = wide(&other.join("vault.goyo").to_string_lossy());
-            let other_key = wide(&other.join("vault.goyokey").to_string_lossy());
-            SetWindowTextW(app.handle(VPATH), other_vault.as_ptr());
-            SetWindowTextW(app.handle(KPATH), other_key.as_ptr());
-            SetWindowTextW(app.handle(PASS), wide(pass).as_ptr());
-            assert!(app.command(SUBMIT, 0).unwrap_err().contains("OTP"));
-            assert!(app.handle(OTP) != 0 && app.failed == 0);
-            assert_eq!(&*app.read(PASS).unwrap(), pass);
-            assert!(app.session.is_none());
+            let (old_vault, old_key) = (other.join("vault.goyo"), other.join("vault.goyokey"));
+            old_otp_key_file(&old_key, pass);
+            let files = (
+                std::fs::read(&old_vault).unwrap(),
+                std::fs::read(&old_key).unwrap(),
+            );
+            let open = |app: &mut App| {
+                SetWindowTextW(
+                    app.handle(VPATH),
+                    wide(&old_vault.to_string_lossy()).as_ptr(),
+                );
+                SetWindowTextW(app.handle(KPATH), wide(&old_key.to_string_lossy()).as_ptr());
+                SetWindowTextW(app.handle(PASS), wide(pass).as_ptr());
+                app.command(SUBMIT, 0).unwrap();
+                assert!(app.session.is_some() && app.failed == 0);
+                caption(app.handle(STATUS))
+            };
+            let first = open(&mut app);
+            assert!(first.contains(tr(vault::OTP_REMOVED)), "{first}");
+            app.lock("synthetic lock", true);
+            let second = open(&mut app);
+            assert!(!second.contains("OTP"), "{second}");
+            app.lock("synthetic lock", true);
+            assert_eq!(
+                (
+                    std::fs::read(&old_vault).unwrap(),
+                    std::fs::read(&old_key).unwrap()
+                ),
+                files
+            );
             drop(app);
             DestroyWindow(h);
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
+    /// Another app in front: the 15-second view and copy permission end at
+    /// once and the vault stays open; it locks after AWAY_LOCK away, and an
+    /// activation message alone does not cancel that.
     #[test]
-    fn otp_backup_needs_password_and_closes_with_lock() {
-        let dir = std::env::temp_dir().join(format!(
-            "goyo-otp-backup-{:x}",
-            u64::from_le_bytes(*crypto::random::<8>().unwrap())
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let session = synthetic_session(&dir, "synthetic backup password");
+    fn away_from_the_app_ends_the_view_and_locks_later() {
+        let dir = test_dir("away");
+        let session = synthetic_session(&dir, "synthetic away password");
         unsafe {
             SetProcessDPIAware();
-            let h = CreateWindowExW(
-                0,
-                wide("STATIC").as_ptr(),
-                wide("Goyo OTP backup test").as_ptr(),
-                0x00ca0000,
-                0,
-                0,
-                900,
-                800,
-                0,
-                0,
-                GetModuleHandleW(null()),
-                null_mut(),
-            );
-            assert_ne!(h, 0);
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
             assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
             // Stands in for another app. build() focuses a control, which can
             // bring the test window to the front, so leave it before a check
@@ -8872,39 +8256,11 @@ mod tests {
             app.session = Some(session);
             app.screen = Screen::Vault;
             app.build();
-            app.command(OTP_SETUP, 0).unwrap();
-            assert!(app.screen == Screen::OtpBackup && app.otp_setup.is_none());
-            // Wrong password: nothing shown, and the retry delay applies.
-            SetWindowTextW(
-                app.handle(CURRENT_PASS),
-                wide("wrong synthetic pass").as_ptr(),
-            );
-            assert!(app.command(SUBMIT, 0).is_err());
-            assert!(app.otp_setup.is_none() && app.failed == 1);
-            assert!(app.command(SUBMIT, 0).is_err()); // still waiting
-            app.retry = Instant::now();
-            SetWindowTextW(
-                app.handle(CURRENT_PASS),
-                wide("synthetic backup password").as_ptr(),
-            );
-            app.command(SUBMIT, 0).unwrap();
-            assert!(app.otp_setup.is_some() && app.failed == 0);
-            app.command(CANCEL, 0).unwrap();
-            assert!(app.screen == Screen::Vault && app.otp_setup.is_none());
-            // Shown again, then another app takes focus: the vault locks.
-            app.command(OTP_SETUP, 0).unwrap();
-            SetWindowTextW(
-                app.handle(CURRENT_PASS),
-                wide("synthetic backup password").as_ptr(),
-            );
-            app.command(SUBMIT, 0).unwrap();
-            assert!(app.otp_setup.is_some());
             app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
             app.copy_until = Some(Instant::now() + Duration::from_secs(30));
             app.deactivated();
             assert!(app.session.is_some() && app.screen == Screen::Vault);
-            assert!(app.otp_setup.is_none() && app.reveal_until.is_none());
-            assert!(app.copy_until.is_none());
+            assert!(app.reveal_until.is_none() && app.copy_until.is_none());
             // Back within AWAY_LOCK: still open.
             SetForegroundWindow(other);
             assert!(!is_foreground(h));
@@ -8929,8 +8285,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     /// The auto-lock switch on the vault screen. Longer choices count time in
-    /// another app as unused time; "끔" keeps the vault open on the timer, but
-    /// the OTP backup QR still closes after OTP_QR_IDLE.
+    /// another app as unused time; "끔" keeps the vault open on the timer.
     #[test]
     fn auto_lock_choices() {
         assert_eq!(auto_lock_choice(b"5\r\n"), 1);
@@ -8994,33 +8349,6 @@ mod tests {
             app.activity = Instant::now() - Duration::from_secs(3600);
             app.timer();
             assert!(app.session.is_some() && app.screen == Screen::Vault);
-            // The OTP backup QR closes on its own time; the vault stays open.
-            // Leaving the app would close it at once, so the timer must see an
-            // app switch that has already been handled and just begun.
-            let just_left = |app: &mut App| {
-                app.inactive = true;
-                app.away_since = Some(Instant::now());
-            };
-            app.otp_setup = Some(app.session.as_ref().unwrap().otp_setup(pass).unwrap());
-            app.screen = Screen::OtpBackup;
-            app.build();
-            just_left(&mut app);
-            app.activity = Instant::now() - OTP_QR_IDLE - Duration::from_secs(1);
-            app.timer();
-            assert!(app.otp_setup.is_none() && app.screen == Screen::Vault);
-            assert!(app.session.is_some());
-            // Shortest choice: the QR screen locks the vault after OTP_QR_IDLE.
-            app.command(AUTO_LOCK, 0).unwrap();
-            app.otp_setup = Some(app.session.as_ref().unwrap().otp_setup(pass).unwrap());
-            app.screen = Screen::OtpBackup;
-            app.build();
-            just_left(&mut app);
-            app.activity = Instant::now() - Duration::from_secs(61);
-            app.timer();
-            assert!(app.session.is_some() && app.otp_setup.is_some());
-            app.activity = Instant::now() - OTP_QR_IDLE - Duration::from_secs(1);
-            app.timer();
-            assert!(app.session.is_none() && app.otp_setup.is_none());
             drop(app);
             DestroyWindow(other);
             DestroyWindow(h);
@@ -9083,12 +8411,12 @@ mod tests {
             SetWindowLongPtrW(app.handle(PEEK_PASS), -21, theme::EYE);
             app.mask_passwords();
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
-            // Create keeps one OTP secret across Back and a second visit.
+            // Create keeps one new vault across Back and a second visit.
             app.command(CREATE, 0).unwrap();
-            let code = app.provision.as_ref().unwrap().setup_code();
+            let tag = app.provision.as_ref().unwrap().tag();
             app.command(BACK, 0).unwrap();
             app.command(CREATE, 0).unwrap();
-            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            assert_eq!(app.provision.as_ref().unwrap().tag(), tag);
             app.provision = None;
             app.screen = Screen::Login;
             app.build();
@@ -9099,17 +8427,17 @@ mod tests {
             app.timer();
             assert!(app.read(PASS).unwrap().is_empty() && !app.auth_dirty);
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
-            // Switching apps mid-enrollment keeps the new vault form and its
-            // OTP secret; only the shown password is masked again.
+            // Switching apps mid-create keeps the new vault form; only the
+            // shown password is masked again.
             app.screen = Screen::Create;
             app.provision = Some(Provision::new().unwrap());
             app.build();
-            let code = app.provision.as_ref().unwrap().setup_code();
+            let tag = app.provision.as_ref().unwrap().tag();
             SetWindowTextW(app.handle(PASS), wide("synthetic enrollment").as_ptr());
             app.command(PEEK_PASS, 0).unwrap();
             app.deactivated();
             assert!(app.screen == Screen::Create);
-            assert_eq!(app.provision.as_ref().unwrap().setup_code(), code);
+            assert_eq!(app.provision.as_ref().unwrap().tag(), tag);
             assert_eq!(&*app.read(PASS).unwrap(), "synthetic enrollment");
             assert_eq!(SendMessageW(app.handle(PASS), 0xd2, 0, 0), mask);
             app.provision = None;
@@ -9156,7 +8484,6 @@ mod tests {
                 Screen::Vault,
                 Screen::Edit,
                 Screen::Password,
-                Screen::OtpBackup,
             ] {
                 app.screen = screen;
                 app.build();
@@ -9383,15 +8710,11 @@ mod tests {
         ));
         std::fs::create_dir(&temp).unwrap();
         let provision = Provision::new().unwrap();
-        let secret = base32_decode(&provision.setup_code());
-        let now = goyo_vault::otp::now().unwrap();
-        let code = format!("{:06}", goyo_vault::otp::code(&secret, now / 30, 6));
         let mut session = provision
             .finish(
                 &temp.join("vault.goyo"),
                 &temp.join("vault.goyokey"),
                 "synthetic preview password",
-                Some(&code),
             )
             .unwrap();
         const MNEMONIC_24: &str = "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual";
@@ -9482,7 +8805,6 @@ mod tests {
                 ("0-welcome", Screen::Welcome),
                 ("1-login", Screen::Login),
                 ("2-create", Screen::Create),
-                ("2-create-otp", Screen::Create),
                 ("3-restore", Screen::Restore),
                 ("4-vault", Screen::Vault),
                 ("5-vault-selected", Screen::Vault),
@@ -9493,7 +8815,6 @@ mod tests {
                 ("7-edit", Screen::Edit),
                 ("8-new", Screen::Edit),
                 ("9-password", Screen::Password),
-                ("10-otp-backup", Screen::OtpBackup),
                 ("11-keys", Screen::Keys),
                 ("12-adopt", Screen::Adopt),
                 ("13-keys-rollback", Screen::Keys),
@@ -9550,7 +8871,6 @@ mod tests {
                     if screen == Screen::Create {
                         a.provision = Some(Provision::new().unwrap());
                     }
-                    a.create_otp = file.ends_with("2-create-otp");
                     if screen == Screen::Vault && a.session.is_none() {
                         a.session = session.take();
                     }
@@ -9596,10 +8916,6 @@ mod tests {
                             a.status = line(keys_ui::FETCHED_NEXT);
                         }
                     }
-                    a.otp_setup = file.ends_with("10-otp-backup").then(|| {
-                        let s = a.session.as_ref().unwrap();
-                        s.otp_setup("synthetic preview password").unwrap()
-                    });
                     // The mnemonic has 24 words but in its 12 and 18 shots.
                     if let Some(s) = a.session.as_mut() {
                         let n = match file.rsplit_once("revealed-") {
@@ -10194,7 +9510,7 @@ mod tests {
         let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
         let mut s = Provision::new()
             .unwrap()
-            .finish(&vault, &key, SYNC_PASSWORD, None)
+            .finish(&vault, &key, SYNC_PASSWORD)
             .unwrap();
         s.put(None, sync_entry("entry 0", "secret")).unwrap();
         drop(s);
@@ -10373,7 +9689,7 @@ mod tests {
         drop(
             Provision::new()
                 .unwrap()
-                .finish(&vault, &key, pass, None)
+                .finish(&vault, &key, pass)
                 .unwrap(),
         );
         let vault_temp = dir.join(format!("vault.goyo.{:032x}.goyotmp", 0xabc));
@@ -10548,11 +9864,11 @@ mod tests {
             tombstones: Vec::new(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(&[dk1, dk0], None).unwrap();
+        let bundle = Bundle::new(&[dk1, dk0]).unwrap();
         let (key_bytes, _) = seal(&spec, &bundle, pass, Plan::PasswordOnly).unwrap();
         std::fs::write(&key, &key_bytes).unwrap();
         let mut older = [&b"GOYOVA01"[..], &id, &[0x24; 24]].concat();
-        let plain = [0u8; 12]; // the OTP watermark and no entries
+        let plain = [0u8; 12]; // the old OTP watermark and no entries
         older.extend(crypto::seal(&dk0, &[0x24; 24], &older.clone(), &plain).unwrap());
         std::fs::write(&vault, &older).unwrap();
         unsafe {
@@ -10684,7 +10000,7 @@ mod tests {
             // scripts/make_key_fixtures.py, well-formed, damaged and newer,
             // and one that is only the magic. A path typed in (here: a file
             // swapped under it) gets the refusal at once, also when its file
-            // states an OTP vault (the GOYOKH01 fixture): no code is asked.
+            // holds a TOTP secret of the removed OTP (the GOYOKH01 fixture).
             with_app(|a| a.lock("synthetic lock", true));
             #[cfg(not(feature = "security-key"))]
             let junk = [&b"GOYOKH01"[..], &[0; 300]].concat();
@@ -10807,7 +10123,7 @@ mod tests {
                 Screen::Login,
                 &[
                     CREATE, RESTORE, BACK, SUBMIT, BROWSE_V, BROWSE_K, VPATH, KPATH, PASS,
-                    PEEK_PASS, OTP,
+                    PEEK_PASS,
                 ],
             ),
             (
@@ -10815,7 +10131,6 @@ mod tests {
                 &[
                     BACK,
                     SUBMIT,
-                    OTP_TOGGLE,
                     BROWSE_V,
                     BROWSE_K,
                     VPATH,
@@ -10824,14 +10139,12 @@ mod tests {
                     CONFIRM,
                     PEEK_PASS,
                     PEEK_CONFIRM,
-                    OTP,
                 ],
             ),
             (
                 Screen::Restore,
                 &[
-                    BACK, SUBMIT, BROWSE_V, BROWSE_K, BROWSE_D, VPATH, KPATH, DEST, PASS,
-                    PEEK_PASS, OTP,
+                    BACK, SUBMIT, BROWSE_V, BROWSE_K, BROWSE_D, VPATH, KPATH, DEST, PASS, PEEK_PASS,
                 ],
             ),
             // The vault fetched from the server (spec §2.29): no key path,
@@ -10839,7 +10152,7 @@ mod tests {
             #[cfg(feature = "security-key")]
             (
                 Screen::Fetched,
-                &[SUBMIT, BROWSE_V, VPATH, PASS, PEEK_PASS, OTP, OPEN, RESTORE][..],
+                &[SUBMIT, BROWSE_V, VPATH, PASS, PEEK_PASS, OPEN, RESTORE][..],
             ),
         ] {
             app.screen = screen;
@@ -10849,7 +10162,6 @@ mod tests {
             Screen::Vault,
             Screen::Edit,
             Screen::Password,
-            Screen::OtpBackup,
             Screen::Keys,
             Screen::Adopt,
             #[cfg(feature = "security-key")]
@@ -10879,8 +10191,8 @@ mod tests {
         let auto_lock: Vec<i32> = (AUTO_LOCK..=AUTO_LOCK_LAST).collect();
         let presets: Vec<i32> = (PRESET..=PRESET_LAST).collect();
         let vault = [
-            LOCK, BACKUP, KEYBACKUP, CHANGE, OTP_SETUP, LIST, NEW, EDIT, DELETE, REVEAL, TOGGLE,
-            COPY, PREVIOUS, NEXT,
+            LOCK, BACKUP, KEYBACKUP, CHANGE, LIST, NEW, EDIT, DELETE, REVEAL, TOGGLE, COPY,
+            PREVIOUS, NEXT,
         ];
         let edit = [TITLE, KIND, SECRET, NOTES, SAVE, CANCEL];
         for (screen, ids) in [
@@ -10895,14 +10207,9 @@ mod tests {
                     PEEK_PASS,
                     PEEK_CONFIRM,
                     PEEK_CURRENT,
-                    OTP,
                     SUBMIT,
                     CANCEL,
                 ],
-            ),
-            (
-                Screen::OtpBackup,
-                vec![CURRENT_PASS, PEEK_CURRENT, SUBMIT, CANCEL],
             ),
             (
                 Screen::Keys,
@@ -10916,18 +10223,17 @@ mod tests {
                     PENDING_FORGET,
                     CURRENT_PASS,
                     PEEK_CURRENT,
-                    OTP,
                 ],
             ),
             (
                 Screen::Adopt,
-                vec![BACK, SUBMIT, CURRENT_PASS, PEEK_CURRENT, OTP],
+                vec![BACK, SUBMIT, CURRENT_PASS, PEEK_CURRENT],
             ),
             #[cfg(feature = "security-key")]
             (
                 Screen::Pair,
                 [
-                    &[BACK, SUBMIT, CURRENT_PASS, PEEK_CURRENT, OTP][..],
+                    &[BACK, SUBMIT, CURRENT_PASS, PEEK_CURRENT][..],
                     &(keys_ui::KEY_PICK_ITEM..=keys_ui::KEY_PICK_LAST).collect::<Vec<_>>(),
                 ]
                 .concat(),
@@ -10941,7 +10247,6 @@ mod tests {
                         SUBMIT,
                         CURRENT_PASS,
                         PEEK_CURRENT,
-                        OTP,
                         PASS,
                         CONFIRM,
                         PEEK_PASS,
@@ -10966,7 +10271,6 @@ mod tests {
                         SUBMIT,
                         CURRENT_PASS,
                         PEEK_CURRENT,
-                        OTP,
                         PASS,
                         CONFIRM,
                         PEEK_PASS,
@@ -10998,7 +10302,7 @@ mod tests {
         let titles = ["entry 0", "entry 1", "entry 2", "entry 3"];
         let (mut a, vault, key) = two_pcs(&dir, &mut server, &titles);
         let ids: Vec<_> = (0..titles.len()).map(|i| a.entry_id(i).unwrap()).collect();
-        let b = Session::unlock(&vault, &key, SYNC_PASSWORD, "").unwrap();
+        let b = Session::unlock(&vault, &key, SYNC_PASSWORD).unwrap();
         let titles_of = |app: &App| -> Vec<String> {
             let s = app.session.as_ref().unwrap();
             s.entries.iter().map(|e| e.title.to_string()).collect()
@@ -11253,11 +10557,10 @@ mod tests {
     }
     /// Two PCs' key files of one vault, each changed from the same first key
     /// to its own password (a fork, spec §5.8), sealed with the Test KDF
-    /// profile; and PC B's vault file still under that first key, with no
-    /// OTP step spent (`otp`: the vault's TOTP secret). B's session opens
-    /// with a code typed `ago` seconds back, and writes its anchor line.
-    /// Returns the session and A's key file.
-    fn fork(dir: &Path, otp: Option<[u8; 20]>, ago: u64) -> (Session, PathBuf) {
+    /// profile; and PC B's vault file still under that first key. B's
+    /// session opens and writes its anchor line. Returns the session and
+    /// A's key file.
+    fn fork(dir: &Path) -> (Session, PathBuf) {
         use goyo_vault::vault::keyfile::{Bundle, Kind, Plan, Spec, seal};
         let (id, dk0) = ([0x6b; 16], [0x70; 32]);
         let key_file = |name: &str, dk: [u8; 32], password: &str| {
@@ -11271,7 +10574,7 @@ mod tests {
                 tombstones: Vec::new(),
                 resume: [0; 32],
             };
-            let bundle = Bundle::new(&[dk, dk0], otp.as_ref()).unwrap();
+            let bundle = Bundle::new(&[dk, dk0]).unwrap();
             let (bytes, _) = seal(&spec, &bundle, password, Plan::PasswordOnly).unwrap();
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
@@ -11279,7 +10582,8 @@ mod tests {
         };
         let a_key = key_file("a.goyokey", [0x71; 32], FORK_A);
         let b_key = key_file("vault.goyokey", [0x72; 32], FORK_B);
-        // GOYOVA01 under the first key: the OTP watermark 0 and no entries.
+        // GOYOVA01 under the first key: the old OTP watermark 0 and no
+        // entries.
         let b_vault = dir.join("vault.goyo");
         let nonce = [0x24; 24];
         let mut v = [&b"GOYOVA01"[..], &id, &nonce].concat();
@@ -11290,11 +10594,7 @@ mod tests {
         let VaultClass::Older { sha } = prepared.check().vault else {
             panic!("not an older-key vault file");
         };
-        let typed = goyo_vault::otp::now().unwrap() - ago;
-        let code = otp.map_or(String::new(), |secret| {
-            format!("{:06}", goyo_vault::otp::code(&secret, typed / 30, 6))
-        });
-        let s = Session::login(prepared, FORK_B, &code, typed, Some(sha)).unwrap();
+        let s = Session::login(prepared, FORK_B, Some(sha)).unwrap();
         (s, a_key)
     }
     const FORK_A: &str = "synthetic fork password on A";
@@ -11310,9 +10610,8 @@ mod tests {
         app.build();
         APP.with(|cell| *cell.borrow_mut() = Some(app));
     }
-    /// The whole adopt is one flow (spec §14.4-10 "one flow"): on an OTP
-    /// vault, [열기] takes one OTP code and one re-authentication to the
-    /// write. The other file's password is asked inside the flow, again
+    /// The whole adopt is one flow (spec §14.4-10 "one flow"): [열기] takes
+    /// one re-authentication to the write. The other file's password is asked inside the flow, again
     /// after a wrong one; the preview and S-ADOPT-BOTHPASS follow, and
     /// App.serial stays as it was across every dialog. Both PCs changed the
     /// password since the key they share, so the files are a fork: a union,
@@ -11322,10 +10621,7 @@ mod tests {
         let _korean = KoreanAfter::hold();
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let dir = test_dir("adopt-flow");
-        let secret = [0x3c; 20];
-        // B's own steps were spent minutes ago: only the code typed for
-        // this flow is fresh.
-        let (s, a_key) = fork(&dir, Some(secret), 150);
+        let (s, a_key) = fork(&dir);
         let b_key = s.key_path.clone();
         let before = std::fs::read(&b_key).unwrap();
         let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
@@ -11368,13 +10664,8 @@ mod tests {
                     true
                 }))
             });
-            let code = format!(
-                "{:06}",
-                goyo_vault::otp::code(&secret, goyo_vault::otp::now().unwrap() / 30, 6)
-            );
             with_app(|a| {
                 SetWindowTextW(a.handle(CURRENT_PASS), wide(FORK_B).as_ptr());
-                SetWindowTextW(a.handle(OTP), wide(&code).as_ptr());
             });
             SendMessageW(h, 0x111, SUBMIT as usize, 0);
             assert_eq!(asked.borrow().len(), 3);
@@ -11413,7 +10704,7 @@ mod tests {
         let _korean = KoreanAfter::hold();
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let dir = test_dir("adopt-stop");
-        let (s, a_key) = fork(&dir, None, 0);
+        let (s, a_key) = fork(&dir);
         let (b_vault, b_key) = (s.path.clone(), s.key_path.clone());
         let files = || {
             (
@@ -11453,7 +10744,7 @@ mod tests {
             // No Reauth left: this one gets the key file's lock.
             with_app(|a| {
                 let s = a.session.as_mut().unwrap();
-                drop(s.reauth(FORK_B, None, None).unwrap());
+                drop(s.reauth(FORK_B, None).unwrap());
             });
             // No at S-ADOPT-BOTHPASS.
             inputs(&asked, |_, _, kind| match kind {
@@ -11481,8 +10772,7 @@ mod tests {
             // Open again (B's vault is under its own key now), and receive
             // with the box unticked: A's password from now on.
             let prepared = vault::prepare(&b_vault, &b_key).unwrap();
-            let now = goyo_vault::otp::now().unwrap();
-            let s = Session::login(prepared, FORK_B, "", now, None).unwrap();
+            let s = Session::login(prepared, FORK_B, None).unwrap();
             with_app(|a| {
                 a.session = Some(s);
                 a.adopt_source = Some(a_key.clone());
@@ -11524,17 +10814,12 @@ mod tests {
         vault::set_anchor_dir(Some(dir.join("anchor-a")));
         let mut sa = Provision::new()
             .unwrap()
-            .finish(
-                &pa.join("vault.goyo"),
-                &pa.join("vault.goyokey"),
-                pass,
-                None,
-            )
+            .finish(&pa.join("vault.goyo"), &pa.join("vault.goyokey"), pass)
             .unwrap();
         for name in ["vault.goyo", "vault.goyokey"] {
             std::fs::copy(pa.join(name), pb.join(name)).unwrap();
         }
-        let r = sa.reauth(pass, None, None).unwrap();
+        let r = sa.reauth(pass, None).unwrap();
         let next = "synthetic successor password 2";
         let change = vault::Change::Password(Zeroizing::new(next.to_owned()));
         sa.rekey(r, Vec::new(), change, vault::Consent::default(), true)
@@ -11542,8 +10827,7 @@ mod tests {
         let a_code = sa.key_code().unwrap();
         drop(sa);
         vault::set_anchor_dir(Some(dir.join("anchor")));
-        let s =
-            Session::unlock(&pb.join("vault.goyo"), &pb.join("vault.goyokey"), pass, "").unwrap();
+        let s = Session::unlock(&pb.join("vault.goyo"), &pb.join("vault.goyokey"), pass).unwrap();
         let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
         unsafe {
             let h = flow_window("GoyoAdoptSuccessorTest");
@@ -11593,12 +10877,9 @@ mod tests {
         let dir = test_dir("keys-rollback");
         let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
         let (old, new) = ("synthetic put back password", "synthetic newer password");
-        let mut s = Provision::new()
-            .unwrap()
-            .finish(&vault, &key, old, None)
-            .unwrap();
+        let mut s = Provision::new().unwrap().finish(&vault, &key, old).unwrap();
         let (k0, v0) = (std::fs::read(&key).unwrap(), std::fs::read(&vault).unwrap());
-        let r = s.reauth(old, None, None).unwrap();
+        let r = s.reauth(old, None).unwrap();
         let change = vault::Change::Password(Zeroizing::new(new.to_owned()));
         s.rekey(r, Vec::new(), change, vault::Consent::default(), true)
             .unwrap();
@@ -11606,7 +10887,7 @@ mod tests {
         // The old pair put back.
         std::fs::write(&key, &k0).unwrap();
         std::fs::write(&vault, &v0).unwrap();
-        let s = Session::unlock(&vault, &key, old, "").unwrap();
+        let s = Session::unlock(&vault, &key, old).unwrap();
         assert!(s.local_rollback());
         let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
         unsafe {
@@ -11680,7 +10961,7 @@ mod tests {
         vault::set_anchor_dir(Some(dir.join("anchor-a")));
         let (mut a, vault_b, key_b) = two_pcs(&dir, &mut server, &["entry 0"]);
         // A changes the key and uploads under it.
-        let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+        let r = a.reauth(SYNC_PASSWORD, None).unwrap();
         let change = vault::Change::Password(Zeroizing::new("synthetic key of A".into()));
         a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
             .unwrap();
@@ -11744,7 +11025,7 @@ mod tests {
         let (mut a, _, _) = two_pcs(&dir, &mut server, &["entry 0"]);
         let (vault, key) = (a.path.clone(), dir.join("a").join("vault.goyokey"));
         let (k0, v0) = (std::fs::read(&key).unwrap(), std::fs::read(&vault).unwrap());
-        let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+        let r = a.reauth(SYNC_PASSWORD, None).unwrap();
         let change = vault::Change::Password(Zeroizing::new("synthetic newer password".into()));
         a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
             .unwrap();
@@ -11752,7 +11033,7 @@ mod tests {
         drop(a);
         std::fs::write(&key, &k0).unwrap();
         std::fs::write(&vault, &v0).unwrap();
-        let mut s = Session::unlock(&vault, &key, SYNC_PASSWORD, "").unwrap();
+        let mut s = Session::unlock(&vault, &key, SYNC_PASSWORD).unwrap();
         assert!(s.local_rollback() && s.badge().is_some());
         // Shown at the unlock.
         s.take_key_notices();
@@ -11782,8 +11063,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     /// A gate that comes up while S-ROTATE is open (a poll halts sync on
-    /// another PC's key change) is asked before the re-authentication
-    /// spends the OTP code: No changes nothing, and no question ends up as
+    /// another PC's key change) is asked before the re-authentication: No
+    /// changes nothing, and no question ends up as
     /// a status line (spec §7.5, §2.18 #64).
     #[test]
     fn a_gate_that_comes_up_during_a_question_is_asked_first() {
@@ -11794,7 +11075,7 @@ mod tests {
         vault::set_anchor_dir(Some(dir.join("anchor-a")));
         let (mut a, vault_b, key_b) = two_pcs(&dir, &mut server, &["entry 0"]);
         vault::set_anchor_dir(Some(dir.join("anchor")));
-        let b = Session::unlock(&vault_b, &key_b, SYNC_PASSWORD, "").unwrap();
+        let b = Session::unlock(&vault_b, &key_b, SYNC_PASSWORD).unwrap();
         assert_eq!(b.password_change(), Ok(None));
         let key = std::fs::read(&key_b).unwrap();
         let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));
@@ -11818,7 +11099,7 @@ mod tests {
             ANSWER.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move |text: &str| {
                     record.borrow_mut().push(text.to_owned());
-                    let r = a.reauth(SYNC_PASSWORD, None, None).unwrap();
+                    let r = a.reauth(SYNC_PASSWORD, None).unwrap();
                     let to = Zeroizing::new("synthetic key of A".to_owned());
                     let change = vault::Change::Password(to);
                     a.rekey(r, Vec::new(), change, vault::Consent::default(), true)
@@ -12242,19 +11523,16 @@ mod tests {
         }
     }
 
-    /// SUBMIT (or Enter) on Restore and on OtpBackup runs as a flow
-    /// through phased_command in both builds (spec §9.2a; S45-1 #13, S45-2
-    /// #17), as on Create: the default build's has no question and no
-    /// ceremony, the security-key build's a touch. Enter on the QR of an
-    /// OTP backup still closes it.
+    /// SUBMIT (or Enter) on Restore runs as a flow through phased_command
+    /// in both builds (spec §9.2a; S45-1 #13, S45-2 #17), as on Create: the
+    /// default build's has no question and no ceremony, the security-key
+    /// build's a touch.
     #[test]
-    fn restore_and_otp_backup_submit_run_as_flows() {
+    fn restore_submit_runs_as_a_flow() {
         let mut app = App::new(0);
         app.screen = Screen::Restore;
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         assert!(phased(SUBMIT) && phased(1) && !phased(BACK));
-        with_app(|a| a.screen = Screen::OtpBackup);
-        assert!(phased(SUBMIT) && phased(1) && !phased(CANCEL));
         with_app(|a| a.screen = Screen::Create);
         assert!(phased(SUBMIT));
         with_app(|a| a.screen = Screen::Vault);
@@ -13114,7 +12392,7 @@ mod tests {
             let new = register(&*fake, &provision.vault_id(), 1, 0, false, Vec::new()).unwrap();
             drop(
                 provision
-                    .finish_with_keys(&vault, &key, pass, None, false, vec![new])
+                    .finish_with_keys(&vault, &key, pass, false, vec![new])
                     .unwrap(),
             );
             let (vault_bytes, key_bytes) =
@@ -13463,7 +12741,7 @@ mod tests {
             drop(
                 Provision::new()
                     .unwrap()
-                    .finish(&vault, &key, pass, None)
+                    .finish(&vault, &key, pass)
                     .unwrap(),
             );
             let clock = Arc::new(AtomicU64::new(1_000_000));
@@ -13666,7 +12944,7 @@ mod tests {
                 .collect();
             let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
             let mut a = provision
-                .finish_with_keys(&va, &ka, pass, None, false, keys)
+                .finish_with_keys(&va, &ka, pass, false, keys)
                 .unwrap();
             let code_e1 = a.key_code().unwrap();
             // PC B: a copy of A's files, its own anchor.
@@ -13719,7 +12997,7 @@ mod tests {
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let remove = |a: &mut Session, number: u8| {
                 let t = touched(&fake, devices[0], a, 1);
-                let r = a.reauth(pass, None, Some(&t)).unwrap();
+                let r = a.reauth(pass, Some(&t)).unwrap();
                 let change = vault::Change::Remove {
                     remove: vec![number],
                     new_password: None,
@@ -13916,7 +13194,7 @@ mod tests {
             vault::set_anchor_dir(Some(dir.join("anchor")));
             let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
             let s = provision
-                .finish_with_keys(&vault, &key, pass, None, false, keys)
+                .finish_with_keys(&vault, &key, pass, false, keys)
                 .unwrap();
             (s, devices)
         }
@@ -14710,7 +13988,7 @@ mod tests {
             // review).
             vault::set_anchor_dir(Some(anchor_a));
             let t = touched(&fake, devices[1], &a, 2);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             let change = vault::Change::Remove {
                 remove: vec![4],
                 new_password: None,
@@ -14808,7 +14086,7 @@ mod tests {
             // A turns the keys off; B gets that key file.
             vault::set_anchor_dir(Some(anchor_a));
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             a.rekey(
                 r,
                 vec![],
@@ -14892,7 +14170,7 @@ mod tests {
             // A adds X as key 5 with key 1's touch.
             let x = fake.plug(Device::default());
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             let (planned, exclude) = a.add_plan(1).unwrap();
             assert_eq!(planned, [5]);
             fake.touch(Some(x));
@@ -15084,14 +14362,12 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir_b);
         }
 
-        /// Restore and the OTP backup of a key file with security keys
-        /// (spec §9.2 "Unlock / Restore", "OTP backup", §9.2a; S45-1 #13,
-        /// S45-2 #17): both run through phased_command, and each takes one
-        /// touch with no borrow held: the OTP backup of a live,
-        /// non-suspended key (a wrong password still counts as a failed
-        /// attempt, after the touch), Restore with the unlock's allow list.
+        /// Restore of a key file with security keys (spec §9.2 "Unlock /
+        /// Restore", §9.2a; S45-1 #13, S45-2 #17): it runs through
+        /// phased_command and takes one touch with no borrow held, with the
+        /// unlock's allow list.
         #[test]
-        fn restore_and_otp_backup_take_a_touch() {
+        fn restore_takes_a_touch() {
             let _korean = KoreanAfter::hold();
             crypto::set_kdf_profile(crypto::KdfProfile::Test);
             let dir = test_dir("ceremony-restore");
@@ -15101,10 +14377,6 @@ mod tests {
             let devices: Vec<usize> = (0..2).map(|_| fake.plug(Device::default())).collect();
             let provision = Provision::new().unwrap();
             let id = provision.vault_id();
-            let secret = super::base32_decode(&provision.setup_code());
-            let now = goyo_vault::otp::now().unwrap();
-            let code = |step: u64| format!("{:06}", goyo_vault::otp::code(&secret, step, 6));
-            let step = provision.check_otp(&code(now / 30 - 1), now).unwrap();
             let keys: Vec<_> = devices
                 .iter()
                 .zip(1u8..)
@@ -15116,7 +14388,7 @@ mod tests {
             vault::set_anchor_dir(Some(dir.join("anchor")));
             let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
             let s = provision
-                .finish_with_keys(&vault, &key, pass, Some(step), false, keys)
+                .finish_with_keys(&vault, &key, pass, false, keys)
                 .unwrap();
             let backup = dir.join("backup.goyo");
             std::fs::copy(&vault, &backup).unwrap();
@@ -15127,51 +14399,22 @@ mod tests {
                 a.session = Some(s);
                 a.show(Screen::Vault);
                 a.build();
-                a.command(OTP_SETUP, 0).unwrap();
-                assert!(a.screen == Screen::OtpBackup && a.otp_setup.is_none());
-            });
-            assert!(phased(SUBMIT) && phased(1));
-            // A wrong password: the touch, then the failed attempt.
-            set(h, CURRENT_PASS, "wrong synthetic password");
-            auth.plan(&[Some(devices[1])]);
-            let seen = fake.seen().len();
-            press(h, SUBMIT);
-            assert_eq!(fake.seen().len(), seen + 1);
-            assert_eq!(fake.seen().last().unwrap().credentials.len(), 2);
-            assert_eq!(fake.seen().last().unwrap().owner, h);
-            with_app(|a| {
-                assert!(a.otp_setup.is_none() && a.failed == 1 && a.flow.is_none());
-                a.retry = Instant::now();
-            });
-            set(h, CURRENT_PASS, pass);
-            auth.plan(&[Some(devices[0])]);
-            press(h, SUBMIT);
-            assert_eq!(fake.seen().len(), seen + 2);
-            with_app(|a| {
-                assert!(a.otp_setup.is_some() && a.failed == 0 && a.flow.is_none());
-                assert!(a.screen == Screen::OtpBackup);
-            });
-            // Enter on the QR closes it, as before.
-            assert!(!phased(1));
-            press(h, 1);
-            with_app(|a| {
-                assert!(a.otp_setup.is_none() && a.screen == Screen::Vault);
                 a.lock("synthetic lock", true);
                 a.command(RESTORE, 0).unwrap();
                 assert!(a.screen == Screen::Restore);
             });
-            assert!(phased(SUBMIT));
+            assert!(phased(SUBMIT) && phased(1));
+            let seen = fake.seen().len();
             let restored = dir.join("restored.goyo");
             set(h, VPATH, &backup.to_string_lossy());
             set(h, KPATH, &key.to_string_lossy());
             set(h, DEST, &restored.to_string_lossy());
             set(h, PASS, pass);
-            let now = goyo_vault::otp::now().unwrap();
-            set(h, OTP, &code(now / 30));
             auth.plan(&[Some(devices[1])]);
             press(h, SUBMIT);
-            assert_eq!(fake.seen().len(), seen + 3, "{}", status());
+            assert_eq!(fake.seen().len(), seen + 1, "{}", status());
             assert_eq!(fake.seen().last().unwrap().credentials.len(), 2);
+            assert_eq!(fake.seen().last().unwrap().owner, h);
             with_app(|a| {
                 let s = a.session.as_ref().expect("restored with the touch");
                 assert!(s.path.ends_with("restored.goyo"), "{}", s.path.display());
@@ -15220,7 +14463,7 @@ mod tests {
             // A retires key 4 and uploads under its new key.
             vault::set_anchor_dir(Some(anchor_a));
             let t = touched(&fake, devices[1], &a, 2);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             let change = vault::Change::Remove {
                 remove: vec![4],
                 new_password: None,
@@ -15262,10 +14505,10 @@ mod tests {
 
         /// A Reauth too old for the next step is taken again in the same
         /// flow (S-REAUTH-AGAIN, spec §9.2a; S45-2 #19, S45-3 #16), keeping
-        /// what the flow holds: keys on of an OTP vault asks a new OTP code
-        /// before the write (its own file has no key), and an added key's
-        /// write asks the same key's touch again. Either way the write
-        /// lands; the old Reauth would have been refused at R0.
+        /// what the flow holds: keys on (its own file has no key) takes it
+        /// from the flow's snapshot with no dialog before the write, and an
+        /// added key's write asks the same key's touch again. Either way the
+        /// write lands; the old Reauth would have been refused at R0.
         #[test]
         fn a_reauth_too_old_is_taken_again_in_the_flow() {
             let _korean = KoreanAfter::hold();
@@ -15275,14 +14518,9 @@ mod tests {
             let clock = Arc::new(AtomicU64::new(1_000_000));
             let fake = Arc::new(Fake::new(Some(clock.clone())));
             let provision = Provision::new().unwrap();
-            let secret = super::base32_decode(&provision.setup_code());
-            let now = goyo_vault::otp::now().unwrap();
-            let code = |step: u64| format!("{:06}", goyo_vault::otp::code(&secret, step, 6));
             let (vault, key) = (dir.join("vault.goyo"), dir.join("vault.goyokey"));
             vault::set_anchor_dir(Some(dir.join("anchor")));
-            let s = provision
-                .finish(&vault, &key, pass, Some(&code(now / 30 - 1)))
-                .unwrap();
+            let s = provision.finish(&vault, &key, pass).unwrap();
             let k1 = fake.plug(Device::default());
             let auth = Scripted::new(fake.clone());
             let h = window("GoyoCeremonyReauth", &vault, &key, auth.clone(), &clock);
@@ -15295,7 +14533,6 @@ mod tests {
                 a.toggles.keyon_pw = false;
             });
             set(h, CURRENT_PASS, pass);
-            set(h, OTP, &code(now / 30));
             // S-SPARE stays open past the Reauth's life.
             let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
             let late = clock.clone();
@@ -15311,27 +14548,27 @@ mod tests {
             });
             let inputs = std::rc::Rc::new(RefCell::new(Vec::new()));
             let record = inputs.clone();
-            let again = code(now / 30 + 1);
             every_input(move |_, text, kind| {
+                assert!(
+                    !matches!(kind, InputKind::Code(_)),
+                    "no code is asked: {text}"
+                );
                 record.borrow_mut().push(text.to_owned());
-                match kind {
-                    InputKind::Code(_) => InputAnswer::Code(Zeroizing::new(again.clone())),
-                    _ => InputAnswer::Accept { checked: false },
-                }
+                InputAnswer::Accept { checked: false }
             });
             auth.plan(&[Some(k1), Some(k1), Some(k1)]);
             press(h, keys_ui::KEY_ON);
             stop_answers();
-            // S-REAUTH-AGAIN, then the change's longer lines after S-BACKUP.
-            assert_eq!(inputs.borrow().len(), 2, "{}", status());
-            assert_eq!(inputs.borrow()[0], keys_ui::REAUTH_AGAIN_OTP);
+            // No S-REAUTH-AGAIN dialog: only the change's longer lines after
+            // S-BACKUP.
+            assert_eq!(inputs.borrow().len(), 1, "{}", status());
             with_app(|a| {
                 let o = a.session.as_ref().unwrap().keys_overview();
                 assert_eq!(numbers(&o), [1], "{}", *a.status);
                 assert!(a.screen == Screen::Keys && a.flow.is_none());
             });
 
-            // A vault with four keys and no OTP: [키 추가] with key 1, and
+            // A vault with four keys: [키 추가] with key 1, and
             // S-ADD-PAIR stays open too long; the write asks key 1's touch
             // again (S-REAUTH-AGAIN's touch text), its allow list key 1 alone.
             let dir2 = test_dir("ceremony-reauth-keys");
@@ -15766,7 +15003,7 @@ mod tests {
             std::fs::copy(&ka, &kb).unwrap();
             // A retires key 3 with key 2's touch.
             let t = touched(&fake, devices[1], &a, 2);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             let change = vault::Change::Remove {
                 remove: vec![3],
                 new_password: None,
@@ -15791,7 +15028,7 @@ mod tests {
             with_app(|a| {
                 let s = a.session.as_mut().unwrap();
                 let t = touched(&fake, devices[2], s, 3);
-                let r = s.reauth(pass, None, Some(&t)).unwrap();
+                let r = s.reauth(pass, Some(&t)).unwrap();
                 let change = vault::Change::Password(Zeroizing::new(next.to_owned()));
                 s.rekey(r, vec![], change, vault::Consent::default(), false)
                     .unwrap();
@@ -15881,7 +15118,7 @@ mod tests {
             // [나중에]: gate-pending mode.
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             let change = vault::Change::Remove {
                 remove: vec![4],
                 new_password: None,
@@ -15977,7 +15214,7 @@ mod tests {
         /// A password change of A's session `s`, touched with `device`.
         fn change_password(fake: &Fake, device: usize, s: &mut Session, old: &str, new: &str) {
             let t = touched(fake, device, s, 1);
-            let r = s.reauth(old, None, Some(&t)).unwrap();
+            let r = s.reauth(old, Some(&t)).unwrap();
             let change = vault::Change::Password(Zeroizing::new(new.to_owned()));
             assert_eq!(
                 s.rekey(r, Vec::new(), change, vault::Consent::default(), true),
@@ -16020,7 +15257,7 @@ mod tests {
             vault::set_anchor_dir(Some(anchor_a.clone()));
             let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
             let mut a = provision
-                .finish_with_keys(&va, &ka, pass, None, true, keys)
+                .finish_with_keys(&va, &ka, pass, true, keys)
                 .unwrap();
             let server = Server::default();
             server.helper(&va);
@@ -16028,7 +15265,7 @@ mod tests {
             key_view(&va, 0, &[]);
             a.poll_sync();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,
@@ -16190,7 +15427,7 @@ mod tests {
             vault::set_anchor_dir(Some(anchor_a.clone()));
             let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
             let mut a = provision
-                .finish_with_keys(&va, &ka, PASS2, None, true, keys)
+                .finish_with_keys(&va, &ka, PASS2, true, keys)
                 .unwrap();
             let server = Server::default();
             server.helper(&va);
@@ -16199,7 +15436,7 @@ mod tests {
             a.poll_sync();
             if keysync {
                 let t = touched(&fake, devices[0], &a, 1);
-                let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+                let r = a.reauth(PASS2, Some(&t)).unwrap();
                 assert_eq!(
                     a.rekey(
                         r,
@@ -16293,7 +15530,7 @@ mod tests {
             // A removes key 3 and lands first.
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = a.reauth(PASS2, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(r, Vec::new(), lost(), vault::Consent::default(), false),
                 Ok(vault::Rekeyed::Done)
@@ -16307,11 +15544,11 @@ mod tests {
                 .get_assertion(&req, &fake.new_cancel().unwrap())
                 .unwrap();
             let t = check_assertion(raw, &req, false).unwrap();
-            let (mut b, _) = Session::login_proved(prepared, PASS2, "", 0, None, &t)
+            let (mut b, _) = Session::login_proved(prepared, PASS2, None, &t)
                 .ok()
                 .unwrap();
             let t = touched(&fake, devices[1], &b, 2);
-            let r = b.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = b.reauth(PASS2, Some(&t)).unwrap();
             assert_eq!(
                 b.rekey(r, Vec::new(), lost(), vault::Consent::default(), false),
                 Ok(vault::Rekeyed::Done)
@@ -16353,7 +15590,7 @@ mod tests {
             key_view(&va, 0, &[]);
             a.poll_sync();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = a.reauth(PASS2, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,
@@ -16430,7 +15667,7 @@ mod tests {
             let (anchor_a, anchor_b) = (dir_a.join("anchor"), dir_b.join("anchor"));
             vault::set_anchor_dir(Some(anchor_a.clone()));
             let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
-            let mut a = provision.finish(&va, &ka, pass, None).unwrap();
+            let mut a = provision.finish(&va, &ka, pass).unwrap();
             a.put(None, sync_entry("one", "secret")).unwrap();
             let mut server = Server::default();
             server.helper(&va);
@@ -16445,8 +15682,7 @@ mod tests {
             // B opens it once, syncing, before A's change: its record.
             vault::set_anchor_dir(Some(anchor_b.clone()));
             let prepared = vault::prepare(&vb, &kb).unwrap();
-            let now = goyo_vault::otp::now().unwrap();
-            let mut b = Session::login(prepared, pass, "", now, None).unwrap();
+            let mut b = Session::login(prepared, pass, None).unwrap();
             b.poll_sync();
             drop(b);
             vault::set_anchor_dir(Some(anchor_a.clone()));
@@ -16459,7 +15695,7 @@ mod tests {
                     register(&*fake, &id, n, 0, true, Vec::new()).unwrap()
                 })
                 .collect();
-            let r = a.reauth(pass, None, None).unwrap();
+            let r = a.reauth(pass, None).unwrap();
             let on = vault::Change::KeysOn {
                 pin: true,
                 keys,
@@ -16472,7 +15708,7 @@ mod tests {
             key_view(&va, 0, &[]);
             a.poll_sync();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,
@@ -16646,7 +15882,7 @@ mod tests {
             // A removes key 3 (no loss).
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = a.reauth(PASS2, Some(&t)).unwrap();
             let change = vault::Change::Remove {
                 remove: vec![3],
                 new_password: None,
@@ -16747,7 +15983,7 @@ mod tests {
             fake.touch(Some(d4));
             let key4 = register(&*fake, &id, 4, 0, true, Vec::new()).unwrap();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = a.reauth(PASS2, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,
@@ -16880,7 +16116,7 @@ mod tests {
             fake.touch(Some(d3));
             let key3 = register(&*fake, &id, 3, 0, true, Vec::new()).unwrap();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(PASS2, None, Some(&t)).unwrap();
+            let r = a.reauth(PASS2, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,
@@ -16996,7 +16232,7 @@ mod tests {
             vault::set_anchor_dir(Some(dir_a.join("anchor")));
             let (va, ka) = (dir_a.join("vault.goyo"), dir_a.join("vault.goyokey"));
             let mut a = provision
-                .finish_with_keys(&va, &ka, pass, None, true, keys)
+                .finish_with_keys(&va, &ka, pass, true, keys)
                 .unwrap();
             let server = Server::default();
             server.helper(&va);
@@ -17004,7 +16240,7 @@ mod tests {
             key_view(&va, 0, &[]);
             a.poll_sync();
             let t = touched(&fake, devices[0], &a, 1);
-            let r = a.reauth(pass, None, Some(&t)).unwrap();
+            let r = a.reauth(pass, Some(&t)).unwrap();
             assert_eq!(
                 a.rekey(
                     r,

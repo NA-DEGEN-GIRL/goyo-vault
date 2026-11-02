@@ -19,7 +19,6 @@ use super::{
 };
 use crate::{
     merge::{self, MergeError, MergeReport},
-    otp,
     syncfile::{self, FileError, INCOMING, OUTGOING, Stamp, SyncState, SyncStatus},
 };
 use std::{
@@ -504,7 +503,7 @@ impl SyncLink {
     }
     /// Takes the link into use. Nothing of ours is being written yet, so any
     /// temp file of ours is a leftover. Not done in `attach`: an unlock
-    /// changes nothing on disk before the OTP code passed.
+    /// changes nothing on disk before its vault file opened.
     fn start(self) -> Self {
         syncfile::remove_own_temps(&self.dir, &syncfile::APP_TEMPS);
         self
@@ -601,9 +600,6 @@ impl SyncLink {
     /// Reads and judges incoming as of `stamp` against `local`, a state of
     /// `own`.
     fn fetch(&self, stamp: Stamp, own: Own, local: DataRef) -> Fetched {
-        let Ok(now) = otp::now() else {
-            return Fetched::Retry;
-        };
         let bytes = match syncfile::read_bounded(&self.dir.join(INCOMING), syncfile::MAX_WRAPPED) {
             Ok(bytes) => bytes,
             Err(FileError::Missing) => return Fetched::Missing,
@@ -633,7 +629,7 @@ impl SyncLink {
         if blob[8..24] != own.id[..] {
             return got(version, Verdict::Foreign);
         }
-        got(version, own.judge(header, version, blob, local, now))
+        got(version, own.judge(header, version, blob, local))
     }
 }
 /// Whether `kview` changed since this poll read it (security-key build): a
@@ -755,14 +751,7 @@ impl Own<'_> {
     /// The verdict on `blob`, server version `version`, with the vault ID of
     /// this vault and `header` (None: in no vault format): by the class of
     /// its key first, then by its key-file state (spec v3 §7.1).
-    fn judge(
-        &self,
-        header: Option<Header>,
-        version: u64,
-        blob: &[u8],
-        local: DataRef,
-        now: u64,
-    ) -> Verdict {
+    fn judge(&self, header: Option<Header>, version: u64, blob: &[u8], local: DataRef) -> Verdict {
         let Some(header) = header else {
             return Verdict::Unreadable;
         };
@@ -848,7 +837,7 @@ impl Own<'_> {
         if self.hold {
             return Verdict::Held;
         }
-        match merge::merge(self.keys.id_key(), local, remote, now / 30, self.overhead()) {
+        match merge::merge(self.keys.id_key(), local, remote, self.overhead()) {
             Ok((mut merged, mut report)) => {
                 // A copy at a lower epoch gets this PC's state back, so its
                 // PC learns it is behind (spec v3 §7.3); an upload always
@@ -900,7 +889,7 @@ fn pushed_over(own: u64, theirs: u64) -> u64 {
     own.max(counted).saturating_add(1)
 }
 
-/// What `Session::load` found in the sync folder before the OTP check.
+/// What `Session::load` found in the sync folder before the session is built.
 pub(super) struct Pending {
     link: Option<Box<SyncLink>>,
     fetched: Option<Fetched>,
@@ -942,17 +931,6 @@ impl Pending {
             }
         }
         pending
-    }
-    /// The OTP watermark to check the code against: the merged one, so a code
-    /// another PC used is refused once that PC's content has synced here.
-    pub(super) fn last(&self, local: u64) -> u64 {
-        match &self.fetched {
-            Some(Fetched::Got(Arrival {
-                verdict: Verdict::Merged(merged, _),
-                ..
-            })) => merged.last.max(local),
-            _ => local,
-        }
     }
 }
 
@@ -1233,7 +1211,7 @@ impl Session {
                     offer(notice, halt.notice());
                 }
             }
-            Verdict::Merged(mut merged, report) => {
+            Verdict::Merged(merged, report) => {
                 // Every entry here whose ID does not hold its text afterwards
                 // is lost, whatever the merge made of it: deleted or edited on
                 // another PC, or pushed off its ID by other text. The merge's
@@ -1261,8 +1239,6 @@ impl Session {
                         }
                     };
                 }
-                // The OTP watermark of this session may be newer (unlock).
-                merged.last = merged.last.max(self.last);
                 // The merge's provenance lines first (spec §5.13): a merge
                 // whose lines cannot be written is not saved, and runs again
                 // at the next poll.
@@ -1406,7 +1382,7 @@ impl Session {
     /// Whether outgoing already holds this state, made from the same server
     /// version under the same header (magic, key ID, key-file state and
     /// flags): the same entries, IDs and text, and the same tombstones. The
-    /// OTP watermark and the counters do not count, as they are never
+    /// old OTP watermark and the counters do not count, as they are never
     /// uploaded alone. Any doubt (missing, busy, unreadable, another size)
     /// means no.
     fn offered(&self, link: &SyncLink) -> bool {
@@ -1581,7 +1557,7 @@ impl Session {
             }
         }
     }
-    /// Takes what `Pending::find` found once the OTP code passed. Returns
+    /// Takes what `Pending::find` found once the vault file opened. Returns
     /// whether the vault file was written; outgoing is not, it comes after
     /// the vault file (`flush_outgoing`).
     pub(super) fn settle(&mut self, pending: Pending) -> bool {
@@ -1731,12 +1707,12 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::{
-        crypto::{self, AUTH_ERROR},
+        crypto,
         vault::{
             Acks, Adopted, Change, Consent, GAP_KEPT, Gate, GatePass, KeyNotice, LOCAL_ROLLBACK,
             NO_ID, Provision, Rekeyed, SIMULATED_CRASH, Source, UnionPassword, VaultClass, anchor,
             derived_id, encode_data, encode_key,
-            keyfile::{KeyFile, Kind, Plan, Spec, key_code, key_id, parse, seal},
+            keyfile::{KeyFile, Kind, Plan, Spec, encode_key_otp, key_code, key_id, parse, seal},
             prepare, set_anchor_dir,
         },
     };
@@ -1808,7 +1784,7 @@ mod tests {
         }
         fn unlock_with(&self, password: &str) -> Session {
             self.here();
-            Session::unlock(&self.vault(), &self.key(), password, "").unwrap()
+            Session::unlock(&self.vault(), &self.key(), password).unwrap()
         }
         /// This PC's key file, brought "by USB" into `to`'s folder.
         fn key_to(&self, to: &Pc) -> PathBuf {
@@ -1941,7 +1917,7 @@ mod tests {
         let (a, b) = (t.pc("a"), t.pc("b"));
         let p = Provision::new().unwrap();
         a.here();
-        let mut sa = p.finish(&a.vault(), &a.key(), PASS, None).unwrap();
+        let mut sa = p.finish(&a.vault(), &a.key(), PASS).unwrap();
         for i in 0..n {
             sa.put(None, entry(&format!("entry {i}"), "secret"))
                 .unwrap();
@@ -1961,7 +1937,7 @@ mod tests {
         let fetched = b.0.join("from-server.goyo");
         fs::write(&fetched, &server.versions[0]).unwrap();
         b.here();
-        let restored = Session::restore(&fetched, &b.key(), &b.vault(), PASS, "").unwrap();
+        let restored = Session::restore(&fetched, &b.key(), &b.vault(), PASS).unwrap();
         assert_eq!(restored.format(), Format::V2);
         drop(restored);
         b.helper();
@@ -2080,7 +2056,7 @@ mod tests {
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
-        fs::write(a.key(), encode_key(&p.id, &p.key, None, PASS).unwrap()).unwrap();
+        fs::write(a.key(), encode_key(&p.id, &p.key, PASS).unwrap()).unwrap();
         // Entries with distinct IDs; `tag` tells the two PCs' apart.
         let made = |tag: u8, n: usize| -> Vec<Entry> {
             (0..n)
@@ -2138,54 +2114,49 @@ mod tests {
         assert_eq!(s.badge(), Some(SyncBadge::Warning));
     }
 
+    /// A synced vault made with the removed OTP: an unlock asks no code and
+    /// writes nothing, and the old watermark in each copy stays that PC's:
+    /// it is neither merged nor a reason to save or upload.
     #[test]
-    fn unlock_merges_before_the_otp_check() {
+    fn an_old_otp_vaults_watermark_is_never_merged() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
         let t = Temp::new();
         let (a, b) = (t.pc("a"), t.pc("b"));
         let p = Provision::new().unwrap();
-        let code = |step: u64| format!("{:06}", otp::code(p.otp.as_slice(), step, 6));
-        // Both PCs hold the same synced vault; no code was used yet.
-        let key = encode_key(&p.id, &p.key, Some(&p.otp), PASS).unwrap();
+        // Both PCs hold the same synced vault, each its own watermark.
+        let key = encode_key_otp(&p.id, &p.key, &[0x44; 20], PASS).unwrap();
         let mut first = entry("mail", "one");
         first.set_ids([5; 16], NO_ID);
-        let d = DataRef {
-            last: 0,
-            generation: 1,
-            seen: 0,
-            entries: std::slice::from_ref(&first),
-            tombstones: &[],
-        };
-        let vault = encode_data(&p.id, &p.key, &Header::Legacy, Format::V2, d).unwrap();
-        for pc in [&a, &b] {
+        for (pc, last) in [(&a, 5), (&b, 9)] {
+            let d = DataRef {
+                last,
+                generation: 1,
+                seen: 0,
+                entries: std::slice::from_ref(&first),
+                tombstones: &[],
+            };
+            let vault = encode_data(&p.id, &p.key, &Header::Legacy, Format::V2, d).unwrap();
             fs::write(pc.key(), &key).unwrap();
             fs::write(pc.vault(), &vault).unwrap();
             pc.helper();
         }
-        let now = otp::now().unwrap() / 30;
-        let mut sa = Session::unlock(&a.vault(), &a.key(), PASS, &code(now)).unwrap();
-        let used = sa.last;
-        assert!(used >= now);
-        // A's next content change carries the used step to the server.
+        let before = fs::read(a.vault()).unwrap();
+        let mut sa = Session::unlock(&a.vault(), &a.key(), PASS).unwrap();
+        assert_eq!(sa.last, 5);
+        assert_eq!(fs::read(a.vault()).unwrap(), before);
+        assert!(a.outgoing().is_none());
+        // A's next content change goes up with A's watermark in it.
         sa.put(None, entry("bank", "two")).unwrap();
         let (_, blob) = a.outgoing().unwrap();
-        assert_eq!(open(&sa, &blob).last, used);
+        assert_eq!(open(&sa, &blob).last, 5);
         b.incoming(1, &blob);
 
-        // B merges before checking the code, so A's code is refused there,
-        // and nothing is saved: no vault, no upload, no copy.
-        let before = fs::read(b.vault()).unwrap();
-        let refused = Session::unlock(&b.vault(), &b.key(), PASS, &code(used));
-        assert_eq!(refused.err(), Some(AUTH_ERROR));
-        assert_eq!(fs::read(b.vault()).unwrap(), before);
-        assert!(b.outgoing().is_none() && b.copies().is_empty());
-
-        // The next code opens it, merged and saved with that code used.
-        let mut sb = Session::unlock(&b.vault(), &b.key(), PASS, &code(used + 1)).unwrap();
-        assert_eq!(sb.last, used + 1);
+        // B merges it and keeps its own watermark.
+        let mut sb = Session::unlock(&b.vault(), &b.key(), PASS).unwrap();
+        assert_eq!(sb.last, 9);
         assert_eq!(titles(&sb), titles(&sa));
         let file = saved(&sb);
-        assert_eq!(file.last, used + 1);
+        assert_eq!(file.last, 9);
         assert_eq!(state(&file), local(&sb));
         let merged = SyncNotice::Merged {
             added: 1,
@@ -2205,7 +2176,7 @@ mod tests {
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
-        let mut s = p.finish(&a.vault(), &a.key(), PASS, None).unwrap();
+        let mut s = p.finish(&a.vault(), &a.key(), PASS).unwrap();
         s.put(None, entry("mail", "one")).unwrap();
         // Turned on before the helper made its folder: v2, not linked.
         s.enable_sync().unwrap();
@@ -2306,7 +2277,7 @@ mod tests {
         // The key file inside the sync folder: no link, told once.
         let inside = a.dir().join("vault.goyokey");
         fs::rename(a.key(), &inside).unwrap();
-        let mut s = Session::unlock(&a.vault(), &inside, PASS, "").unwrap();
+        let mut s = Session::unlock(&a.vault(), &inside, PASS).unwrap();
         assert_eq!(s.take_unlock_notice(), Some(SyncNotice::KeyInFolder));
         assert!(s.sync.is_none() && s.badge().is_none() && !s.sync_offer());
         assert_eq!(s.poll_sync(), None);
@@ -2389,7 +2360,7 @@ mod tests {
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
-        let mut s = p.finish(&a.vault(), &a.key(), PASS, None).unwrap();
+        let mut s = p.finish(&a.vault(), &a.key(), PASS).unwrap();
         s.put(None, entry("mail", "one")).unwrap();
         a.helper();
         s.enable_sync().unwrap();
@@ -2668,7 +2639,7 @@ mod tests {
         let t = Temp::new();
         let a = t.pc("a");
         let p = Provision::new().unwrap();
-        let mut s = p.finish(&a.vault(), &a.key(), PASS, None).unwrap();
+        let mut s = p.finish(&a.vault(), &a.key(), PASS).unwrap();
         for value in ["one", "one"] {
             s.put(None, entry("mail", value)).unwrap();
         }
@@ -2712,10 +2683,10 @@ mod tests {
         c.helper();
         let inside = c.dir().join("vault.goyokey");
         let q = Provision::new().unwrap();
-        let s = q.finish(&c.vault(), &inside, PASS, None).unwrap();
+        let s = q.finish(&c.vault(), &inside, PASS).unwrap();
         assert!(!s.sync_offer());
         drop(s);
-        let mut s = Session::unlock(&c.vault(), &inside, PASS, "").unwrap();
+        let mut s = Session::unlock(&c.vault(), &inside, PASS).unwrap();
         assert_eq!(s.take_unlock_notice(), Some(SyncNotice::KeyInFolder));
         assert!(!s.sync_offer() && s.badge().is_none());
     }
@@ -2947,7 +2918,7 @@ mod tests {
     /// A password change of `s` from `from` to `to` (spec v3 §5.5), the gate
     /// answered yes.
     fn change(s: &mut Session, from: &str, to: &str) -> Rekeyed {
-        let r = s.reauth(from, None, None).unwrap();
+        let r = s.reauth(from, None).unwrap();
         let to = Change::Password(Zeroizing::new(to.to_owned()));
         s.rekey(r, Vec::new(), to, Consent::default(), true)
             .unwrap()
@@ -2956,7 +2927,7 @@ mod tests {
     /// `password` opens, as the flow makes it: checked, opened, previewed and
     /// written with the defaults, and yes to S-ADOPT-BOTHPASS where asked.
     fn adopt(s: &mut Session, own: &str, other: &Path, password: &str) -> Adopted {
-        let r = s.reauth(own, None, None).unwrap();
+        let r = s.reauth(own, None).unwrap();
         let file = KeyFile::read(other).unwrap();
         let check = s
             .adopt_check(&file, Source::File(other.to_owned()))
@@ -2993,7 +2964,7 @@ mod tests {
         let fetched = c.0.join("from-server.goyo");
         fs::write(&fetched, server.versions.last().unwrap()).unwrap();
         c.here();
-        drop(Session::restore(&fetched, &c.key(), &c.vault(), PASS, "").unwrap());
+        drop(Session::restore(&fetched, &c.key(), &c.vault(), PASS).unwrap());
         c.helper();
         let mut sc = c.unlock();
         server.pass(&c);
@@ -3081,7 +3052,7 @@ mod tests {
             let a = t.pc("a");
             a.here();
             let p = Provision::new().unwrap();
-            let mut s = p.finish(&a.vault(), &a.key(), PASS, None).unwrap();
+            let mut s = p.finish(&a.vault(), &a.key(), PASS).unwrap();
             s.put(None, entry("mine", "secret")).unwrap();
             a.helper();
             s.enable_sync().unwrap();
@@ -3652,8 +3623,7 @@ mod tests {
         let VaultClass::Older { sha } = prepared.check().vault else {
             panic!("not an older vault file: {:?}", prepared.check());
         };
-        let now = otp::now().unwrap();
-        let mut sb = Session::login(prepared, NEW, "", now, Some(sha)).unwrap();
+        let mut sb = Session::login(prepared, NEW, Some(sha)).unwrap();
         assert!(sb.take_key_notices().contains(&KeyNotice::OlderAccepted));
         assert_eq!(titles(&sb).len(), 3);
         rounds(&mut server, &mut [(&b, &mut sb), (&a, &mut sa)], 2);
@@ -3791,8 +3761,7 @@ mod tests {
             // A backup from before both changes restores with the union.
             for (pc, name) in [(&a, "ra.goyo"), (&b, "rb.goyo"), (&c, "rc.goyo")] {
                 pc.here();
-                let restored =
-                    Session::restore(&backup, &pc.key(), &pc.0.join(name), NEW, "").unwrap();
+                let restored = Session::restore(&backup, &pc.key(), &pc.0.join(name), NEW).unwrap();
                 assert_eq!(local(&restored), before.1);
             }
             // Three anchors, one per PC; none in the real folder.
@@ -3913,7 +3882,7 @@ mod tests {
         let head = sa.head_to_override().unwrap();
         assert_eq!((head.version, head.epoch), (version, 1));
         assert_eq!(head.key_prefix().len(), 8);
-        let r = sa.reauth(NEW, None, None).unwrap();
+        let r = sa.reauth(NEW, None).unwrap();
         sa.override_head(r, &head).unwrap();
         assert_eq!(a.outgoing().unwrap().0, version);
         rounds(&mut server, &mut [(&a, &mut sa), (&b, &mut sb)], 2);
@@ -3935,7 +3904,7 @@ mod tests {
             let (a, mut sa, _b, _sb) = pair(&t, &mut server, 2);
             sa.put(None, entry("late", "edit")).unwrap();
             let _ = fs::remove_file(a.dir().join(OUTGOING));
-            let r = sa.reauth(PASS, None, None).unwrap();
+            let r = sa.reauth(PASS, None).unwrap();
             crate::vault::CRASH.with(|c| c.set(Some(point)));
             let to = Change::Password(Zeroizing::new(NEW.to_owned()));
             let result = sa.rekey(r, Vec::new(), to, Consent::default(), true);
@@ -4002,14 +3971,14 @@ mod tests {
         let head = sb.head_to_override().unwrap();
         assert_eq!((head.version, head.epoch), (2, 1));
         // A Reauth of another session does not do.
-        let other = sc.reauth(PASS, None, None).unwrap();
+        let other = sc.reauth(PASS, None).unwrap();
         assert!(sb.override_head(other, &head).is_err());
         assert!(b.outgoing().is_none());
         // The same bytes as a later version: not the version shown, so not
         // pushed over.
         let shown = server.versions[1].clone();
         b.incoming(3, &shown);
-        let r = sb.reauth(PASS, None, None).unwrap();
+        let r = sb.reauth(PASS, None).unwrap();
         assert!(sb.override_head(r, &head).is_err());
         assert!(b.outgoing().is_none());
         b.incoming(2, &shown);
@@ -4028,14 +3997,14 @@ mod tests {
         let forged = copy_of(&id, &random, forged_header, Format::V2, &[], &[], 3, false);
         server.versions.push(forged.clone());
         server.pass(&b);
-        let r = sb.reauth(PASS, None, None).unwrap();
+        let r = sb.reauth(PASS, None).unwrap();
         assert!(sb.override_head(r, &head).is_err());
         assert!(b.outgoing().is_none());
         // The forged one halts too, told no second time, and is cleared.
         assert_eq!(sb.poll_sync().and_then(|e| e.notice), None);
         let head = sb.head_to_override().unwrap();
         assert_eq!((head.version, head.epoch), (3, 9));
-        let r = sb.reauth(PASS, None, None).unwrap();
+        let r = sb.reauth(PASS, None).unwrap();
         sb.override_head(r, &head).unwrap();
         assert_eq!(b.outgoing().unwrap().0, 3);
         assert!(sb.halted_head().is_none());
@@ -4127,7 +4096,7 @@ mod tests {
         assert_eq!(sb.rekey_gate(&change_b), Some(Gate::KeyHalt));
         // Asked and refused: nothing written.
         let key = fs::read(b.key()).unwrap();
-        let r = sb.reauth(PASS, None, None).unwrap();
+        let r = sb.reauth(PASS, None).unwrap();
         let refused = sb.rekey(r, Vec::new(), change_b, Consent::default(), false);
         assert_eq!(refused, Err(Gate::KeyHalt.question()));
         assert_eq!(fs::read(b.key()).unwrap(), key);
@@ -4359,7 +4328,7 @@ mod tests {
                 key_id: [0; 16],
                 sha: sha256(&blob3),
             };
-            let r = sa.reauth(NEW, None, None).unwrap();
+            let r = sa.reauth(NEW, None).unwrap();
             assert_eq!(sa.override_head(r, &head), Err(LOCAL_ROLLBACK));
             sa.put(None, entry("local", "edit")).unwrap();
             for _ in 0..50 {
@@ -4370,7 +4339,7 @@ mod tests {
             assert_eq!(server.head(), 3);
             assert!(a.copies().is_empty());
             if confirm {
-                let r = sa.reauth(NEW, None, None).unwrap();
+                let r = sa.reauth(NEW, None).unwrap();
                 sa.confirm_key_file(r).unwrap();
                 server.pass(&a);
                 let ev = sa.poll_sync().unwrap();
@@ -4483,7 +4452,7 @@ mod tests {
             tombstones: Vec::new(),
             resume: [0; 32],
         };
-        let bundle = Bundle::new(&[dk1, dk0], None).unwrap();
+        let bundle = Bundle::new(&[dk1, dk0]).unwrap();
         let (key, _) = seal(&spec, &bundle, PASS, Plan::PasswordOnly).unwrap();
         let header = Header::Keyed {
             key_id: key_id(&id, &dk1),

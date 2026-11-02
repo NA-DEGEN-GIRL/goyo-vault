@@ -13,8 +13,7 @@ use crate::{
     transport::Output,
 };
 use goyo_vault::{
-    crypto::AUTH_ERROR,
-    otp,
+    clock,
     syncfile::{HELPER_STATE, INCOMING, OUTGOING},
     syncwire::{Op, Response, sha256},
     vault::{Entry, Format, MAX_FILE, Provision, Session, SyncBadge, SyncEvent, SyncNotice},
@@ -58,8 +57,8 @@ impl Pc {
             other => panic!("{other:?}"),
         }
     }
-    fn unlock(&self, code: &str) -> Session {
-        Session::unlock(&self.vault, &self.key, PASSWORD, code).unwrap()
+    fn unlock(&self) -> Session {
+        Session::unlock(&self.vault, &self.key, PASSWORD).unwrap()
     }
     /// The base of the app's waiting upload, if any.
     fn outgoing(&self) -> Option<u64> {
@@ -84,7 +83,7 @@ impl Pc {
         let (vault, key) = (t.0.join("vault.goyo"), t.0.join("vault.goyokey"));
         fs::copy(&self.vault, &vault).unwrap();
         fs::copy(&self.key, &key).unwrap();
-        titles(&Session::unlock(&vault, &key, PASSWORD, "").unwrap())
+        titles(&Session::unlock(&vault, &key, PASSWORD).unwrap())
     }
 }
 fn engine(folder: &Path, vault: &Path, root: &Path) -> Engine<Local> {
@@ -233,68 +232,11 @@ fn head_titles(store: &Store, key: &Path, id: [u8; 16]) -> Vec<String> {
         OK
     );
     let restored = t.0.join("vault.goyo");
-    titles(&Session::restore(&fetched, key, &restored, PASSWORD, "").unwrap())
+    titles(&Session::restore(&fetched, key, &restored, PASSWORD).unwrap())
 }
 
-/// Codes from the authenticator app. Each is for a later time step than
-/// the last one used, since a PC accepts a step only once and the PCs share
-/// the watermark through sync.
-struct Otp {
-    secret: Vec<u8>,
-    used: u64,
-}
-impl Otp {
-    fn new(setup: &str) -> Self {
-        let (mut secret, mut acc, mut bits) = (Vec::new(), 0u32, 0);
-        for c in setup.bytes() {
-            let v = match c {
-                b'A'..=b'Z' => c - b'A',
-                b'2'..=b'7' => c - b'2' + 26,
-                _ => panic!("not base32"),
-            };
-            acc = ((acc << 5) | u32::from(v)) & 0xFFFF;
-            bits += 5;
-            if bits >= 8 {
-                bits -= 8;
-                secret.push((acc >> bits) as u8);
-            }
-        }
-        assert_eq!(secret.len(), 20);
-        Self { secret, used: 0 }
-    }
-    /// A vault accepts steps now-1 to now+1. The oldest is used only while
-    /// it stays good for the slow key derivation that comes before the
-    /// check; past now+1 this waits for the next step.
-    fn next(&mut self) -> String {
-        loop {
-            let now = otp::now().unwrap();
-            let step = now / 30;
-            let lowest = if 30 - now % 30 > 10 { step - 1 } else { step };
-            let pick = lowest.max(self.used + 1);
-            if pick <= step + 1 {
-                self.used = pick;
-                return format!("{:06}", otp::code(&self.secret, pick, 6));
-            }
-            std::thread::sleep(Duration::from_secs(30 - now % 30));
-        }
-    }
-    /// The code of the next time step, which every vault accepts for at
-    /// least another minute: a refusal within that time is not the clock's.
-    fn lasting(&mut self) -> String {
-        loop {
-            let now = otp::now().unwrap();
-            let pick = now / 30 + 1;
-            if pick > self.used {
-                self.used = pick;
-                return format!("{:06}", otp::code(&self.secret, pick, 6));
-            }
-            std::thread::sleep(Duration::from_secs(30 - now % 30));
-        }
-    }
-}
-
-/// Spec §17 item 22, scenarios 1 to 12, in one history: two PCs with an
-/// OTP-free vault, one server, and the failures the design must survive.
+/// Spec §17 item 22, scenarios 1 to 12, in one history: two PCs with a
+/// vault, one server, and the failures the design must survive.
 #[test]
 fn two_pcs_end_to_end() {
     if !python() {
@@ -305,7 +247,7 @@ fn two_pcs_end_to_end() {
 
     // ---- 1 (S1): first setup into an empty server ----
     let p = Provision::new().unwrap();
-    let mut sa = p.finish(&a.vault, &a.key, PASSWORD, None).unwrap();
+    let mut sa = p.finish(&a.vault, &a.key, PASSWORD).unwrap();
     for title in ["mail", "bank", "shop"] {
         sa.put(None, entry(title, "first")).unwrap();
     }
@@ -331,11 +273,11 @@ fn two_pcs_end_to_end() {
         fetch_into(&mut store.local(), &log, "my-server", id, 0, &fetched),
         OK
     );
-    let restored = Session::restore(&fetched, &b.key, &b.vault, PASSWORD, "").unwrap();
+    let restored = Session::restore(&fetched, &b.key, &b.vault, PASSWORD).unwrap();
     assert_eq!(restored.format(), Format::V2);
     drop(restored);
     assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
-    let mut sb = b.unlock("");
+    let mut sb = b.unlock();
     assert_eq!(sb.take_unlock_notice(), None);
     // Nothing fetched yet: B offers its copy from no version at its first
     // poll that finds no incoming either (one listing could be the moment
@@ -452,7 +394,7 @@ fn two_pcs_end_to_end() {
     assert!(saved.iter().any(|t| t == "receipt=by B"), "{saved:?}");
     // Reopened, the vault is ahead of incoming: outgoing is written again,
     // from version 6, and uploaded.
-    let mut sb = b.unlock("");
+    let mut sb = b.unlock();
     assert_eq!(sb.take_unlock_notice(), None);
     assert_eq!(b.outgoing(), Some(6));
     assert_eq!(b.pass(), report(SyncState::Ok, 7, Some(7), None));
@@ -469,7 +411,7 @@ fn two_pcs_end_to_end() {
     assert_eq!(a.pass(), report(SyncState::Ok, 8, Some(8), None));
     assert_eq!(notice(sa.poll_sync()), None);
     assert_eq!(b.pass(), report(SyncState::Ok, 8, None, Some(8)));
-    let mut sb = b.unlock("");
+    let mut sb = b.unlock();
     assert_eq!(sb.take_unlock_notice(), merged(2, 1));
     assert_eq!(titles(&sb), titles(&sa));
     assert_eq!(sb.check_code(), sa.check_code());
@@ -541,7 +483,7 @@ fn two_pcs_end_to_end() {
     // A's app opens again first: the warning of step 9 lasts a session, and
     // the one below must be this session's own.
     drop(sa);
-    let mut sa = a.unlock("");
+    let mut sa = a.unlock();
     assert_eq!(sa.take_unlock_notice(), synced(&sa));
     assert_eq!(sa.badge(), Some(SyncBadge::Synced));
     // B uploads one more entry; the server damages it before A reads it.
@@ -637,81 +579,6 @@ fn two_pcs_end_to_end() {
     store.holds_only_vault_files(&id, &key);
 }
 
-/// An OTP vault: B joins with a fetched copy and an open Restore session,
-/// is closed, and merges A's change when it opens, before its code is
-/// checked. OTP-only changes (each unlock uses a code) are never uploaded.
-#[test]
-fn an_otp_vault_syncs_the_same_way() {
-    if !python() {
-        return;
-    }
-    let store = Store::new();
-    let (mut a, mut b) = (Pc::new("otp-a", &store), Pc::new("otp-b", &store));
-    let p = Provision::new().unwrap();
-    let mut otp = Otp::new(&p.setup_code());
-    let mut sa = p
-        .finish(&a.vault, &a.key, PASSWORD, Some(&otp.next()))
-        .unwrap();
-    assert!(sa.uses_otp());
-    sa.put(None, entry("mail", "first")).unwrap();
-    assert_eq!(a.pass(), report(SyncState::Idle, 0, None, None));
-    sa.enable_sync().unwrap();
-    let id = vault_id(&a.vault);
-    assert_eq!(a.pass(), report(SyncState::Ok, 1, Some(1), None));
-    assert_eq!(notice(sa.poll_sync()), synced(&sa));
-
-    fs::copy(&a.key, &b.key).unwrap();
-    let fetched = b.t.0.join("from-server.goyo");
-    let log = Log::new(None);
-    assert_eq!(
-        fetch_into(&mut store.local(), &log, "my-server", id, 0, &fetched),
-        OK
-    );
-    let mut sb = Session::restore(&fetched, &b.key, &b.vault, PASSWORD, &otp.next()).unwrap();
-    // B's helper makes the folder; the restored session links on its next
-    // poll and offers its copy from no version at the poll after.
-    assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
-    assert_eq!(sb.badge(), None);
-    assert!(sb.poll_sync().unwrap().badge_changed);
-    assert_eq!(b.outgoing(), None);
-    let _ = sb.poll_sync();
-    assert_eq!(b.outgoing(), Some(0));
-    assert_eq!(b.pass(), report(SyncState::Ok, 1, None, Some(1)));
-    assert_eq!(notice(sb.poll_sync()), synced(&sb));
-    assert_eq!(sb.check_code(), sa.check_code());
-
-    // B is closed while A opens again, with a code, and changes something;
-    // the code's step rides along with the change, while an unlock alone
-    // is not uploaded.
-    drop(sb);
-    drop(sa);
-    let used = otp.lasting();
-    let mut sa = a.unlock(&used);
-    assert_eq!(a.outgoing(), None);
-    sa.put(Some(0), entry("mail", "second")).unwrap();
-    sa.put(None, entry("bank", "first")).unwrap();
-    assert_eq!(a.pass(), report(SyncState::Ok, 2, Some(2), None));
-    assert_eq!(b.pass(), report(SyncState::Ok, 2, None, Some(2)));
-    // B merges A's change before it checks its code, so the code A used is
-    // refused on B too (still in its time window, and above B's own
-    // watermark), and the refused unlock writes nothing.
-    let before = fs::read(&b.vault).unwrap();
-    let refused = Session::unlock(&b.vault, &b.key, PASSWORD, &used).err();
-    assert_eq!(refused, Some(AUTH_ERROR));
-    assert_eq!(fs::read(&b.vault).unwrap(), before);
-    assert_eq!(b.outgoing(), None);
-    let mut sb = b.unlock(&otp.next());
-    assert_eq!(sb.take_unlock_notice(), merged(2, 1));
-    assert_eq!(titles(&sb), titles(&sa));
-    assert_eq!(sb.check_code(), sa.check_code());
-    assert_eq!(b.outgoing(), None, "an unlock alone is never uploaded");
-    assert_eq!(b.pass(), report(SyncState::Ok, 2, None, None));
-    assert_eq!(store.versions(&id).len(), 2);
-    let key = fs::read(&a.key).unwrap();
-    assert!(key.starts_with(b"GOYOKE01"));
-    store.holds_only_vault_files(&id, &key);
-}
-
 /// Readers never follow a link at a sync file (`read_bounded` refuses it as
 /// Io, not Busy). The app treats that as "not readable now": no merge of
 /// whatever the link points to, no error event, no busy loop, just another
@@ -725,10 +592,10 @@ fn the_app_never_follows_a_link_at_incoming() {
         t.0.join("vault.goyo.sync"),
     );
     let p = Provision::new().unwrap();
-    let mut s = p.finish(&vault, &key, PASSWORD, None).unwrap();
+    let mut s = p.finish(&vault, &key, PASSWORD).unwrap();
     s.put(None, entry("mail", "first")).unwrap();
     fs::create_dir(&dir).unwrap(); // what the helper does first
-    let status = syncfile::render_status(otp::now().unwrap(), 0, SyncState::Ok);
+    let status = syncfile::render_status(clock::now().unwrap(), 0, SyncState::Ok);
     syncfile::replace_file(&dir.join(syncfile::STATUS), &status).unwrap();
     s.enable_sync().unwrap();
     // The helper's part, by hand: version 1 is the app's first upload.
@@ -744,7 +611,7 @@ fn the_app_never_follows_a_link_at_incoming() {
     let (other_vault, other_key) = (other.0.join("vault.goyo"), other.0.join("vault.goyokey"));
     fs::copy(&vault, &other_vault).unwrap();
     fs::copy(&key, &other_key).unwrap();
-    let mut s2 = Session::unlock(&other_vault, &other_key, PASSWORD, "").unwrap();
+    let mut s2 = Session::unlock(&other_vault, &other_key, PASSWORD).unwrap();
     s2.put(None, entry("bank", "first")).unwrap();
     drop(s2);
     let newer = fs::read(&other_vault).unwrap();
@@ -804,7 +671,7 @@ fn kf2_vaults_sync_goyova04_end_to_end() {
     let store = Store::new();
     let (mut a, mut b) = (Pc::new("a", &store), Pc::new("b", &store));
     let p = Provision::new().unwrap();
-    let mut sa = p.finish(&a.vault, &a.key, PASSWORD, None).unwrap();
+    let mut sa = p.finish(&a.vault, &a.key, PASSWORD).unwrap();
     sa.put(None, entry("mail", "first")).unwrap();
     drop(sa);
     // The key file sealed again as GOYOKE03: its one data key is both the
@@ -824,7 +691,7 @@ fn kf2_vaults_sync_goyova04_end_to_end() {
     let (key, _) = seal(&spec, &opened.bundle, PASSWORD, Plan::PasswordOnly).unwrap();
     fs::write(&a.key, &key).unwrap();
     assert_eq!(a.pass(), report(SyncState::Idle, 0, None, None));
-    let mut sa = a.unlock("");
+    let mut sa = a.unlock();
     sa.enable_sync().unwrap();
     assert_eq!(&fs::read(&a.vault).unwrap()[..8], b"GOYOVA04");
     let first = a.upload();
@@ -838,7 +705,7 @@ fn kf2_vaults_sync_goyova04_end_to_end() {
     fs::copy(&a.key, &b.key).unwrap();
     fs::copy(&a.vault, &b.vault).unwrap();
     assert_eq!(b.pass(), report(SyncState::Idle, 0, None, None));
-    let mut sb = b.unlock("");
+    let mut sb = b.unlock();
     sb.put(None, entry("bank", "second")).unwrap();
     assert_eq!(b.pass(), report(SyncState::Ok, 1, None, Some(1)));
     sb.poll_sync();
@@ -915,7 +782,7 @@ mod keys {
                 &self.fake,
                 id,
                 number,
-                otp::now().unwrap(),
+                clock::now().unwrap(),
                 true,
                 Vec::new(),
             )
@@ -1038,7 +905,7 @@ mod keys {
         let new: Vec<NewKey> = (1..=n).map(|i| keys.register(&id, i)).collect();
         pc.here();
         let mut s = p
-            .finish_with_keys(&pc.vault, &pc.key, PASSWORD, None, true, new)
+            .finish_with_keys(&pc.vault, &pc.key, PASSWORD, true, new)
             .unwrap();
         s.put(None, entry("mail", "first")).unwrap();
         s
@@ -1049,13 +916,13 @@ mod keys {
         let prepared = prepare(&pc.vault, &pc.key)?;
         let req = prepared.unlock_request(0).expect("a key file with keys");
         let t = keys.touch(number, &req)?;
-        Session::login_with(prepared, password, "", otp::now().unwrap(), None, &t)
+        Session::login_with(prepared, password, None, &t)
     }
     /// A Reauth with `password` and a touch of key `number`.
     fn reauth(s: &mut Session, password: &str, keys: &Keys, number: u8) -> Res<Reauth> {
         let req = s.key_request(&[number], 0)?;
         let t = keys.touch(number, &req)?;
-        s.reauth(password, Some(("", otp::now().unwrap())), Some(&t))
+        s.reauth(password, Some(&t))
     }
     /// `change`, after a Reauth touched with key `number`, any rotation
     /// gate answered.

@@ -23,6 +23,12 @@ copies of both (one byte cut, one byte appended, a reserved byte set) and
 newer magics (GOYOKH02, GOYOKS02) are for the refusal tests of the build
 without security-key support.
 
+goyoke03-test and goyokh01 hold a TOTP secret (flags bit0), as a vault made
+with the OTP that 0.9.x removed has them: old files that must still open,
+which no writer makes any more. Their `-no-otp` twins are the same inputs
+without it, what the Rust writer seals now, byte for byte. The same-epoch
+re-seal keeps [0, W) and so the flag, with 20 zero bytes for the secret.
+
     python -X utf8 scripts/make_key_fixtures.py          write tests/fixtures/
     python -X utf8 scripts/make_key_fixtures.py --check  compare, write nothing
 
@@ -451,7 +457,10 @@ FIXTURES = [
      'loss': 0, 'written': WRITTEN, 'resume': bytes(32), 'tombstones': [],
      'keys': [seq(0x20, 32)], 'otp': None, 'salt': mixed(0x11, 32), 'body_nonce': mixed(0x22, 24)},
 ]
-# The same-epoch re-seal of the first file: [0, W) byte for byte, a new seal block.
+# What a writer since the OTP's removal seals from the first file's inputs.
+FIXTURES.append({**FIXTURES[0], 'file': 'goyoke03-test-no-otp.goyokey', 'otp': None})
+# The same-epoch re-seal of the first file: [0, W) byte for byte (the OTP
+# flag with it), a new seal block, and 20 zero bytes for the TOTP secret.
 RESEAL = {'file': 'goyoke03-test-reseal.goyokey', 'source': 'goyoke03-test.goyokey',
           'resume': seq(0xe0, 32), 'draws': [mixed(0x66, 32), mixed(0x99, 24)]}
 
@@ -518,6 +527,8 @@ HARDWARE = [
      'wrap_nonces': [mixed(0x76, 24), mixed(0x77, 24), mixed(0x78, 24)],
      'salt': mixed(0x79, 32), 'body_nonce': mixed(0x7b, 24)},
 ]
+# What a writer since the OTP's removal seals from the first file's inputs.
+HARDWARE.append({**HARDWARE[0], 'file': 'goyokh01-no-otp.goyokey', 'otp': None})
 # What the build without security-key support refuses on the magic family
 # alone, with the damaged wording: copies that are not a well-formed
 # GOYOKH01/GOYOKS01, and newer magics of the family.
@@ -559,9 +570,12 @@ def build_password_only(files):
     source = next(f for f in FIXTURES if f['file'] == RESEAL['source'])
     old = files[RESEAL['source']]
     w = parse(old)['w']
-    data = tail(old[:w], {**source, 'resume': RESEAL['resume']}, *RESEAL['draws'], source['kdf'])
+    zeroed = bytes(20) if source['otp'] else None
+    data = tail(old[:w], {**source, 'resume': RESEAL['resume'], 'otp': zeroed}, *RESEAL['draws'],
+                source['kdf'])
     opened = decode(data, source['password'], source['kdf'])
     assert opened['keys'] == source['keys'] and data[:w] == old[:w] and data != old
+    assert opened['otp'] == zeroed
     files[RESEAL['file']] = data
     record['reseal'] = hexed({**RESEAL, 'size': len(data)})
     files['ke03_fixtures.json'] = (json.dumps(record, indent=1) + '\n').encode()

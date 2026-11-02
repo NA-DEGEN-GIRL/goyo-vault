@@ -33,7 +33,7 @@ pub const SLOT_CHANGED: &str = "보안 키 기록이 바뀜";
 pub const PAIR_CHANGED: &str = "짝 기록이 바뀜";
 /// A pair record of the touched key that does not open.
 pub const PAIR_BROKEN: &str = "짝 기록이 손상됨";
-/// A password change that keeps the password (E5), or another OTP flag.
+/// A password change that keeps the password (E5).
 pub const UNEXPLAINED: &str = "설명되지 않는 변경";
 /// S-ANCHOR-RELIST-SK: a key file at login that lists live, or is
 /// authorized by, a key this PC removed. It names no key.
@@ -41,9 +41,6 @@ pub const ANCHOR_RELIST_KEYS: &str = "이 열쇠 파일에는 이 PC에서 이�
 /// A key file at login whose record of a key this PC knows changed in more
 /// than its number and seed: no honest writer changes one.
 pub const ANCHOR_PINNED: &str = "이 열쇠 파일의 보안 키 기록이 이 PC가 기록해 둔 것과 다릅니다. 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.";
-/// A key file at login whose OTP flag is not the one this PC recorded (E1,
-/// spec §7.14): no writer changes it, so it is refused before any touch.
-pub const ANCHOR_OTP: &str = "이 열쇠 파일의 OTP 설정이 이 PC가 기록해 둔 것과 다릅니다(설명되지 않는 변경). 위조되었을 수 있어 열지 않았습니다. 최신 열쇠 파일(열쇠 백업, 다른 PC)을 쓰세요.";
 /// S-GATE-G2FAIL: a pick that is not exactly the removed keys, at an adopt.
 pub const GATE_G2FAIL: &str = "고른 키가 받은 변경과 맞지 않아 받지 않았습니다. 이 변경은 이제 다른 PC의 '열쇠 관리'에 보이는 열쇠 확인 코드를 입력해야만 받을 수 있습니다. 키를 잃어버린 것이 확실하면 코드를 기다리지 말고 이 PC에서 '잃어버린 키 제거'를 하세요.";
 /// S-GATE-G2FAIL-DISK: the same for a changed key file at login.
@@ -106,12 +103,13 @@ impl Base {
             tombs: h.tombstones.iter().map(|t| t.credhash).collect(),
         }
     }
-    /// A 0.8 key file of this PC (spec §4.5): its magic and OTP flag, as
-    /// the anchor's line of a 0.8 state records them; no keys, no removals.
+    /// A 0.8 key file of this PC (spec §4.5): its magic and old OTP flag,
+    /// as the anchor's line of a 0.8 state records them; no keys, no
+    /// removals.
     pub fn of_legacy(own: &KeyFile) -> Option<Self> {
         Some(Self {
             magic: *own.magic()?.bytes(),
-            policy: u8::from(own.uses_otp()),
+            policy: u8::from(own.otp_secret()),
             slots: Vec::new(),
             tombs: Vec::new(),
         })
@@ -132,7 +130,7 @@ pub struct Gates {
     /// M: own live keys the file lacks with no removal (carried, never a
     /// reason for a gate).
     pub kept: Vec<[u8; 16]>,
-    /// The magic or the policy byte differs.
+    /// The magic or the policy byte but its bit0 differs.
     pub policy: bool,
     /// A key both know has another number or seed.
     pub slot: bool,
@@ -185,7 +183,10 @@ impl Gates {
                 .collect(),
             // Security keys on or off, key-file sync, PIN mode; between two
             // password-only formats (0.8 and KF2) the magic is no policy.
-            policy: own.policy != other.flags
+            // Bit0, an old OTP vault's flag, is none either: it decides
+            // nothing since the OTP was removed, and every key change
+            // clears it.
+            policy: (own.policy ^ other.flags) & !OTP_BIT != 0
                 || (own.magic != *other.magic.bytes()
                     && (other.magic.hardware() || hardware(&own.magic))),
             slot,
@@ -221,6 +222,8 @@ impl Gates {
     }
 }
 
+/// The policy byte's bit0: an old OTP vault's TOTP secret in the body.
+const OTP_BIT: u8 = 1;
 /// Whether a magic is a security-key one (GOYOKH*, GOYOKS*).
 fn hardware(magic: &[u8; 8]) -> bool {
     magic.starts_with(b"GOYOKH") || magic.starts_with(b"GOYOKS")
@@ -582,7 +585,7 @@ impl Session {
                 }
                 if !gates.pick_matches(&pick) {
                     self.g2_spent.set(true);
-                    let now = crate::otp::now()?;
+                    let now = crate::clock::now()?;
                     self.anchor_strict(&mut |lines| {
                         g2_failed(lines, g.state, now);
                         true
@@ -693,7 +696,8 @@ impl Session {
             }
             None => {
                 let magic = self.key_file.magic().ok_or(AUTH_ERROR)?;
-                let mut v = anchor::legacy_line(state, magic, self.uses_otp(), &current, None);
+                let otp = self.key_file.otp_secret();
+                let mut v = anchor::legacy_line(state, magic, otp, &current, None);
                 v.state.flags.t = true;
                 seal(&mut v, [0; 32]);
                 self.anchor_strict(&mut |lines| {

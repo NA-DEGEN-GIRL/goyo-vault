@@ -65,7 +65,8 @@ KEYS_OFF = GATES + 'keys_off_elsewhere_needs_its_code_and_a_yes'
 CONSENT = GATES + 'a_union_suspends_only_with_consent'
 REVIEW_PATHS = GATES + 'a_removal_for_a_loss_makes_its_review_due_on_every_path'
 UNDONE = GATES + 'a_removal_that_never_landed_is_named_and_its_review_stays_due'
-OTP_PENDING = GATES + 'a_gate_pending_login_keeps_its_otp_code_used'
+NO_WRITE_PENDING = GATES + 'a_gate_pending_login_writes_no_vault_file_before_its_gate'
+NO_OTP_GATE = GATES + 'a_dropped_otp_flag_needs_no_gate'
 GATE_POLL = GATES + 'a_gate_pending_poll_writes_no_vault_file'
 REFUSED_FIRST = HW + 'changes_with_keys_are_refused_before_anything_is_written'
 CREATE_ANCHOR = HW + 'a_vault_made_with_keys_writes_its_anchor_line_first'
@@ -109,8 +110,8 @@ HALTED = CEREMONY_T + 'a_halted_pc_can_still_remove_a_lost_key'
 FORGET = CEREMONY_T + 'an_anchor_refusal_offers_the_per_vault_forget'
 COLLIDE = CEREMONY_T + 'colliding_additions_renumber_and_name_new_keys'
 TWOTOUCH = CEREMONY_T + 'an_adopt_touches_twice_when_windows_gives_one_output'
-ROUTED = BIN_T + 'restore_and_otp_backup_submit_run_as_flows'
-RESTORE_T = CEREMONY_T + 'restore_and_otp_backup_take_a_touch'
+ROUTED = BIN_T + 'restore_submit_runs_as_a_flow'
+RESTORE_T = CEREMONY_T + 'restore_takes_a_touch'
 HOLD_T = CEREMONY_T + 'a_hold_button_takes_a_touch'
 REAUTH_T = CEREMONY_T + 'a_reauth_too_old_is_taken_again_in_the_flow'
 PLAN_UI = CEREMONY_T + 'the_plan_asks_for_more_touches_and_proposes_a_repair'
@@ -158,9 +159,6 @@ NO_SUPERSEDE_T = KS_T + 'a_removal_is_never_superseded_and_an_on_is'
 ROLLOUT_T = KS_T + 'the_rollout_reminder_stays_until_every_pc_is_confirmed'
 MERGE_T = KS_T + 'two_removals_from_one_state_merge_at_the_next_unlock'
 MERGE_ASK_T = KS_T + 'a_merge_that_needs_a_question_waits_and_one_that_failed_is_refused'
-OTP_ENTRY_T = KS_T + 'an_otp_vaults_failed_unlock_entry_takes_its_code_for_every_try'
-OTP_CONSENT_T = KS_T + 'an_otp_vaults_keysync_consent_takes_the_same_code'
-OTP_TYPED = 'vault::workflow_tests::the_otp_code_counts_as_of_when_it_was_typed'
 AT_LOGIN_STATUS_T = 'keys_ui::tests::the_accept_at_login_keeps_the_unlocks_warnings_first'
 KS_ON_OFF = KS_T + 'key_file_sync_goes_on_and_off_between_two_pcs'
 KS_TABLE = KS_T + 'the_request_table_writes_only_what_it_derives'
@@ -205,13 +203,11 @@ AUTO_BOUND_T = KS_T + 'auto_apply_trusts_only_the_servers_own_file_and_judges_ag
 # `merged` in the anchor).
 TRANSPORT = 'src/bin/goyo-sync/transport.rs'
 CONFIG = 'src/bin/goyo-sync/config.rs'
-OTP = 'src/otp.rs'
 SSH_LOG_T = BIN_T + 'ssh_log_is_fresh_bounded_and_removed'
 CONFIG_T = BIN_T + 'config_accepts_the_example_and_rejects_the_rest'
 DAMAGED_T = BIN_T + 'a_damaged_server_version_is_named_in_the_log'
 FETCH_T = BIN_T + 'fetch_writes_only_a_new_file'
 LIST_T = 'syncwire::tests::list_lines'
-OTP_LOW_T = 'otp::tests::a_code_of_two_steps_uses_the_lower_one'
 LEFTOVER_T = WORKFLOW_T + 'lifecycle_backup_restore_password_and_failed_save'
 WEAKENED_T = BIN_T + 'a_weakened_protection_is_said_and_stays'
 PBAD_T = HW + 'a_broken_pair_record_is_named_by_whole_credhashes'
@@ -395,10 +391,6 @@ ROWS = [
      '    if super::gate::relisted(h, c) {',
      '    if false && super::gate::relisted(h, c) {',
      [UP_TO_DATE, OLD_REMOVAL]),
-    ('E1 against the anchor at login', 4, 'feature', 'lib', ANCHOR,
-     '    if (h.flags ^ c.policy) & 1 != 0 {',
-     '    if false && (h.flags ^ c.policy) & 1 != 0 {',
-     [G1_TRIGGERS]),
     ('slot pinning: a known key\'s record', 4, 'feature', 'lib', GATE,
      '                if a.idhash != b.idhash {',
      '                if false && a.idhash != b.idhash {',
@@ -514,10 +506,6 @@ ROWS = [
      '        if self.gate_login.is_some() {\n            return Err(GATE_HELD);\n        }\n        if self.fetched && !self.tofu {',
      '        if self.fetched && !self.tofu {',
      [LOGIN_GATE]),
-    ('the OTP code used in gate-pending mode', 4, 'feature', 'lib', VAULT,
-     '        if !merged && gated.is_some() && otp {',
-     '        if !merged && gated.is_some() && otp && false {',
-     [OTP_PENDING]),
     # Stage 4: the review's core (§5.13) and S-REMOVE-UNDONE.
     ('S0r: the review in the merge log first', 4, 'feature', 'lib', ROTATE,
      '        let review = match pending.loss.as_deref() {',
@@ -619,10 +607,6 @@ ROWS = [
      [FAKE_T + 'credprotect_pin_and_flags_behave_as_ctap_and_windows']),
     # Stage 3's rules, caught here by a forger test of stage 4 and by a
     # test of the default build.
-    ('E1: the same OTP flag', 3, 'both', 'lib', ADOPT,
-     '        if other.vault_id() != Some(self.id) || other.uses_otp() != self.uses_otp() {',
-     '        if other.vault_id() != Some(self.id) {',
-     {'feature': [G1_TRIGGERS], 'default': [ADOPT_T + 'only_this_vaults_key_files_are_taken']}),
     ('P3 (b) against the anchor (S-ANCHOR-RELIST)', 3, 'both', 'lib', ANCHOR,
      '    if lacks && !had {\n        return Err(Refusal::Relist);',
      '    if false && lacks && !had {\n        return Err(Refusal::Relist);',
@@ -694,14 +678,6 @@ ROWS = [
      '        if sha256(blob) != head.sha || halted != Some(head) {',
      [SYNC_T + 'the_pc_that_changed_the_keys_is_gone']),
     # Stage 3's review fixes (§2.18), in both builds.
-    ('F6 OTP guard', 3, 'both', 'lib', ROTATE,
-     '    pub fn confirm_key_file(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n            || (self.uses_otp() && r.otp_step.is_none())\n        {',
-     '    pub fn confirm_key_file(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n        {',
-     [ROTATE_T + 'the_hold_buttons_of_an_otp_vault_need_its_code']),
-    ('F6 OTP guard (forget)', 3, 'both', 'lib', ROTATE,
-     '    pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n            || (self.uses_otp() && r.otp_step.is_none())\n        {',
-     '    pub fn forget_pending(&mut self, r: Reauth) -> Result<()> {\n        if r.session != self.serial\n            || r.age() > REAUTH_MAX\n        {',
-     [ROTATE_T + 'the_hold_buttons_of_an_otp_vault_need_its_code']),
     # The security-key build takes a security-key file, so `hardware` is
     # never set there (spec §2.30): the rule is the default build's alone.
     ('F15 hardware notice', 3, 'default', 'lib', SYNC,
@@ -1029,17 +1005,9 @@ ROWS = [
      '                | Screen::Create\n                | Screen::Restore => matches!(id, 1 | SUBMIT),',
      '                | Screen::Create => matches!(id, 1 | SUBMIT),',
      [ROUTED]),
-    ('S5 OtpBackup SUBMIT runs as a flow', 5, 'both', 'bin', MAIN,
-     '                Screen::OtpBackup => matches!(id, 1 | SUBMIT) && a.otp_setup.is_none(),',
-     '                Screen::OtpBackup => false,',
-     [ROUTED]),
     ('S5 a Restore of a key file with keys takes the unlock touch', 5, 'feature', 'bin', UI_SK,
      '        let request = prepared.unlock_request(h);',
      '        let request = prepared.unlock_request(h).filter(|_| false);',
-     [RESTORE_T]),
-    ('S5 an OTP backup of a key file with keys takes a touch', 5, 'feature', 'bin', UI_SK,
-     '        let Some(keys) = keys.filter(|_| a.otp_setup.is_none()) else {',
-     '        let Some(keys) = keys.filter(|_| false) else {',
      [RESTORE_T]),
     ('S5 a hold button of a key file with keys takes a touch', 5, 'feature', 'bin', MAIN,
      '                Some(s.key_request(&keys.active(), h)?)',
@@ -1564,8 +1532,8 @@ ROWS = [
      '        Registration::new(vault_id, number, registered, exclude, 0)',
      [CREATE_KEYS]),
     ('R Create writes PIN mode', 8, 'feature', 'bin', UI_SK,
-     '        let result = provision.finish_with_keys(&vault, &key, &pass, otp_step, true, keys);',
-     '        let result = provision.finish_with_keys(&vault, &key, &pass, otp_step, false, keys);',
+     '        let result = provision.finish_with_keys(&vault, &key, &pass, true, keys);',
+     '        let result = provision.finish_with_keys(&vault, &key, &pass, false, keys);',
      [CREATE_KEYS]),
     ('R keys on writes PIN mode', 8, 'feature', 'bin', UI_SK,
      '    let change = vault::Change::KeysOn {\n        pin: true,',
@@ -1591,8 +1559,8 @@ ROWS = [
      '        self.reauth_with(&proof.password',
      [KS_T + 'the_new_password_at_login_takes_the_server_key_file']),
     ("B1 the failed-unlock entry's Reauth changes no key", 8, 'feature', 'lib', ROTATE,
-     '            || !r.own_password\n',
-     '',
+     '        if r.session != self.serial || r.age() > REAUTH_MAX || !r.own_password {',
+     '        if r.session != self.serial || r.age() > REAUTH_MAX {',
      [KS_T + 'the_new_password_at_login_takes_the_server_key_file']),
     ("B1 the failed-unlock entry's password is never this PC's (E5)", 8, 'feature', 'lib', ADOPT,
      '        let equal = r.own_password && ct_eq(',
@@ -1698,27 +1666,6 @@ ROWS = [
      '            Kind::SyncOn => Rollout::Maybe(self.key_code()?),\n',
      '',
      [ROLLOUT_T]),
-    ('B3 the failed-unlock entry checks the OTP window once, at its start', 9, 'feature', 'lib',
-     SERVERKEY,
-     '            otp_in_time: true,\n            otp_spent: entry.otp_spent,',
-     '            otp_in_time: false,\n            otp_spent: entry.otp_spent,',
-     [OTP_ENTRY_T, OTP_CONSENT_T]),
-    ('B3 the entry takes its own spent OTP step again', 9, 'feature', 'lib', SERVERKEY,
-     '            otp_spent: entry.otp_spent,',
-     '            otp_spent: None,',
-     [OTP_ENTRY_T, OTP_CONSENT_T]),
-    ('B3 a stale entry start is OTP_STALE', 9, 'feature', 'lib', SERVERKEY,
-     '                return Err(OTP_STALE);',
-     '                return Ok(());',
-     [OTP_ENTRY_T]),
-    ('B3 a login checks its OTP window unless its entry did', 9, 'default', 'lib', VAULT,
-     '                if !otp_in_time\n',
-     '                if otp_in_time\n',
-     [OTP_TYPED]),
-    ('B3 only the entry\'s own spent step passes again', 9, 'default', 'lib', VAULT,
-     '                    Err(_) if otp_spent == Some(floor) => {',
-     '                    Err(_) if otp_spent.is_none() || otp_spent == Some(floor) => {',
-     [OTP_TYPED]),
     ('B3 the accept at login keeps the unlock\'s warnings first (UI)', 9, 'feature', 'bin',
      UI_SK,
      '    if danger {\n        lines.extend(&own);',
@@ -1987,10 +1934,6 @@ ROWS = [
      '''    word(s, 256, b"._/~+-") && s.split('/').all(|seg| seg != "." && seg != "..")''',
      '''    word(s, 256, b"._/~+-")''',
      [CONFIG_T]),
-    ('VC-7 the lowest matching OTP step is used', 12, 'both', 'lib', OTP,
-     '            found.get_or_insert(candidate);',
-     '            found = Some(candidate);',
-     [OTP_LOW_T]),
     ('VC-10 a leftover temp is exactly <name>.<32 hex>.goyotmp', 12, 'both', 'lib', VAULT,
      '                .is_some_and(|n| recover::temp_of(n, name))',
      '''                .is_some_and(|n| {
@@ -2060,6 +2003,56 @@ ROWS = [
      '        let live = |c: &[u8; 16]| slots.iter().any(|s| s.credhash == *c);',
      '        let live = |c: &[u8; 16]| slots.iter().any(|s| s.credhash[..4] == c[..4]);',
      [PBAD_T]),
+    # The OTP removal (stage 13): no key file is written with the OTP flag
+    # or a TOTP secret; old files with them open with no code; the flag
+    # gets no gate; the note shows once per PC.
+    ('O1 no new KF2 key file has the OTP flag or 20 bytes for a secret', 13, 'both', 'lib',
+     KEYFILE,
+     '        Plan::Reseal { source, .. } => source.header().is_some_and(KeyHeader::otp_secret),\n'
+     '        _ => false,',
+     '        Plan::Reseal { source, .. } => source.header().is_some_and(KeyHeader::otp_secret),\n'
+     '        _ => true,',
+     [KEYFILE_T + 'goyoke03_bytes_match_the_independent_encoder',
+      WORKFLOW_T + 'an_old_otp_vault_opens_without_a_code_and_says_so_once']),
+    ('O1 a new vault\'s 0.8 key file holds no TOTP secret', 13, 'both', 'lib', KEYFILE,
+     '    encode_legacy(id, key, None, password)',
+     '    encode_legacy(id, key, Some(&[0; 20]), password)',
+     [LEFTOVER_T, WORKFLOW_T + 'new_vaults_stay_in_the_08_formats']),
+    ('O2 an old KF2 file\'s TOTP secret is read past, with no code', 13, 'both', 'lib', KEYFILE,
+     '            Bundle::from_plain(&plain, h.key_ids.len(), h.otp_secret()).ok_or(AUTH_ERROR)?;',
+     '            Bundle::from_plain(&plain, h.key_ids.len(), false).ok_or(AUTH_ERROR)?;',
+     [KEYFILE_T + 'goyoke03_bytes_match_the_independent_encoder',
+      ADOPT_T + 'an_old_otp_flag_decides_nothing_and_its_secret_is_never_copied']),
+    ('O2 GOYOKE01 opens with the password alone', 13, 'both', 'lib', KEYFILE,
+     '    if plain.len() != if with_otp { 52 } else { 32 } {',
+     '    if plain.len() != 32 {',
+     [KEYFILE_T + 'legacy_key_files_open_with_their_state',
+      WORKFLOW_T + 'an_old_otp_vault_opens_without_a_code_and_says_so_once']),
+    ('O3 a re-seal keeps an old OTP vault\'s 20 bytes, as zeros', 13, 'both', 'lib', KEYFILE,
+     '        Plan::Reseal { source, .. } => source.header().is_some_and(KeyHeader::otp_secret),',
+     '        Plan::Reseal { .. } => false,',
+     [KEYFILE_T + 'goyoke03_bytes_match_the_independent_encoder',
+      ADOPT_T + 'an_old_otp_flag_decides_nothing_and_its_secret_is_never_copied']),
+    ('O4 the gate counts no OTP flag', 13, 'feature', 'lib', GATE,
+     '            policy: (own.policy ^ other.flags) & !OTP_BIT != 0',
+     '            policy: own.policy != other.flags',
+     [NO_OTP_GATE]),
+    ('O5 the OTP note shows once per PC and vault', 13, 'both', 'lib', VAULT,
+     '        if ids.contains(&id) {\n            return false;\n        }',
+     '        if false && ids.contains(&id) {\n            return false;\n        }',
+     [WORKFLOW_T + 'an_old_otp_vault_opens_without_a_code_and_says_so_once']),
+    ('O5 the OTP note only for a key file with a TOTP secret', 13, 'both', 'lib', VAULT,
+     '        if !self.key_file.otp_secret() {\n            return false;\n        }',
+     '        if false && !self.key_file.otp_secret() {\n            return false;\n        }',
+     [LEFTOVER_T, WORKFLOW_T + 'an_old_otp_vault_opens_without_a_code_and_says_so_once']),
+    ('O5 the app shows the OTP note', 13, 'both', 'bin', MAIN,
+     '                    parts.extend(otp_note.then_some(vault::OTP_REMOVED));',
+     '',
+     [BIN_T + 'create_and_open_ask_for_no_code_and_an_old_otp_vault_says_so_once']),
+    ('O6 a gate-pending login writes no vault file', 13, 'feature', 'lib', VAULT,
+     '        if !merged && !deferred && (!login || rekeyed) {',
+     '        if !merged && (!deferred || gated.is_some()) && (!login || rekeyed || gated.is_some()) {',
+     [NO_WRITE_PENDING]),
 ]
 
 FEATURE = ['--features', 'security-key']

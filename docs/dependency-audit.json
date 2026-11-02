@@ -103,11 +103,6 @@
       "vulnerabilities": []
     },
     {
-      "name": "sha1",
-      "version": "0.10.6",
-      "vulnerabilities": []
-    },
-    {
       "name": "sha2",
       "version": "0.10.9",
       "vulnerabilities": []
