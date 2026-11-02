@@ -436,11 +436,12 @@ impl Session {
     /// What holds every key change of this session, or what the user must
     /// be asked first (spec §5.5 R0, §7.5). The UI calls it before any
     /// question.
-    pub fn password_change(&self) -> Result<Option<Gate>> {
+    pub fn password_change(&mut self) -> Result<Option<Gate>> {
         self.change_gate(&Change::Password(Zeroizing::default()))
     }
-    /// The same for `change`.
-    pub fn change_gate(&self, change: &Change) -> Result<Option<Gate>> {
+    /// The same for `change`, from the helper's status as it is now.
+    pub fn change_gate(&mut self, change: &Change) -> Result<Option<Gate>> {
+        self.refresh_helper_status();
         self.held()?;
         // No key change before the key file is confirmed (spec §7.17), nor
         // in a held session whose confirmed line lacks `t` (§5.2 step 9(a)).

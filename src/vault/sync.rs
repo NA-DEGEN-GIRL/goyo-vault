@@ -1411,6 +1411,16 @@ impl Session {
             && lost(&self.entries, &held.entries) == 0
             && dead(&held.tombstones) == dead(&self.tombstones)
     }
+    /// Reads the helper's status file again. The gates judge whether the
+    /// helper runs from its heartbeat, which the app otherwise reads only
+    /// as it polls, and no poll runs during a key flow: a ceremony of
+    /// several keys outlasts HEARTBEAT_STALE, and the status read before it
+    /// would say the running helper stopped.
+    pub(super) fn refresh_helper_status(&mut self) {
+        if let Some(link) = self.sync.as_mut() {
+            link.read_status();
+        }
+    }
     /// Whether this synced vault may not hold the server's newest state:
     /// not verified against it, or the helper is not running (spec §7.5,
     /// the Unverified gate).
@@ -4065,6 +4075,30 @@ mod tests {
         for kept in ["from A=lost?", "from B=kept"] {
             assert!(titles(&sa).contains(&kept.to_owned()), "{kept}");
         }
+    }
+
+    /// The Unverified gate judges the helper by its status file as it is
+    /// when asked, not as the last poll read it: no poll runs during a key
+    /// flow, and a ceremony of several keys outlasts HEARTBEAT_STALE.
+    #[test]
+    fn the_gate_reads_the_helpers_status_again() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let mut server = Server::default();
+        let (_a, _sa, b, mut sb) = pair(&t, &mut server, 2);
+        assert_eq!(sb.password_change(), Ok(None));
+        // The view the flow began with: a heartbeat older than the limit.
+        let old = now_secs() - HEARTBEAT_STALE - 60;
+        let stale = syncfile::render_status(old, old, SyncState::Ok);
+        syncfile::replace_file(&b.dir().join(syncfile::STATUS), &stale).unwrap();
+        sb.refresh_helper_status();
+        assert!(sb.sync_unverified());
+        // The helper beat since, with no poll in between: no question.
+        b.status(SyncState::Ok);
+        assert_eq!(sb.password_change(), Ok(None));
+        // A helper that really stopped still asks.
+        syncfile::replace_file(&b.dir().join(syncfile::STATUS), &stale).unwrap();
+        assert_eq!(sb.password_change(), Ok(Some(Gate::Unverified)));
     }
 
     /// Spec v3 §7.5 and §14.6-11: a key change on a halted, forked or

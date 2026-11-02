@@ -2255,10 +2255,24 @@ impl App {
                 }
                 flow.confirmed_older = Some(sha);
             }
-            if flow.question.is_some_and(|q| !ask(self.hwnd, q)) {
-                return Ok(());
+            // The question and the gate's in one box (default No).
+            if let Some(q) = flow.question {
+                let text = match flow.gate {
+                    Some(g) => format!(
+                        "{}
+
+{}",
+                        tr(q),
+                        tr(g.question())
+                    ),
+                    None => tr(q).to_owned(),
+                };
+                if !ask(self.hwnd, &text) {
+                    return Ok(());
+                }
+                flow.answered = flow.gate;
             }
-            let mut gate = flow.gate;
+            let mut gate = flow.gate.filter(|g| flow.answered != Some(*g));
             loop {
                 if let Some(g) = gate {
                     if !ask(self.hwnd, g.question()) {
@@ -2349,7 +2363,7 @@ impl App {
         let mut prepared = None;
         if self.screen == Screen::Password {
             // What holds a key change, or what is asked first (spec §7.5).
-            let s = self.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+            let s = self.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
             gate = s.password_change()?;
             question = Some(if s.badge().is_some() {
                 ROTATE_QUESTION_SYNCED
@@ -2522,7 +2536,7 @@ impl App {
         if flow.screen != Screen::Password || !self.still(flow.screen, flow.serial, flow.session)? {
             return Ok(None);
         }
-        let s = self.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
+        let s = self.session.as_mut().ok_or("먼저 금고를 열어주세요.")?;
         Ok(s.password_change()?.filter(|g| flow.answered != Some(*g)))
     }
     /// Whether a flow's later phase may go on: the screen, serial and
@@ -4290,10 +4304,23 @@ fn submit_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     // borrow, default No; No changes nothing. Checked again before the
     // code is spent: a gate that came up while a question was open is
     // asked as well.
-    if flow.question.is_some_and(|q| !ask(h, q)) {
-        return Ok(());
+    if let Some(q) = flow.question {
+        let text = match flow.gate {
+            Some(g) => format!(
+                "{}
+
+{}",
+                tr(q),
+                tr(g.question())
+            ),
+            None => tr(q).to_owned(),
+        };
+        if !ask(h, &text) {
+            return Ok(());
+        }
+        flow.answered = flow.gate;
     }
-    let mut gate = flow.gate;
+    let mut gate = flow.gate.filter(|g| flow.answered != Some(*g));
     loop {
         if let Some(g) = gate {
             if !ask(h, g.question()) {
@@ -11080,7 +11107,7 @@ mod tests {
         vault::set_anchor_dir(Some(dir.join("anchor-a")));
         let (mut a, vault_b, key_b) = two_pcs(&dir, &mut server, &["entry 0"]);
         vault::set_anchor_dir(Some(dir.join("anchor")));
-        let b = Session::unlock(&vault_b, &key_b, SYNC_PASSWORD).unwrap();
+        let mut b = Session::unlock(&vault_b, &key_b, SYNC_PASSWORD).unwrap();
         assert_eq!(b.password_change(), Ok(None));
         let key = std::fs::read(&key_b).unwrap();
         let asked = std::rc::Rc::new(RefCell::new(Vec::<String>::new()));

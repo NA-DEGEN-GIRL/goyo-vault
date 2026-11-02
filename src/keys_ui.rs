@@ -1859,11 +1859,15 @@ fn take_with<T>(
         let mut b = cell.try_borrow_mut().map_err(|_| "화면 작업 중입니다.")?;
         let a = b.as_mut().ok_or("화면이 닫혔습니다.")?;
         a.enter(id)?;
-        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
-        let gate = s.change_gate(change)?;
+        let gate = a
+            .session
+            .as_mut()
+            .ok_or("먼저 금고를 열어주세요.")?
+            .change_gate(change)?;
         if gate == Some(vault::Gate::LocalRollback) {
             return Err(vault::Gate::LocalRollback.question());
         }
+        let s = a.session.as_ref().ok_or("먼저 금고를 열어주세요.")?;
         let typed = Typed {
             screen: a.screen,
             serial: a.serial,
@@ -1881,6 +1885,24 @@ fn take_with<T>(
 /// The gate's question (spec §7.5), default No; true to go on.
 fn gate_asked(h: Hwnd, t: &Typed) -> bool {
     t.gate.is_none_or(|g| ask(h, g.question()))
+}
+/// `question` with the gate's question below it, translated: the flow asks
+/// once, default No.
+fn with_gate(question: &str, t: &Typed) -> String {
+    match t.gate {
+        Some(g) => format!(
+            "{}
+
+{}",
+            tr(question),
+            tr(g.question())
+        ),
+        None => tr(question).to_owned(),
+    }
+}
+/// The flow's question and the gate's in one box; true to go on.
+fn asked(h: Hwnd, question: &str, t: &Typed) -> bool {
+    ask(h, &with_gate(question, t))
 }
 /// The flow's re-authentication (spec §5.3) with the typed password and,
 /// for a key file with keys, the touch. A wrong password counts as a
@@ -2049,10 +2071,32 @@ fn write(
     consent: vault::Consent,
     done: &dyn Fn(&Session) -> Done,
 ) -> crypto::Result<Option<String>> {
+    // The gate again, as it stands now: a gate the flow's first question
+    // did not name (one that came up during the ceremony) is asked here,
+    // once; a local rollback is never overridden.
+    let Some(now) = phase(h, t.screen, t.serial, |a| {
+        a.session
+            .as_mut()
+            .ok_or("금고가 잠겼습니다.")?
+            .change_gate(&change)
+    })?
+    else {
+        return Ok(None);
+    };
+    let override_gate = match now {
+        None => false,
+        Some(vault::Gate::LocalRollback) => return Err(vault::Gate::LocalRollback.question()),
+        Some(g) if t.gate == Some(g) => true,
+        Some(g) => {
+            if !ask(h, g.question()) {
+                return Ok(cancelled(t));
+            }
+            true
+        }
+    };
     let Some(r) = renewed(h, t, r, WRITE_RESERVE)? else {
         return Ok(None);
     };
-    let override_gate = t.gate.is_some();
     // A change the other PCs take only with this PC's code (G1): an added
     // key, a re-seed, keys on or off, key-file sync on or off. A removal
     // is taken by picking the lost keys, a password change or a pairing
@@ -2564,7 +2608,7 @@ fn keys_on_flow(h: Hwnd) -> crypto::Result<()> {
     if new_password.is_none() {
         question = format!("{question}\n\n{}", tr(KEYSON_OLDFILES));
     }
-    if !ask(h, &question) || !gate_asked(h, &t) {
+    if !asked(h, &question, &t) {
         return Ok(());
     }
     let Some(r) = reauth(h, &t, None)? else {
@@ -2874,7 +2918,7 @@ fn reseed_flow(h: Hwnd) -> crypto::Result<()> {
         t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
         s.plan_reseed()
     })?;
-    if !ask(h, RESEED) || !gate_asked(h, &t) {
+    if !asked(h, RESEED, &t) {
         return Ok(());
     }
     let n = t.keys.as_ref().map_or(0, |o| o.rows.len());
@@ -2996,7 +3040,7 @@ fn keys_off_flow(h: Hwnd) -> crypto::Result<()> {
             .filter(|v| v.on)
             .map(|view| (view, s.off_request())))
     })?;
-    let asked = match &synced {
+    let yes = match &synced {
         Some((view, request)) => {
             let first = format!(
                 "{}
@@ -3005,11 +3049,11 @@ fn keys_off_flow(h: Hwnd) -> crypto::Result<()> {
                 tr(OFF),
                 tr(KEYSOFF_SYNCED)
             );
-            off_asked(h, &first, view, *request)
+            off_asked(h, &with_gate(&first, &t), view, *request)
         }
-        None => ask(h, OFF),
+        None => asked(h, OFF, &t),
     };
-    if !asked || !gate_asked(h, &t) {
+    if !yes {
         return Ok(());
     }
     let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
@@ -3872,7 +3916,7 @@ fn remove_flow(h: Hwnd) -> crypto::Result<()> {
     // The rotation gates hold no removal for a loss (spec §7.5); a halt of
     // this PC's sync is named in the done text (S-LOST-HALTED).
     let halted = lost && matches!(t.gate, Some(vault::Gate::KeyHalt | vault::Gate::KeyFork));
-    if !lost && (!ask(h, &fill(REMOVE_ASK, &[&listed(&pick)])) || !gate_asked(h, &t)) {
+    if !lost && !asked(h, &fill(REMOVE_ASK, &[&listed(&pick)]), &t) {
         return Ok(());
     }
     // S-ONLYPAIRED: the keys paired only with the lost ones go too, unless
@@ -4261,7 +4305,7 @@ fn password_flow(h: Hwnd) -> crypto::Result<()> {
     } else {
         ROTATE_QUESTION
     };
-    if !ask(h, question) || !gate_asked(h, &t) {
+    if !asked(h, question, &t) {
         return Ok(());
     }
     let keys = t.keys.clone().ok_or(vault::NOT_PLANNED)?;
@@ -6025,7 +6069,7 @@ fn keysync_on_flow(h: Hwnd, id: i32) -> crypto::Result<()> {
     } else {
         KEYSYNC_ON_TEXT
     };
-    if !ask(h, question) || !gate_asked(h, &t) {
+    if !asked(h, question, &t) {
         return Ok(());
     }
     let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
@@ -6124,7 +6168,7 @@ fn keysync_off_flow(h: Hwnd) -> crypto::Result<()> {
         let view = s.key_sync_view().ok_or(vault::NOT_PLANNED)?;
         Ok((view, s.off_request()))
     })?;
-    if !off_asked(h, KEYSYNC_OFF_ASK, &view, request) || !gate_asked(h, &t) {
+    if !off_asked(h, &with_gate(KEYSYNC_OFF_ASK, &t), &view, request) {
         return Ok(());
     }
     let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
