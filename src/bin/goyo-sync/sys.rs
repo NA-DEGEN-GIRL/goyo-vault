@@ -69,6 +69,7 @@ unsafe extern "system" {
     fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
     fn SetEvent(event: isize) -> i32;
     fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
+    fn WaitForMultipleObjects(count: u32, handles: *const isize, all: i32, ms: u32) -> u32;
     fn GetLastError() -> u32;
     fn CloseHandle(handle: isize) -> i32;
     fn GetCurrentProcess() -> isize;
@@ -310,12 +311,24 @@ pub fn mutex_exists(name: &str) -> bool {
         GetLastError() == 5 // ERROR_ACCESS_DENIED: it exists
     }
 }
-/// A manual-reset event that stays set once signalled.
+/// A manual-reset event that stays set once signalled, or (see [`wake`])
+/// an unnamed auto-reset one.
+///
+/// [`wake`]: Event::wake
 pub struct Event(Handle);
 impl Event {
     pub fn create(name: &str) -> Option<Self> {
         let name = wide(OsStr::new(name));
         Handle::new(unsafe { CreateEventW(null(), 1, 0, name.as_ptr()) }).map(Self)
+    }
+    /// An unnamed auto-reset event: only this process can set it, and a
+    /// wait that sees it set clears it.
+    pub fn wake() -> Option<Self> {
+        Handle::new(unsafe { CreateEventW(null(), 0, 0, null()) }).map(Self)
+    }
+    /// Sets this event.
+    pub fn set(&self) -> bool {
+        unsafe { SetEvent(self.0.0) != 0 }
     }
     /// Sets an event another process created; false if there is none.
     pub fn signal(name: &str) -> bool {
@@ -334,6 +347,12 @@ impl Event {
 /// Waits up to `ms` for `handle`; true if it is signalled.
 pub fn wait(handle: isize, ms: u32) -> bool {
     unsafe { WaitForSingleObject(handle, ms) == 0 }
+}
+/// Waits up to `ms` for any of `handles`; the index of the first one that
+/// is signalled, or None on a timeout or error.
+pub fn wait_any(handles: &[isize], ms: u32) -> Option<usize> {
+    let n = unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, ms) };
+    ((n as usize) < handles.len()).then_some(n as usize)
 }
 
 /// The HKCU Run value, so the helper starts at sign-in. Only on request.
@@ -454,24 +473,38 @@ pub struct ProcessInfo {
     pid: u32,
     tid: u32,
 }
+/// The command line [`start_detached`] gives `exe`: its full path in
+/// quotes, then `args` (fixed text of this program) after one space, or
+/// nothing. None for a path with a quote or a NUL, which no Windows path
+/// has.
+pub fn command_line(exe: &Path, args: &str) -> Option<OsString> {
+    if exe
+        .as_os_str()
+        .encode_wide()
+        .any(|c| c == 0 || c == u16::from(b'"'))
+    {
+        return None;
+    }
+    let mut line = OsString::from("\"");
+    line.push(exe);
+    line.push("\"");
+    if !args.is_empty() {
+        line.push(" ");
+        line.push(args);
+    }
+    Some(line)
+}
 /// Starts `"<exe>" <args>` on its own: no window, no console, no handle
 /// inherited from this process (so not the pipes of an ssh.exe running
 /// meanwhile), outside any job of this process where Windows allows it, and
 /// in System32, so it holds no user folder open. Returns the Windows error.
+/// (A GUI program, the settings window, opens its own window as usual.)
 pub fn start_detached(exe: &Path, args: &str) -> Result<(), u32> {
     let application: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut line: Vec<u16> = OsStr::new("\"")
-        .encode_wide()
-        .chain(exe.as_os_str().encode_wide())
-        .chain(OsStr::new("\" ").encode_wide())
-        .chain(OsStr::new(args).encode_wide())
-        .chain(Some(0))
-        .collect();
-    if application[..application.len() - 1].contains(&0)
-        || exe.as_os_str().encode_wide().any(|c| c == u16::from(b'"'))
-    {
+    let Some(line) = command_line(exe, args) else {
         return Err(87); // ERROR_INVALID_PARAMETER
-    }
+    };
+    let mut line = wide(&line);
     let directory = system_dir().map(|d| wide(d.as_os_str()));
     let startup = StartupInfo {
         size: size_of::<StartupInfo>() as u32,

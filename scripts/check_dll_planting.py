@@ -7,7 +7,8 @@ to a copy of the exe and run `--self-check`, twice:
 - a real copy from System32: if the loader takes it, the program starts, and
   `--self-check` reports the DLL loaded from its own folder.
 The DLLs the vault app loads itself at run time (System32 only) are planted
-next to every exe too. goyo-vault.exe and goyo-sync.exe both print PASS from
+next to every exe too, and next to goyo-sync.exe the ones its background
+helper's notification-area icon and menu load at run time. goyo-vault.exe and goyo-sync.exe both print PASS from
 `--self-check` when nothing came from their folder. Loader error pop-ups are
 switched off for the copies, so a failing build does not leave a "bad image"
 dialog on the desktop.
@@ -28,6 +29,16 @@ exes = [pathlib.Path(a).resolve()
         or ['target/release/goyo-vault.exe', 'target/release/goyo-sync.exe']]
 system32 = pathlib.Path(os.environ['SystemRoot']) / 'System32'
 RUNTIME = ['msctf.dll', 'wtsapi32.dll', 'sspicli.dll']
+# goyo-sync.exe --background: the tray icon (Shell_NotifyIconW, the icon's
+# image) and its menu (TrackPopupMenuEx) load these at run time, found by
+# listing a running helper's modules after its menu was opened. Its
+# --self-check builds the tray window and menu without adding an icon or
+# showing the menu, so it loads only some of them; a planted copy is still
+# never taken (SetDefaultDllDirectories(System32) before anything loads).
+SYNC_RUNTIME = ['apphelp.dll', 'applicationtargetedfeaturedatabase.dll', 'bcryptprimitives.dll',
+                'iconcodecservice.dll', 'kernel.appcore.dll', 'oleacc.dll', 'textinputframework.dll',
+                'textshaping.dll', 'twinapi.appcore.dll', 'windows.storage.dll', 'windowscodecs.dll',
+                'wintypes.dll']
 if webauthn:
     RUNTIME.append('webauthn.dll')
 
@@ -87,7 +98,8 @@ for exe in exes:
         path = system32 / name
         if path.exists():
             queue.extend(imports(path))
-    candidates = sorted((seen - known) | set(RUNTIME))
+    runtime = set(RUNTIME) | (set(SYNC_RUNTIME) if exe.name.lower() == 'goyo-sync.exe' else set())
+    candidates = sorted((seen - known) | runtime)
 
     for name in candidates:
         real = system32 / name

@@ -59,6 +59,28 @@ impl Drop for Temp {
     }
 }
 
+/// The interface language (i18n.rs) is one setting for the whole process,
+/// so the tests that switch it or check translated text (the settings
+/// window's and the tray icon's) hold this for their whole run and take
+/// turns. It puts Korean back at the end.
+pub(crate) struct KoreanAfter {
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+impl KoreanAfter {
+    pub(crate) fn hold() -> Self {
+        static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let turn = LANGUAGE.lock();
+        Self {
+            _turn: turn.unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+}
+impl Drop for KoreanAfter {
+    fn drop(&mut self) {
+        crate::i18n::set_english(false);
+    }
+}
+
 /// One simulated PC: a vault path, its key path and its sync folder.
 struct Pc {
     t: Temp,

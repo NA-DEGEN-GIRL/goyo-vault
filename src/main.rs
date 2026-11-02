@@ -7472,7 +7472,7 @@ mod tests {
     }
     /// The source files whose Korean literals english_is_complete checks,
     /// by their path under src/ (spec §9.3).
-    const SCANNED: [(&str, &str); 14] = [
+    const SCANNED: [(&str, &str); 15] = [
         ("main.rs", include_str!("main.rs")),
         ("win.rs", include_str!("win.rs")),
         ("theme.rs", include_str!("theme.rs")),
@@ -7491,6 +7491,11 @@ mod tests {
         ("clock.rs", include_str!("clock.rs")),
         // goyo-sync's settings window draws with this app's i18n.rs.
         ("bin/goyo-sync/gui.rs", include_str!("bin/goyo-sync/gui.rs")),
+        // And its background helper's tray icon.
+        (
+            "bin/goyo-sync/tray.rs",
+            include_str!("bin/goyo-sync/tray.rs"),
+        ),
     ];
     /// The security-key build's own source files with Korean literals: their
     /// English is in EN_SK, which only that build compiles, so only that

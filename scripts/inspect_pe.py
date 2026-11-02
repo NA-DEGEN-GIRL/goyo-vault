@@ -9,8 +9,10 @@ Profiles (default vault):
   makes a pipe. Writes docs/binary-inspection.json.
 - sync: goyo-sync.exe, the optional helper. kernel32, ntdll and
   api-ms-win-core-*, the settings window's user32, gdi32, comdlg32,
-  dwmapi and uxtheme, advapi32 only for its Run value; no socket, HTTP or
-  crypto DLL. Writes docs/binary-inspection-sync.json.
+  dwmapi and uxtheme, advapi32 only for its Run value, shell32 only for
+  the background helper's tray icon (Shell_NotifyIconW), whose menu is
+  the only user32 menu code; no socket, HTTP or crypto DLL. Writes
+  docs/binary-inspection-sync.json.
 Both need ASLR, high-entropy ASLR, DEP, CFG, CET, DependentLoadFlags 0x800
 (System32 only), no delay imports, no import by ordinal and the GUI
 subsystem. Neither imports webauthn.dll: the security-key build loads it at
@@ -151,13 +153,19 @@ else:
     # goyo-sync.exe runs System32\OpenSSH\ssh.exe through std's piped
     # Command, which may need bcryptprimitives!ProcessPrng (older std) and
     # ntdll's pipe calls. Its settings window (no arguments) draws with the
-    # vault app's UI DLLs. It never decrypts or opens a socket.
+    # vault app's UI DLLs; the background helper shows an icon in the
+    # notification area with a right-click menu. It never decrypts or opens
+    # a socket.
     DENIED = {'crypt32.dll', 'secur32.dll'}
     UI = {'user32.dll', 'gdi32.dll', 'comdlg32.dll', 'dwmapi.dll', 'uxtheme.dll'}
     # The Run value: --autostart on|off, and the window's autostart switch,
     # which reads it to show whether it names this exe.
+    # The tray icon: shell32 for the icon alone (no ShellExecute, no shell
+    # folders), and user32's menu calls for its menu and nothing else.
     ONLY = {'advapi32.dll': {'RegSetKeyValueW', 'RegDeleteKeyValueW', 'RegGetValueW'},
-            'bcryptprimitives.dll': {'ProcessPrng'}}
+            'bcryptprimitives.dll': {'ProcessPrng'},
+            'shell32.dll': {'Shell_NotifyIconW'}}
+    MENU = {'CreatePopupMenu', 'AppendMenuW', 'SetMenuDefaultItem', 'TrackPopupMenuEx', 'DestroyMenu'}
     for dll, names in imports.items():
         lower = dll.lower()
         assert lower not in DENIED, f'goyo-sync.exe must not import {dll}'
@@ -165,10 +173,13 @@ else:
         if lower in ONLY:
             extra = sorted(set(names) - ONLY[lower])
             assert not extra, f'{dll} may provide only {sorted(ONLY[lower])}, not {extra}'
+        if lower == 'user32.dll':
+            extra = sorted(n for n in names if 'Menu' in n and n not in MENU)
+            assert not extra, f'{dll}: menu calls beyond the tray menu {sorted(MENU)}: {extra}'
         for n in names:
             assert not crypto(n), f'{dll}!{n}: OS crypto/RNG imported'
             assert n != 'ProcessPrng' or lower == 'bcryptprimitives.dll', f'{dll}!{n}: unexpected RNG import'
-            assert n not in ('WinExec',) and not n.startswith('ShellExecute'), f'{dll}!{n}: only CreateProcessW (ssh.exe, ssh-keygen.exe, its own --background) may start a program'
+            assert n not in ('WinExec',) and not n.startswith('ShellExecute'), f'{dll}!{n}: only CreateProcessW (ssh.exe, ssh-keygen.exe, itself with --background or, from the tray menu, with no argument) may start a program'
 
 output = json.dumps(report, indent=2)
 out.write_text(output, encoding='utf-8')

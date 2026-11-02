@@ -9,7 +9,8 @@
 //! Without arguments it opens the settings window (gui.rs, one per exe
 //! path), which writes goyo-sync.conf, installs the server script and starts
 //! the background helper. `--background` is the helper itself (one instance
-//! per exe path) until `--stop`. Exit codes: 0 ok, 1 error, 2 settings.
+//! per exe path, with an icon in the notification area: tray.rs) until
+//! `--stop` or that icon's 완전 종료. Exit codes: 0 ok, 1 error, 2 settings.
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 compile_error!("goyo-sync requires Windows x64.");
 mod config;
@@ -35,6 +36,7 @@ mod tests;
 #[path = "../../theme.rs"]
 mod theme;
 mod transport;
+mod tray;
 #[path = "../../win.rs"]
 mod win;
 
@@ -50,6 +52,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use transport::{SshTransport, Transport};
@@ -132,6 +135,10 @@ fn object_names() -> (String, String) {
         format!(r"Local\GoyoSync-{id}"),
         format!(r"Local\GoyoSyncStop-{id}"),
     )
+}
+/// The background helper's hidden window, which holds its tray icon.
+fn tray_class() -> String {
+    format!("GoyoSyncTray-{}", exe_id())
 }
 /// The settings window's own instance mutex and window class, so a second
 /// start of the same exe brings its window forward instead.
@@ -247,8 +254,11 @@ fn report_failure(host: &str, error: engine::CallError) {
     }
 }
 
-/// `--background`: sync every vault until the stop event is set. Each 2 s
-/// tick lists the sync folders and runs a pass where one is due.
+/// `--background`: sync every vault until the stop event is set. A worker
+/// thread syncs (each 2 s tick lists the sync folders and runs a pass where
+/// one is due) while the main thread keeps the notification-area icon
+/// (tray.rs). Without a window (Windows made none) it syncs on this thread,
+/// without an icon.
 fn background(dir: &Path, log: &Log) -> i32 {
     let (mutex, stop_name) = object_names();
     let Some((_instance, existed)) = sys::named_mutex(&mutex) else {
@@ -262,13 +272,58 @@ fn background(dir: &Path, log: &Log) -> i32 {
         Ok(config) => config,
         Err(code) => return code,
     };
-    let Some(stop) = sys::Event::create(&stop_name) else {
+    let Some(signals) = sys::Event::create(&stop_name).and_then(tray::Signals::new) else {
         log.line("startup failed: no stop event");
         return ERROR;
     };
-    let raw = stop.raw();
+    let signals = Arc::new(signals);
+    log.line(&format!(
+        "started: {} vaults, every {} s, timeout {} s",
+        config.vaults.len(),
+        config.interval,
+        config.timeout
+    ));
+    i18n::set_english(msg::english());
+    let exe = std::env::current_exe().unwrap_or_else(|_| dir.join("goyo-sync.exe"));
+    let window = tray::start(&tray_class(), exe, signals.clone(), log.clone());
+    let worker = window.and_then(|h| {
+        let (config, log, signals) = (config.clone(), log.clone(), signals.clone());
+        std::thread::Builder::new()
+            .name("goyo-sync-loop".into())
+            .spawn(move || {
+                sync_loop(&config, &log, &signals, h);
+                signals.end(h);
+            })
+            .ok()
+            .map(|worker| (h, worker))
+    });
+    match worker {
+        Some((h, worker)) => {
+            tray::run(h);
+            // The window is gone: the worker ended, or a WM_QUIT came from
+            // elsewhere, which ends the helper too.
+            signals.stop();
+            let _ = worker.join();
+        }
+        None => {
+            if let Some(h) = window {
+                unsafe {
+                    win::DestroyWindow(h);
+                }
+            }
+            log.line("no notification-area icon: no window or thread for it");
+            sync_loop(&config, log, &signals, 0);
+        }
+    }
+    log.line("stopped");
+    OK
+}
+/// The sync loop of `--background` until the stop event is set; the window
+/// `notify` (0: none) hears how it goes.
+fn sync_loop(config: &Config, log: &Log, signals: &tray::Signals, notify: win::Hwnd) {
+    let raw = signals.stop_handle();
     let wait = move |d: Duration| sys::wait(raw, d.as_millis().min(u128::from(TICK)) as u32);
-    let transport = SshTransport::new(&config, Box::new(wait));
+    let transport = SshTransport::new(config, Box::new(wait));
     let mut engine = Engine::new(
         transport,
         &config.vaults,
@@ -276,28 +331,53 @@ fn background(dir: &Path, log: &Log) -> i32 {
         engine::system_clock(),
         log.clone(),
     );
-    log.line(&format!(
-        "started: {} vaults, every {} s, timeout {} s",
-        config.vaults.len(),
-        config.interval,
-        config.timeout
-    ));
+    run_passes(&mut engine, signals, notify);
+}
+/// What [`run_passes`] needs of the engine (tests use a fake).
+trait Passes {
+    fn vaults(&self) -> usize;
+    fn due(&self, i: usize) -> bool;
+    fn pass(&mut self, i: usize, force: bool) -> Outcome;
+}
+impl<T: Transport> Passes for Engine<T> {
+    fn vaults(&self) -> usize {
+        Engine::vaults(self)
+    }
+    fn due(&self, i: usize) -> bool {
+        Engine::due(self, i)
+    }
+    fn pass(&mut self, i: usize, force: bool) -> Outcome {
+        Engine::pass(self, i, force)
+    }
+}
+/// Each tick, a pass over every vault that is due; after a "sync now" (the
+/// tray menu), one forced pass over every vault, as `--once` does. Stops
+/// between vaults and while it waits as soon as the stop event is set.
+fn run_passes(engine: &mut dyn Passes, signals: &tray::Signals, notify: win::Hwnd) {
+    let mut last = vec![None; engine.vaults()];
     'run: loop {
+        let now = signals.take_now();
         for i in 0..engine.vaults() {
-            if sys::wait(raw, 0) {
+            if signals.stopping() {
                 break 'run;
             }
-            if engine.due(i) {
-                engine.pass(i, false);
+            if now || engine.due(i) {
+                let outcome = engine.pass(i, now);
+                last[i] = match outcome {
+                    Outcome::Locked => last[i].or(Some(outcome)),
+                    _ => Some(outcome),
+                };
+                if !now {
+                    signals.report(notify, tray::health(&last));
+                }
             }
         }
-        if sys::wait(raw, TICK) {
+        signals.report(notify, tray::health(&last));
+        if signals.wait(TICK) {
             break;
         }
     }
-    drop(engine);
-    log.line("stopped");
-    OK
+    signals.report(notify, tray::Health::Stopping);
 }
 
 /// `--once`: one pass over every vault, polling the server, with results.
@@ -640,8 +720,9 @@ fn stop() -> i32 {
     OK
 }
 /// `--self-check` (used by check_dll_planting.py): the library's HKDF
-/// self-test, the defenses applied in `main`, the settings window built
-/// hidden (so the DLLs it loads load here too), no DLL loaded from the
+/// self-test, the defenses applied in `main`, the settings window and the
+/// tray icon's window and menu built hidden (so the DLLs they load load
+/// here too; no icon is added), no DLL loaded from the
 /// exe's folder, a kill-on-close job, and ssh.exe where it must be. Fixed
 /// English, read by scripts.
 fn self_check() -> i32 {
@@ -659,6 +740,13 @@ fn self_check() -> i32 {
     let mut ok = true;
     if !gui::self_check() {
         sys::print("FAIL: the settings window could not be built\n", true);
+        ok = false;
+    }
+    if !tray::self_check() {
+        sys::print(
+            "FAIL: the notification-area window or menu could not be built\n",
+            true,
+        );
         ok = false;
     }
     for planted in sys::modules_beside_exe() {
@@ -684,7 +772,7 @@ fn self_check() -> i32 {
         return ERROR;
     }
     sys::print(
-        "PASS: process mitigations, System32-only DLL search, settings window, no DLL beside the exe, kill-on-close job, ssh.exe present\n",
+        "PASS: process mitigations, System32-only DLL search, settings window, tray window and menu, no DLL beside the exe, kill-on-close job, ssh.exe present\n",
         false,
     );
     OK

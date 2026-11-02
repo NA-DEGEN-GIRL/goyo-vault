@@ -50,9 +50,21 @@ The window has three parts, top to bottom:
 
 - **Server**: the ssh host, 'Check connection', 'Install or update on server', a result line and 'Advanced settings'.
 - **Vaults**: the vaults to sync with each one's state, 'Add…', 'Remove' and 'Bring to this PC…' (another PC's vault, from the server). The security-key build has 'Forced command line…' under the list.
-- **Run**: 'Start automatically when I sign in to Windows', 'Save and start', 'Sync now', 'Stop', 'View log' and a status line.
+- **Run**: 'Start automatically when I sign in to Windows', 'Save and start', 'Sync now', 'Quit (stop syncing)', 'View log' and a status line.
 
-The label next to the title shows whether background sync is running. Closing the window does not stop background sync.
+The label next to the title shows whether background sync is running. The window's X **closes the window only**: background sync goes on, and so does its Goyo Vault icon in the notification area (the right end of the taskbar, perhaps under the hidden-icons arrow `^`). When settings are saved but background sync is off, closing asks once "Keep background sync on?". 'Yes' starts the helper with the saved settings, as 'Save and start' does; 'No' just closes (it is not asked right after 'Quit' in this window).
+
+### The notification-area icon
+
+While the background helper (`--background`) runs, a Goyo Vault icon sits in the notification area. One helper runs per program path, so there is one icon; the settings window never makes one. Hovering it shows the state, such as `Goyo Vault Sync · OK` (checking, OK, N vault(s) with a problem, syncing now, stopping). For a problem, see each vault's reason in the settings window's list or with 'View log'.
+
+Right-click it (or select it and press the menu key or Shift+F10) for its menu:
+
+- **Open settings**: opens this settings window (or brings an open one to the front). Double-clicking the icon or pressing Enter does the same. It only runs `goyo-sync.exe` from the same folder without arguments.
+- **Sync now**: syncs every vault once now, server check included (as `--once`).
+- **Quit (stop syncing)**: removes the icon at once and ends the helper when the sync in progress is done (as `--stop`). Autostart is left as it is, so it starts again at the next sign-in. To turn it on now, press 'Save and start' in the settings window.
+
+When Explorer restarts, the icon comes back. The icon's notifications come from Explorer, another program, so they are accepted from anyone; what they can do (open the settings window, sync now, open the menu for the user to choose from) any program can already do by running `goyo-sync.exe`. The menu's choice never travels as a message, and the hidden window takes no command or close sent by another program.
 
 ## 2. Connect the server
 
@@ -137,7 +149,7 @@ The list reads each vault's state from the `status` and `helper.state` files in 
 |… · key: on the server / not on the server / not allowed by the server|(Security-key build) The vault's key file on the server, as the helper last saw it. 'Not allowed by the server' means this PC's forced-command line has no `--key-sync` for the vault, and shows only for a vault that uses key-file sync (a vault that keeps its key file on its PCs shows nothing). When such a vault's state is 'key: not allowed by the server · use the 'Forced command line…' line' (`nokeys`), change the line.|
 
 - **Sync now**: one sync pass over every vault in the list now, with each vault's result shown in the list for a minute (as `--once`). A vault the background helper is working on is skipped.
-- **Stop**: stops the running background helper (as `--stop`).
+- **Quit (stop syncing)**: stops the running background helper (as `--stop` and the same item of the notification-area menu). While the helper finishes the sync in progress the status line says it is stopping; then the label next to the title turns to off and the notification-area icon is gone.
 - **View log**: shows the last 400 lines of `goyo-sync.log` inside the window (continued from `goyo-sync.log.1` after the 256 KiB rollover).
 
 The status line tells you about unsaved changes, and closing the window asks once.
@@ -177,7 +189,7 @@ Status-line messages:
 |N entries were deleted or edited on another PC. The state before merging was kept in ….|Shown in red. N counts the entries merges removed here since you unlocked the vault (or since the last copy made meanwhile; see section 7). If that was not intended, see "Getting things back". It may also be someone with an old key copy deleting or changing entries through the server.|
 |Warning: the server sent an older state of the vault.|Nothing here changed, and this PC uploads its state again. The server may have been restored or rolled back. Compare check codes with another PC.|
 |The copy from the server failed authentication and was ignored.|The server copy is damaged or altered. This PC uploads its state over it.|
-|The server copy belongs to another vault and was ignored.|A new vault was created at the same path, or another vault was restored there. Press 'Stop' in the settings window, delete the `vault.goyo.sync` folder and press 'Save and start'. The old vault's history stays on the server.|
+|The server copy belongs to another vault and was ignored.|A new vault was created at the same path, or another vault was restored there. Press 'Quit (stop syncing)' in the settings window, delete the `vault.goyo.sync` folder and press 'Save and start'. The old vault's history stays on the server.|
 |Merging would exceed 1000 entries or 8 MiB, so nothing was merged.|Remove some entries; the merge is tried again.|
 |The server copy uses a newer format, so sync stopped.|Update Goyo Vault on this PC. This happens for a server copy in `GOYOVA05` or later. It is neither merged nor overwritten with this PC's state.|
 |Another PC changed this vault's key, so sync stopped. …|The server copy was saved under a key this PC's key file lacks, at a later key-file state. Bring that PC's new key file by USB and take it with 'Key management › Receive a new key file' (do not copy it over). Until then this PC's changes stay on this PC. If no PC changed the key, the server copy may be forged. Shown once each time sync stops: again if the key changes again after this PC took the new key file.|
@@ -275,14 +287,14 @@ Open `vault.goyo.sync\pre-merge-*.goyo` the same way (Restore from a backup file
 ## 9. Turning sync off and uninstalling
 
 **Off on one PC:**
-1. In the settings window, turn off **Start automatically when I sign in to Windows** (applies at once) and press **Stop**. Stop it first: a running helper creates the folder again.
+1. In the settings window, turn off **Start automatically when I sign in to Windows** (applies at once) and press **Quit (stop syncing)** (the notification-area icon's menu has it too). Stop it first: a running helper creates the folder again.
 2. To turn off one vault, **Remove** it and press **Save and start**. To turn off all, delete the helper's settings and log (`goyo-sync.conf`, `goyo-sync.log*`). `goyo-sync.exe` does nothing unless you open it, so it can stay.
 3. Delete the `vault.goyo.sync` folder. Move any `pre-merge-*.goyo` you want to keep out of it first.
 
 The vault stays in the sync format and keeps opening offline in 0.8.0 or later. There is no way back to the 0.7 format.
 
 **Everything, including the server:**
-1. **Stop the helper on every PC first** (autostart off, then Stop). A helper that is still running uploads its copy to the empty server again.
+1. **Stop the helper on every PC first** (autostart off, then Quit). A helper that is still running uploads its copy to the empty server again.
 2. On the server, `rm -rf ~/.local/share/goyo-sync`. This deletes all encrypted history.
 3. Remove the goyo-sync line from the server's `~/.ssh/authorized_keys`.
 
@@ -299,7 +311,7 @@ The helper writes its state as one word to the `status` file in the sync folder;
 |`hostkey`|Offline, host key message|The server's host key is not in `known_hosts` or has changed. Decided only from ssh.exe's own messages: text the server prints, a reason it sends when it drops the connection, or its version line never gives this state.|Press 'Check connection'. On a first connection you can compare the fingerprint and accept it. For a changed key, unless you reinstalled the server, this can be a man-in-the-middle attack: fix `known_hosts` only after checking the fingerprint on the server itself. Until then it does not connect; it tries again every 15 minutes.|
 |`nossh`|Offline|`System32\OpenSSH\ssh.exe` is missing.|Add 'OpenSSH Client' under Optional features.|
 |`server`|Offline|The server script is missing or failed, Python is missing, or the reply was malformed. Too much text printed by the login shell also ends here. Also: an upload was answered with a CONFLICT no honest server sends (log: `holding back uploads`), or the remote side printed text that looks like an ssh error. A server already handling 8 connections (`busy` in the log) also lands here; the helper tries again after 30 s, then at growing intervals.|'Check connection' tells a missing script or Python apart. Install again with 'Install or update on server' (selftest included), and check the script path and Python command in the advanced settings. If shell startup files print text, make them print only in interactive shells (for example `[[ $- == *i* ]] \|\| return` at the top of `~/.bashrc`). If the log shows `holding back uploads`, the server may be keeping this PC's uploads out (a freeze); check the server. Your changes stay on this PC, and only the newest file is retried, 30 seconds to 15 minutes apart. If the log shows `server version N of this vault is damaged`, the server's `data/<vault ID>/v/<N, 12 digits>.goyo` is no stored version (a file under 96 bytes or over 8 MiB, a folder, a link, a FIFO): remove the file at the path the log names, or restore it from a backup. `--fetch` names the same number.|
-|`refused`|Sync warning|The helper's checks or the server refused the upload (a link at the file, another vault's ID, the server's limit of 64 vaults, less than 256 MiB would stay free on the server disk, and so on).|Read the reason with 'View log'. Editing the vault again retries with a new file. If the log says `a file of another vault` (for example a new vault at the same path), press 'Stop', delete the `vault.goyo.sync` folder and press 'Save and start'. If it was the server's disk space, free up room on the server, then edit the vault again.|
+|`refused`|Sync warning|The helper's checks or the server refused the upload (a link at the file, another vault's ID, the server's limit of 64 vaults, less than 256 MiB would stay free on the server disk, and so on).|Read the reason with 'View log'. Editing the vault again retries with a new file. If the log says `a file of another vault` (for example a new vault at the same path), press 'Quit (stop syncing)', delete the `vault.goyo.sync` folder and press 'Save and start'. If it was the server's disk space, free up room on the server, then edit the vault again.|
 |`config`|Sync warning|`goyo-sync.conf` has an error, so the helper stopped.|Open the settings window: it names the line and shows the settings it could read. Fix them and press 'Save and start'.|
 |`update`|Sync warning, newer-format message|The server copy uses a newer Goyo Vault format (`GOYOVA05` or later).|Update Goyo Vault and goyo-sync on this PC.|
 |`oldserver`|Sync warning, server-script message|The server script is older than 0.9.0 and refused a `GOYOVA04` upload (log: `server refused GOYOVA04`). The settings window's list shows 'Server script update needed'.|Press 'Install or update on server'. The same file is uploaded again every 10 minutes and when the helper restarts.|
@@ -359,13 +371,13 @@ Everything the settings window does can also be done from the command line. `goy
 |Command|What it does|
 |---|---|
 |(none)|Opens the settings window, or brings the open one to the front.|
-|`--background`|Background sync, without a window. Every 2 seconds it looks for a change the vault app left and uploads it at once; every `interval` it fetches a new server version. Only one goyo-sync per folder runs at a time. Autostart and 'Save and start' run it this way.|
+|`--background`|Background sync, without a window (only a notification-area icon). Every 2 seconds it looks for a change the vault app left and uploads it at once; every `interval` it fetches a new server version. Only one goyo-sync per folder runs at a time. Autostart and 'Save and start' run it this way.|
 |`--once`|One sync pass over every vault, with the results printed.|
 |`--check`|Read-only: settings, `ssh.exe`, the connection, and per vault the sync folder, vault ID and server version.|
 |`--list`|The server's vaults: tag (`3FA2-C1D0`), 32-digit vault ID, newest version, size, time stored (UTC).|
 |`--fetch <vault ID> <head or N> <new-file.goyo>`|Saves one server version to a new file; an existing file is never overwritten. Open it with **Restore from a backup file** in Goyo Vault.|
 |`--autostart on` / `off`|Starts the helper at sign-in, or stops doing so (the `GoyoSync` Run value in the current user's registry, `"<goyo-sync.exe>" --background`). `off` also stops a running helper. After moving the folder, run `on` again or save in the settings window.|
-|`--stop`|Stops the running helper.|
+|`--stop`|Stops the running helper (its notification-area icon goes too).|
 |`--self-check`|Checks the process protections and that the settings window can be built (used by the release checks).|
 
 Exit codes: 0 ok, 1 error, 2 settings error. Messages follow `goyo-vault.lang` in the same folder (the language chosen in the vault app).

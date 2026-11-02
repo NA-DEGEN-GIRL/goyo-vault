@@ -7,6 +7,12 @@
 //! goyo-vault.theme and Korean or English goyo-vault.lang next to the exe,
 //! also while the window is open.
 //!
+//! Its X closes the window only: a running background helper keeps syncing
+//! and keeps its notification-area icon (tray.rs, which only the helper
+//! makes). With saved settings and no helper running, closing asks once
+//! whether to keep background sync on. '완전 종료 (동기화 중지)' stops the
+//! helper as `--stop` does and shows it go.
+//!
 //! The window never waits for ssh: a worker thread runs each job (setup.rs)
 //! and leaves its result in a slot of this process, then posts a bare
 //! private message, so no other program can hand the window a result. Like
@@ -58,6 +64,7 @@ unsafe extern "system" {
     fn IsIconic(h: Hwnd) -> i32;
     fn MonitorFromWindow(h: Hwnd, flags: u32) -> isize;
     fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+    fn KillTimer(h: Hwnd, id: usize) -> i32;
 }
 #[repr(C)]
 #[derive(Default)]
@@ -107,6 +114,8 @@ const ESCAPE: i32 = 2;
 /// A worker finished; the result waits in [`DONE`].
 const WM_DONE: u32 = 0x8001;
 const TIMER: usize = 1;
+/// After '완전 종료 (동기화 중지)': checks often until the helper is gone.
+const STOP_TIMER: usize = 2;
 /// The running pill and the vault rows are refreshed this often.
 const TICK: u32 = 2000;
 /// Lines of goyo-sync.log in the log view.
@@ -223,6 +232,8 @@ fn pick(_: Hwnd, _: &Ask) -> Option<PathBuf> {
 }
 /// A file dialog that could not open (CommDlgExtendedError), told apart
 /// from a cancel, as goyo-vault says it.
+/// Closing with saved settings and no background helper (see keep_on).
+const KEEP_ON: &str = "백그라운드 동기화를 켜 둘까요?\n\n지금은 꺼져 있어 이 창을 닫으면 동기화하지 않습니다.\n예: 저장된 설정으로 백그라운드 동기화를 시작합니다. 알림 영역에 아이콘이 생기고, 창을 닫아도 계속 동기화합니다.\n아니요: 동기화하지 않고 닫습니다.";
 const DIALOG_FAILED: &str = "파일을 고르는 창을 열지 못했습니다. 경로에 쓸 수 없는 문자가 있거나 폴더에 접근할 수 없을 수 있습니다. 다시 하거나 다른 폴더를 고르세요.";
 #[cfg(not(test))]
 fn pick_failed() -> bool {
@@ -367,6 +378,8 @@ enum Ask {
     Fetch([u8; 16], PathBuf),
     /// Close with unsaved changes?
     Close,
+    /// Closing with saved settings and no helper running: keep sync on?
+    Background,
     Tell(String),
     Quit,
 }
@@ -419,6 +432,8 @@ enum Note {
         ok: usize,
         failed: usize,
     },
+    /// The stop event is set; the helper ends its pass.
+    Stopping,
     Stopped(bool),
     Added,
     Removed,
@@ -474,6 +489,9 @@ struct App {
     autostart: bool,
     autostart_saved: bool,
     running: bool,
+    /// '완전 종료 (동기화 중지)' was pressed since the last save: closing
+    /// does not offer to start sync again.
+    stopped_here: bool,
     rows: Vec<Row>,
     selected: Option<usize>,
     server_note: Note,
@@ -557,6 +575,7 @@ impl App {
             saved,
             advanced: false,
             running: system.running(),
+            stopped_here: false,
             rows: Vec::new(),
             selected: None,
             server_note: Note::Intro,
@@ -947,7 +966,12 @@ impl App {
             (IX + 176, r + 52, 140, 40),
             theme::SECONDARY,
         );
-        self.button(STOP, "중지", (IX + 324, r + 52, 92, 40), theme::SECONDARY);
+        self.button(
+            STOP,
+            "완전 종료 (동기화 중지)",
+            (IX + 324, r + 52, 220, 40),
+            theme::SECONDARY,
+        );
         self.button(
             LOG,
             "로그 보기",
@@ -1391,9 +1415,19 @@ impl App {
                 }
                 None
             }
+            // The helper ends its pass, removes its tray icon and exits: the
+            // line says so until it is gone, checked every 200 ms.
             STOP => {
+                self.stopped_here = true;
                 let sent = self.system.stop();
-                self.set_run_note(Note::Stopped(sent));
+                if sent && self.system.running() {
+                    self.set_run_note(Note::Stopping);
+                    unsafe {
+                        SetTimer(self.hwnd, STOP_TIMER, 200, 0);
+                    }
+                } else {
+                    self.show_stopped(sent);
+                }
                 None
             }
             LOG => {
@@ -1546,7 +1580,15 @@ impl App {
                 }
                 None
             }
-            (Ask::Close, Answer::Yes(true)) => Some(Ask::Quit),
+            (Ask::Close, Answer::Yes(true)) => self.keep_on().or(Some(Ask::Quit)),
+            // 예 starts the helper as '저장하고 시작' does (the process waits
+            // for that after the window is gone; see finish_workers).
+            (Ask::Background, Answer::Yes(yes)) => {
+                if yes {
+                    self.start(Job::Restart);
+                }
+                Some(Ask::Quit)
+            }
             _ => None,
         }
     }
@@ -1561,6 +1603,7 @@ impl App {
             return self.set_run_note(Note::SaveFailed);
         }
         self.saved = Some(self.fields.clone());
+        self.stopped_here = false;
         // Always written, so a value from before --background is replaced.
         self.autostart_error = self.system.set_autostart(self.autostart).err();
         if self.autostart_error.is_none() {
@@ -1783,10 +1826,44 @@ impl App {
         }
         None
     }
-    /// Closing with unsaved changes asks first.
+    /// Closing with unsaved changes asks first; then, see [`keep_on`].
+    ///
+    /// [`keep_on`]: App::keep_on
     fn closing(&mut self) -> Option<Ask> {
         self.read_fields();
-        self.dirty().then_some(Ask::Close)
+        if self.dirty() {
+            Some(Ask::Close)
+        } else {
+            self.keep_on()
+        }
+    }
+    /// The window closes; the helper keeps syncing. Only when none runs and
+    /// the settings are saved does it ask once whether to start one, unless
+    /// it was just stopped here or a start is under way.
+    fn keep_on(&self) -> Option<Ask> {
+        let starting = self.busy.as_ref().is_some_and(|b| b.kind == Kind::Restart);
+        (self.saved.is_some() && !self.stopped_here && !starting && !self.system.running())
+            .then_some(Ask::Background)
+    }
+    /// The run line after '완전 종료 (동기화 중지)', and the pill.
+    fn show_stopped(&mut self, sent: bool) {
+        self.running = self.system.running();
+        unsafe {
+            InvalidateRect(self.hwnd, &self.r(X, 16, W - X, 40), 0);
+        }
+        self.set_run_note(Note::Stopped(sent));
+    }
+    /// Every 200 ms after '완전 종료 (동기화 중지)', until the helper is gone.
+    fn stop_tick(&mut self) {
+        if self.run_note == Note::Stopping && self.system.running() {
+            return;
+        }
+        unsafe {
+            KillTimer(self.hwnd, STOP_TIMER);
+        }
+        if self.run_note == Note::Stopping {
+            self.show_stopped(true);
+        }
     }
     /// Every 2 s: the running pill, the vault rows, a job's seconds, and the
     /// theme and language files.
@@ -1798,6 +1875,9 @@ impl App {
             unsafe {
                 InvalidateRect(self.hwnd, &self.r(X, 16, W - X, 40), 0);
             }
+        }
+        if self.run_note == Note::Stopping && !running {
+            self.run_note = Note::Stopped(true);
         }
         if self.screen == Screen::Main && !in_modal() {
             self.read_fields();
@@ -2082,7 +2162,7 @@ impl App {
             } else if self.dirty() {
                 "저장하지 않은 변경이 있습니다. '저장하고 시작'을 누르면 적용됩니다."
             } else if self.running {
-                "백그라운드에서 동기화하고 있습니다. 이 창을 닫아도 계속됩니다."
+                "백그라운드에서 동기화하고 있습니다. 이 창을 닫아도 계속되고, 알림 영역의 아이콘에서 이 창을 다시 열 수 있습니다."
             } else {
                 "백그라운드 동기화가 꺼져 있습니다. '저장하고 시작'으로 켜세요."
             }),
@@ -2106,8 +2186,15 @@ impl App {
                 );
                 (text, if *failed > 0 { TONE_DANGER } else { TONE_TEXT })
             }
-            Note::Stopped(true) => muted("실행 중인 도우미에 중지 신호를 보냈습니다."),
-            Note::Stopped(false) => muted("실행 중인 도우미가 없습니다."),
+            Note::Stopping => (
+                tr("백그라운드 동기화를 끝내는 중입니다. 하던 동기화를 마치면 알림 영역의 아이콘도 사라집니다.").to_owned(),
+                TONE_TEXT,
+            ),
+            Note::Stopped(true) => (
+                tr("백그라운드 동기화를 완전히 종료했습니다. 알림 영역의 아이콘도 사라졌습니다. 다시 켜려면 '저장하고 시작'을 누르세요.").to_owned(),
+                TONE_TEXT,
+            ),
+            Note::Stopped(false) => muted("실행 중인 백그라운드 동기화가 없습니다."),
             Note::Added => muted("금고를 추가했습니다. '저장하고 시작'을 누르면 적용됩니다."),
             Note::Removed => muted(
                 "목록에서 뺐습니다. '저장하고 시작'을 누르면 적용됩니다. 금고 옆 동기화 폴더는 그대로 남습니다.",
@@ -2116,7 +2203,7 @@ impl App {
             Note::KeyRefused => danger(tr("고요 금고 파일(.goyo·.goyokey)은 전용 키로 쓸 수 없습니다. SSH 개인 키를 고르세요.").to_owned()),
             Note::PickFirst => muted("뺄 금고를 목록에서 고르세요."),
             Note::AutostartOff if self.running => muted(
-                "로그인할 때 자동으로 시작하지 않습니다. 지금 실행 중인 도우미는 '중지'로 멈추세요.",
+                "로그인할 때 자동으로 시작하지 않습니다. 지금 실행 중인 동기화는 '완전 종료 (동기화 중지)'로 멈추세요.",
             ),
             Note::AutostartOff => muted("로그인할 때 자동으로 시작하지 않습니다."),
         }
@@ -2531,6 +2618,7 @@ fn run_asks(h: Hwnd, mut next: Option<Ask>) {
                 h,
                 tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?"),
             )),
+            Ask::Background => Answer::Yes(ask_yes(h, tr(KEEP_ON))),
             Ask::Tell(text) => {
                 tell(h, text);
                 Answer::Done
@@ -2594,6 +2682,10 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
         }
         0x113 if w == TIMER => {
             with_app(App::tick);
+            return 0;
+        }
+        0x113 if w == STOP_TIMER => {
+            with_app(App::stop_tick);
             return 0;
         }
         WM_DONE => {
@@ -3008,7 +3100,7 @@ mod tests {
     use super::*;
     use crate::{
         setup::tests::{Script, hello_ok, list_ok, out, reply, ssh_said},
-        tests::Temp,
+        tests::{KoreanAfter, Temp},
     };
     use goyo_vault::syncwire::Status;
 
@@ -3181,26 +3273,6 @@ mod tests {
         s.chars().any(|c| {
             ('\u{ac00}'..='\u{d7a3}').contains(&c) || ('\u{3131}'..='\u{318e}').contains(&c)
         })
-    }
-    /// The interface language is one setting for the whole process, so the
-    /// tests that switch it or check translated captions hold this for
-    /// their whole run and take turns. It puts Korean back at the end.
-    struct KoreanAfter {
-        _turn: std::sync::MutexGuard<'static, ()>,
-    }
-    impl KoreanAfter {
-        fn hold() -> Self {
-            static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let turn = LANGUAGE.lock();
-            Self {
-                _turn: turn.unwrap_or_else(std::sync::PoisonError::into_inner),
-            }
-        }
-    }
-    impl Drop for KoreanAfter {
-        fn drop(&mut self) {
-            i18n::set_english(false);
-        }
     }
 
     /// Fill the fields, add and remove vaults, check the server, save into
@@ -3992,8 +4064,9 @@ mod tests {
             other.join().unwrap();
             pump();
         };
-        // Nothing changed: no question.
+        // Nothing changed (and a helper runs): no question.
         let w = Window::with("close-clean", saved_config);
+        w.fake.state.lock().unwrap().running = true;
         assert!(!w.app(|a| {
             a.read_fields();
             a.dirty()
@@ -4008,6 +4081,7 @@ mod tests {
         for from_another_thread in [false, true] {
             // 아니요: the window stays with the change, nothing is written.
             let w = Window::with("close-no", saved_config);
+            w.fake.state.lock().unwrap().running = true;
             let config_before = std::fs::read(w.t.0.join(CONFIG)).unwrap();
             w.type_in(HOST, "other-server");
             answer(false);
@@ -4048,6 +4122,131 @@ mod tests {
         }
         // Both answers were used.
         assert!(ANSWERS.with(|a| a.borrow().is_empty()));
+    }
+
+    /// The window's X closes the window only: a running helper keeps
+    /// syncing (and keeps its tray icon). With saved settings and no helper
+    /// running it asks once "백그라운드 동기화를 켜 둘까요?": 예 starts the
+    /// helper as '저장하고 시작' does, then closes; 아니요 just closes. Not
+    /// asked without saved settings, after '완전 종료 (동기화 중지)' in this
+    /// window, or while a start is under way; after "close without saving"
+    /// it comes as the second question.
+    #[test]
+    fn closing_without_a_helper_offers_to_keep_sync_on() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let keep_on = tr(KEEP_ON).to_owned();
+        let saved_config = |dir: &Path| {
+            std::fs::write(dir.join("vault.goyo"), b"never read").unwrap();
+            let fields = Fields {
+                host: "my-server".into(),
+                vaults: vec![dir.join("vault.goyo")],
+                ..Fields::default()
+            };
+            let (text, _) = setup::render(&fields).unwrap();
+            std::fs::write(dir.join(CONFIG), text).unwrap();
+        };
+        let close = |w: &Window| unsafe {
+            window_proc(w.h, 0x10, 0, 0);
+        };
+        // A helper runs: closed at once, nothing stopped or started.
+        let w = Window::with("keep-running", saved_config);
+        w.fake.state.lock().unwrap().running = true;
+        close(&w);
+        assert!(asked().is_empty());
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        assert!(calls(&w.fake).is_empty());
+        drop(w);
+        // None runs, 예: the helper starts, the window closes and the
+        // process waits for the start.
+        let w = Window::with("keep-yes", saved_config);
+        answer(true);
+        close(&w);
+        assert_eq!(asked(), std::slice::from_ref(&keep_on));
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        finish_workers(
+            w.app(|a| std::mem::take(&mut a.workers)),
+            Duration::from_secs(20),
+        );
+        assert_eq!(calls(&w.fake), ["start"]);
+        drop(w);
+        // 아니요: just closed.
+        let w = Window::with("keep-no", saved_config);
+        answer(false);
+        close(&w);
+        assert_eq!(asked(), std::slice::from_ref(&keep_on));
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        assert!(w.app(|a| a.workers.is_empty()));
+        assert!(calls(&w.fake).is_empty());
+        drop(w);
+        // No saved settings: nothing to start. (A first setup has the
+        // autostart switch on unsaved, so only that is asked.)
+        let w = Window::new("keep-unsaved");
+        answer(true);
+        close(&w);
+        assert_eq!(
+            asked(),
+            [tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?")]
+        );
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        drop(w);
+        // Stopped in this window: not asked again.
+        let w = Window::with("keep-stopped", saved_config);
+        w.fake.state.lock().unwrap().running = true;
+        w.click(STOP);
+        assert_eq!(calls(&w.fake), ["stop"]);
+        close(&w);
+        assert!(asked().is_empty());
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        drop(w);
+        // Unsaved changes, "close without saving" 예: then this question.
+        let w = Window::with("keep-dirty", saved_config);
+        w.type_in(HOST, "other-server");
+        answer(true);
+        answer(false);
+        close(&w);
+        assert_eq!(
+            asked(),
+            [
+                tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?").to_owned(),
+                keep_on.clone()
+            ]
+        );
+        assert_eq!(unsafe { IsWindow(w.h) }, 0);
+        assert!(calls(&w.fake).is_empty());
+        drop(w);
+        assert!(ANSWERS.with(|a| a.borrow().is_empty()));
+    }
+
+    /// '완전 종료 (동기화 중지)' shows what it did: while the helper ends
+    /// its pass the line says it is stopping, then that sync has quit and
+    /// the pill turns off; with no helper it says none runs.
+    #[test]
+    fn quitting_sync_shows_its_effect() {
+        let w = Window::new("quit");
+        {
+            let mut s = w.fake.state.lock().unwrap();
+            s.running = true;
+            s.stop_delay = Duration::from_millis(300);
+        }
+        w.app(|a| a.running = true);
+        w.click(STOP);
+        assert_eq!(calls(&w.fake), ["stop"]);
+        assert_eq!(w.app(|a| a.run_note.clone()), Note::Stopping);
+        assert!(w.app(|a| a.running));
+        let start = Instant::now();
+        while w.app(|a| a.run_note.clone()) == Note::Stopping {
+            assert!(start.elapsed() < Duration::from_secs(10), "never stopped");
+            pump();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(w.app(|a| a.run_note.clone()), Note::Stopped(true));
+        assert!(!w.app(|a| a.running));
+        // Again, with nothing running.
+        w.click(STOP);
+        assert_eq!(w.app(|a| a.run_note.clone()), Note::Stopped(false));
+        let label = read_text(w.app(|a| a.handle(STOP)));
+        assert_eq!(label, tr("완전 종료 (동기화 중지)"));
     }
 
     /// Builds each view with synthetic data and calls `visit` on it.
@@ -4207,6 +4406,7 @@ mod tests {
             Note::AutostartFailed(1234),
             Note::Synced { ok: 8, failed: 0 },
             Note::Synced { ok: 4, failed: 4 },
+            Note::Stopping,
             Note::Stopped(true),
             Note::Stopped(false),
             Note::Added,
@@ -4442,6 +4642,7 @@ mod tests {
             fingerprint_text(&keys, "my-server"),
             fingerprint_text(&none, "my-server"),
             tr("저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?").to_owned(),
+            tr(KEEP_ON).to_owned(),
             usb_text(4, 160, path, steps, ""),
             usb_text(
                 4,

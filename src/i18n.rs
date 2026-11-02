@@ -906,7 +906,7 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("저장하고 시작", "Save and start"),
     ("지금 동기화", "Sync now"),
-    ("중지", "Stop"),
+    ("완전 종료 (동기화 중지)", "Quit (stop syncing)"),
     ("로그 보기", "View log"),
     ("로그", "Log"),
     (
@@ -1071,8 +1071,8 @@ pub const EN: &[(&str, &str)] = &[
         "There are unsaved changes. 'Save and start' applies them.",
     ),
     (
-        "백그라운드에서 동기화하고 있습니다. 이 창을 닫아도 계속됩니다.",
-        "Syncing in the background. It keeps going when you close this window.",
+        "백그라운드에서 동기화하고 있습니다. 이 창을 닫아도 계속되고, 알림 영역의 아이콘에서 이 창을 다시 열 수 있습니다.",
+        "Syncing in the background. It keeps going when you close this window, and its notification-area icon opens this window again.",
     ),
     (
         "백그라운드 동기화가 꺼져 있습니다. '저장하고 시작'으로 켜세요.",
@@ -1115,10 +1115,29 @@ pub const EN: &[(&str, &str)] = &[
         "Sync finished: {} OK, {} with problems. Each vault's result is shown in the list.",
     ),
     (
-        "실행 중인 도우미에 중지 신호를 보냈습니다.",
-        "The running helper was asked to stop.",
+        "백그라운드 동기화를 끝내는 중입니다. 하던 동기화를 마치면 알림 영역의 아이콘도 사라집니다.",
+        "Stopping background sync. Its notification-area icon goes away when the sync in progress ends.",
     ),
-    ("실행 중인 도우미가 없습니다.", "No helper is running."),
+    (
+        "백그라운드 동기화를 완전히 종료했습니다. 알림 영역의 아이콘도 사라졌습니다. 다시 켜려면 '저장하고 시작'을 누르세요.",
+        "Background sync has quit, and its notification-area icon is gone. To turn it on again, press 'Save and start'.",
+    ),
+    (
+        "실행 중인 백그라운드 동기화가 없습니다.",
+        "Background sync is not running.",
+    ),
+    (
+        "백그라운드 동기화를 켜 둘까요?\n\n지금은 꺼져 있어 이 창을 닫으면 동기화하지 않습니다.\n예: 저장된 설정으로 백그라운드 동기화를 시작합니다. 알림 영역에 아이콘이 생기고, 창을 닫아도 계속 동기화합니다.\n아니요: 동기화하지 않고 닫습니다.",
+        "Keep background sync on?\n\nIt is off, so nothing syncs once this window closes.\nYes: start background sync with the saved settings. An icon appears in the notification area, and syncing goes on after the window closes.\nNo: close without syncing.",
+    ),
+    // The background helper's notification-area icon (tray.rs).
+    ("고요 금고 동기화 · {}", "Goyo Vault Sync · {}"),
+    ("확인 중", "checking"),
+    ("정상", "OK"),
+    ("문제 있는 금고 {}개", "{} vault(s) with a problem"),
+    ("지금 동기화하는 중", "syncing now"),
+    ("멈추는 중", "stopping"),
+    ("설정 열기", "Open settings"),
     (
         "금고를 추가했습니다. '저장하고 시작'을 누르면 적용됩니다.",
         "Vault added. 'Save and start' applies it.",
@@ -1348,8 +1367,8 @@ pub const EN: &[(&str, &str)] = &[
         "The window could not be created, so goyo-sync stops.",
     ),
     (
-        "로그인할 때 자동으로 시작하지 않습니다. 지금 실행 중인 도우미는 '중지'로 멈추세요.",
-        "It no longer starts when you sign in. Stop the helper running now with 'Stop'.",
+        "로그인할 때 자동으로 시작하지 않습니다. 지금 실행 중인 동기화는 '완전 종료 (동기화 중지)'로 멈추세요.",
+        "It no longer starts when you sign in. Stop the sync running now with 'Quit (stop syncing)'.",
     ),
     (
         "로그인할 때 자동으로 시작하지 않습니다.",
