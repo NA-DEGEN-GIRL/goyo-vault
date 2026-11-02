@@ -620,12 +620,12 @@ pub const EN: &[(&str, &str)] = &[
         "This backup is locked with a key that is not in this key file. Restore it with the copy of the key file from when the backup was made.",
     ),
     (
-        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md).",
-        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault is the default build without security-key support, so it cannot open this file. Your password is not wrong. Security-key support is still experimental and has to be built yourself (docs/SECURITY_KEY.md).",
+        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능을 빼고 빌드한 것이라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능이 든 기본 빌드(0.11.0 이상)로 여세요(docs/SECURITY_KEY.md).",
+        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault was built without security-key support, so it cannot open this file. Your password is not wrong. Open it with the default build of 0.11.0 or later, which has security keys (docs/SECURITY_KEY.md).",
     ),
     (
-        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md). 파일이 손상되었거나 더 새로운 버전에서 만든 파일일 수도 있습니다.",
-        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault is the default build without security-key support, so it cannot open this file. Your password is not wrong. Security-key support is still experimental and has to be built yourself (docs/SECURITY_KEY.md). The file may also be damaged, or made by a newer version.",
+        "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능을 빼고 빌드한 것이라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능이 든 기본 빌드(0.11.0 이상)로 여세요(docs/SECURITY_KEY.md). 파일이 손상되었거나 더 새로운 버전에서 만든 파일일 수도 있습니다.",
+        "This key file opens only with a security key (YubiKey or similar). This Goyo Vault was built without security-key support, so it cannot open this file. Your password is not wrong. Open it with the default build of 0.11.0 or later, which has security keys (docs/SECURITY_KEY.md). The file may also be damaged, or made by a newer version.",
     ),
     ("이름 · 목록에 표시됩니다", "Name · shown in the list"),
     (
@@ -1991,8 +1991,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Keys that can stand in for all the others: none (use 'Pair keys')",
     ),
     (
-        "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.",
-        "With security keys on (YubiKey or another FIDO2 key), the key file is locked with both the password and a registered security key. It is experimental.\nIf every registered key is lost, no one (not even you) can open this vault, and there is no recovery, so register two or more. Keys registered together on one PC are paired, so if one is lost the other alone can remove it at once. Give each key its own PIN, and write the key number on each key.",
+        "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.",
+        "With security keys on (YubiKey or another FIDO2 key), the key file is locked with both the password and a registered security key.\nIf every registered key is lost, no one (not even you) can open this vault, and there is no recovery, so register two or more. Keys registered together on one PC are paired, so if one is lost the other alone can remove it at once. Give each key its own PIN, and write the key number on each key.",
     ),
     (
         "다른 PC에서 이 금고의 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력합니다.",
@@ -2012,8 +2012,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "This key file has not been backed up with 'Back up key' yet. If the key file is lost, the vault cannot be opened even with the security keys and the password.",
     ),
     (
-        "보안 키로도 잠그기 (실험)",
-        "Security keys too (experimental)",
+        "보안 키로도 잠그기",
+        "Security keys too",
     ),
     (
         "열 때마다 등록한 보안 키를 연결하고 터치하고 키의 PIN을 입력합니다. 모두 잃으면 누구도 복구할 수 없으니 2개 이상, 지금 함께 등록하세요(함께 등록한 키끼리 짝을 맺습니다). 등록할 때 키마다 Windows 창이 세 번 열립니다. PIN이 없는 키는 그때 PIN을 정하며, 키마다 PIN을 다르게 정하세요.",
@@ -2060,16 +2060,16 @@ pub const EN_SK: &[(&str, &str)] = &[
         "If the password stays, anyone with a key file made before security keys were on, or its backup (which opens with the password alone), can keep guessing this password offline, and once it is guessed only the registered keys (and PIN) remain. Delete those copies or change the password too.",
     ),
     (
-        "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키 빌드여야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.",
-        "With security keys on, every time this vault is opened you also plug in one registered security key, touch it and enter its PIN, besides the password.\n• Have every key you will register at this PC now (2 or more recommended). Windows opens three windows per key.\n• If you also use this vault on other PCs, Goyo Vault there must be the security-key build too, and afterwards each of those PCs must take this PC's new key file.",
+        "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키를 지원하는 0.11.0 이상이어야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.",
+        "With security keys on, every time this vault is opened you also plug in one registered security key, touch it and enter its PIN, besides the password.\n• Have every key you will register at this PC now (2 or more recommended). Windows opens three windows per key.\n• If you also use this vault on other PCs, Goyo Vault there must be 0.11.0 or later with security-key support too, and afterwards each of those PCs must take this PC's new key file.",
     ),
     (
-        "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.",
-        "If you also use this vault on other PCs: on each of them, bring this PC's new key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.",
+        "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키를 지원하는 0.11.0 이상이어야 합니다.",
+        "If you also use this vault on other PCs: on each of them, bring this PC's new key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be 0.11.0 or later with security-key support.",
     ),
     (
-        "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.",
-        "This vault syncs. The other PCs stop syncing until they take this PC's new key file. On each of them, bring this key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be the security-key build.\nIf you also turn key-file sync on at this PC, those PCs can take it with 'Receive the new key file from the server…' in 'Key management' instead of by USB.",
+        "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키를 지원하는 0.11.0 이상이어야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.",
+        "This vault syncs. The other PCs stop syncing until they take this PC's new key file. On each of them, bring this key file by USB, take it with 'Key management › Receive a new key file', enter this PC's key check code and touch one registered security key. Goyo Vault there must be 0.11.0 or later with security-key support.\nIf you also turn key-file sync on at this PC, those PCs can take it with 'Receive the new key file from the server…' in 'Key management' instead of by USB.",
     ),
     (
         "서버의 새 열쇠 파일 받기…",
@@ -2773,12 +2773,12 @@ pub const EN_SK: &[(&str, &str)] = &[
         "This Windows cannot tell how a security key is connected, so key-file sync cannot be turned on. Update Windows.",
     ),
     (
-        "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 최근 10분 동안 응답하지 않았습니다. 그 goyo-sync를 실행한 뒤 다시 하세요.",
-        "No goyo-sync with key-file sync (the security-key build) has answered in the last 10 minutes. Run that goyo-sync, then try again.",
+        "열쇠 파일 동기화를 지원하는 goyo-sync가 최근 10분 동안 응답하지 않았습니다. 그 goyo-sync를 실행한 뒤 다시 하세요.",
+        "No goyo-sync with key-file sync has answered in the last 10 minutes. Run that goyo-sync, then try again.",
     ),
     (
-        "서버의 열쇠 파일 삭제가 끝난 뒤 다시 켜세요. (goyo-sync(보안 키 빌드)가 실행 중이어야 하고, 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받아야 합니다.)",
-        "Turn it on again once the server has deleted the key file. (goyo-sync (the security-key build) must be running, and this PC's server connection must accept this vault's key-file requests.)",
+        "서버의 열쇠 파일 삭제가 끝난 뒤 다시 켜세요. (goyo-sync가 실행 중이어야 하고, 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받아야 합니다.)",
+        "Turn it on again once the server has deleted the key file. (goyo-sync must be running, and this PC's server connection must accept this vault's key-file requests.)",
     ),
     (
         "서버에 이미 이 금고의 열쇠 파일이 있습니다(다른 PC에서 켬). 그 파일을 받으세요.",
@@ -2826,8 +2826,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "The server's key file is not one this PC can take or join. If another PC really changed it, bring that PC's key file by USB and take it with 'Receive a new key file'.",
     ),
     ("열쇠 파일: 이 PC에만 보관 (다른 PC에는 USB로)", "Key file: kept on this PC only (other PCs get it by USB)"),
-    ("열쇠 파일: 서버로 동기화 (실험)", "Key file: synced through the server (experimental)"),
-    ("열쇠 파일: 서버로 동기화 (실험) · 서버에 없음", "Key file: synced through the server (experimental) · not on the server"),
+    ("열쇠 파일: 서버로 동기화", "Key file: synced through the server"),
+    ("열쇠 파일: 서버로 동기화 · 서버에 없음", "Key file: synced through the server · not on the server"),
     (
         "서버에 새 열쇠 파일 있음 (수정 {e})",
         "A new key file is on the server (revision {e})",
@@ -2893,8 +2893,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "The server has a key file this PC has not taken (revision {e}). It may be another PC's change, or a forged file. Turning off deletes that file from the server too, and if it is another PC's change, that change must be carried by USB. Turning off still changes the data key, so entries saved from now on do not open with the key file that was on the server.",
     ),
     (
-        "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?",
-        "No goyo-sync with key-file sync (the security-key build) answers. Turning off happens now, but the server's key file is not deleted until that goyo-sync runs. Continue?",
+        "열쇠 파일 동기화를 지원하는 goyo-sync가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?",
+        "No goyo-sync with key-file sync answers. Turning off happens now, but the server's key file is not deleted until that goyo-sync runs. Continue?",
     ),
     (
         "이 PC에 서버 확인 기록이 없어, goyo-sync가 서버를 확인한 뒤 이 PC를 한 번 더 잠금 해제해야 삭제 요청이 나갑니다.",
@@ -2989,8 +2989,8 @@ If the server answers this way for a vault that used key-file sync, the server s
         "goyo-sync or the server did not accept this PC's key file (format or size). Meanwhile this PC's vault is not uploaded. Update goyo-sync and the server script to the same version. After the update, it is uploaded again when goyo-sync restarts or you press 'Sync now'.",
     ),
     (
-        "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.",
-        "This vault uses key-file sync, but no goyo-sync with key-file sync (the security-key build) has answered in the last 10 minutes. Run that goyo-sync. Until then no key file moves, and after turning off the server's key file is not deleted either.",
+        "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.",
+        "This vault uses key-file sync, but no goyo-sync with key-file sync has answered in the last 10 minutes. Run that goyo-sync. Until then no key file moves, and after turning off the server's key file is not deleted either.",
     ),
     (
         "열쇠 파일 동기화를 다시 켜지 않을 거라면, 모든 PC가 이 끄기를 받은 뒤(이 열쇠 파일을 USB로 받거나 그 PC에서 직접 끔) 서버 관리자에게 모든 PC의 강제 명령에서 이 금고 ID를 --key-sync 목록에서 빼 달라고 하세요. 빼지 않으면 그 줄의 동기화 키를 훔친 사람이 이 금고의 업로드를 막을 수 있습니다.",
@@ -3091,8 +3091,8 @@ If the server answers this way for a vault that used key-file sync, the server s
         "Forced command line…",
     ),
     (
-        "열쇠 파일 동기화(실험)는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.",
-        "Key-file sync (experimental) is turned on in Goyo Vault's 'Key management'. A vault with it on must also be in this PC's line on the server.",
+        "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.",
+        "Key-file sync is turned on in Goyo Vault's 'Key management'. A vault with it on must also be in this PC's line on the server.",
     ),
     (
         "restrict,command=\"{}\" <이 PC 전용 키의 공개 키> goyo-sync",

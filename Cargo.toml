@@ -1,6 +1,6 @@
 [package]
 name = "goyo-vault"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Offline Windows vault with a separately encrypted key file"
@@ -19,9 +19,11 @@ chacha20 = { version = "=0.9.1", default-features = false, features = ["zeroize"
 poly1305 = { version = "=0.8.0", default-features = false, features = ["zeroize"] }
 
 [features]
-default = []
-# Experimental FIDO2 security-key support; turns on no dependency. The
-# release is always the default build (scripts/package_release.py).
+default = ["security-key"]
+# FIDO2 security-key support (webauthn.dll, loaded at run time); turns on no
+# dependency. The release is the default build, with it on
+# (scripts/package_release.py); `--no-default-features` builds the keyless
+# edition.
 security-key = []
 
 [profile.release]

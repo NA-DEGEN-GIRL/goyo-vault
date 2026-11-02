@@ -2263,7 +2263,7 @@ fn auto_apply_still_refuses_a_file_of_a_removed_key() {
 /// Spec §2.30 (the wrong notice, task 2 of that round): on a security-key
 /// build, a vault copy under another PC's new key, written under key-file
 /// sync (A removed a key), halts B with KeyChangedServer, the change that
-/// [받기…] or the next unlock takes; never the default build's "this build
+/// [받기…] or the next unlock takes; never the keyless build's "this build
 /// cannot take that key file" (KeyChanged{hardware: true}) or the USB
 /// advice of KeyChanged. Told once per halt.
 #[test]

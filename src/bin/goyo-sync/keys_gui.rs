@@ -17,7 +17,7 @@ use std::{io::Read, path::Path};
 pub const LINE_BUTTON: &str = "강제 명령 줄…";
 /// Beside it: where key-file sync is switched, and why the line matters
 /// (spec §2.29 (sync)). The switch is goyo-vault's alone.
-pub const LINE_NOTE: &str = "열쇠 파일 동기화(실험)는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.";
+pub const LINE_NOTE: &str = "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.";
 /// The vaults `--key-sync` can name at most (spec v3 §7.13). The line
 /// names only vaults in the settings list, which holds fewer, so none is
 /// ever left out.

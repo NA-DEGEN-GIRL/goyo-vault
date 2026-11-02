@@ -15,7 +15,7 @@ upload.
 
 Install, the forced-command key and uninstalling: docs/SYNC.md.
 
-Key-file sync (experimental, security-key builds only; docs/SECURITY_KEY.md).
+Key-file sync (security-key builds, the default since 0.11.0; docs/SECURITY_KEY.md).
 Without --key-sync this script never stores or serves a key file: PUT
 refuses every GOYOK* magic, and every key op (PUTKEY, GETKEY, CUTKEY, PRUNE)
 is BAD_REQUEST. With --key-sync=<vault id>[,<vault id>...] (32 lower-case

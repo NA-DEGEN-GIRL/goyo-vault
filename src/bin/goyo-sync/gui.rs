@@ -2351,7 +2351,7 @@ fn fingerprint_text(t: &Trusted, host: &str) -> String {
     }
 }
 /// What "이 PC로 가져오기" says when the key file comes by USB (spec §2.29
-/// (sync)): in the default build always, in the security-key build when the
+/// (sync)): in the keyless build always, in the security-key build when the
 /// server's key file did not come along (`reason` says why, ending in a line
 /// break). `steps`: the list, and how goyo-vault reaches the vault
 /// ([`App::take_in`]).

@@ -2,7 +2,7 @@
 //! key. The KF2 layout holds a bundle of data keys behind the password alone
 //! (GOYOKE03) or behind security keys as well (GOYOKH01, and GOYOKS01 with
 //! key-file sync). One strict parser reads every KF2 magic and is the same in
-//! every build. The default build has no security-key code: it refuses those
+//! every build. The keyless build has no security-key code: it refuses those
 //! files on their magic alone, before any key derivation, and never as a
 //! wrong password. The security-key build opens and seals them through
 //! `inbox`.
@@ -65,10 +65,10 @@ const SEAL_BLOCK: usize = 88;
 pub const NEWER_KEY_FORMAT: &str =
     "더 새로운 버전에서 만든 열쇠 파일입니다. 고요 금고를 업데이트하세요.";
 /// A GOYOKH01 or GOYOKS01 key file in a build without security-key support.
-pub const NO_SECURITY_KEY_SUPPORT: &str = "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md).";
+pub const NO_SECURITY_KEY_SUPPORT: &str = "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능을 빼고 빌드한 것이라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능이 든 기본 빌드(0.11.0 이상)로 여세요(docs/SECURITY_KEY.md).";
 /// The same for any other GOYOKH or GOYOKS magic, or such a file that does
 /// not parse: a truncated copy, or a later version's grammar.
-pub const NO_SECURITY_KEY_SUPPORT_DAMAGED: &str = "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능이 빠진 기본 빌드라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능은 아직 실험 단계라 직접 빌드해야 합니다(docs/SECURITY_KEY.md). 파일이 손상되었거나 더 새로운 버전에서 만든 파일일 수도 있습니다.";
+pub const NO_SECURITY_KEY_SUPPORT_DAMAGED: &str = "이 열쇠 파일은 보안 키(YubiKey 등)가 있어야 열립니다. 지금 쓰는 고요 금고는 보안 키 기능을 빼고 빌드한 것이라 이 파일을 열 수 없습니다. 비밀번호가 틀린 것이 아닙니다. 보안 키 기능이 든 기본 빌드(0.11.0 이상)로 여세요(docs/SECURITY_KEY.md). 파일이 손상되었거나 더 새로운 버전에서 만든 파일일 수도 있습니다.";
 /// A key change whose epoch would pass EPOCH_MAX: nothing is written.
 pub const EPOCH_LIMIT: &str =
     "열쇠 수정 번호가 한도에 닿았습니다. 새 금고를 만들어 항목을 옮기세요.";
@@ -117,7 +117,7 @@ enum Family {
     /// A KF2 file this build opens: GOYOKE03, and with security-key support
     /// GOYOKH01 and GOYOKS01.
     Kf2,
-    /// `GOYOKH` or `GOYOKS` and any two more bytes: the default build
+    /// `GOYOKH` or `GOYOKS` and any two more bytes: the keyless build
     /// decides on the family alone, a newer magic of it included.
     #[cfg(not(feature = "security-key"))]
     SecurityKey,
@@ -155,7 +155,7 @@ fn family(bytes: &[u8]) -> Family {
     }
 }
 /// How an unlock treats a key file it finds, by its first 8 bytes (spec
-/// §4.6, §5.12 rule i): a newer build's file, and in the default build a
+/// §4.6, §5.12 rule i): a newer build's file, and in the keyless build a
 /// security-key file (`GOYOKH*`/`GOYOKS*`, which it can neither open nor
 /// tell a damaged copy of from a later build's), is never damaged here, so
 /// no temp file ever takes its place, at any size.
@@ -703,7 +703,7 @@ impl Bundle {
     }
 }
 
-/// A security-key touch (spec §8.3). The default build has no
+/// A security-key touch (spec §8.3). The keyless build has no
 /// security-key code, so none exists and every `open` gets None.
 #[cfg(not(feature = "security-key"))]
 pub enum Touch {}
@@ -758,7 +758,7 @@ enum Form {
     /// A KF2 file this build opens: GOYOKE03, and with security-key support
     /// GOYOKH01 and GOYOKS01.
     Kf2(Box<KeyHeader>),
-    /// A GOYOKH*/GOYOKS* file, which the default build does not open. The
+    /// A GOYOKH*/GOYOKS* file, which the keyless build does not open. The
     /// header when it is a well-formed GOYOKH01/GOYOKS01, only ever shown.
     #[cfg(not(feature = "security-key"))]
     SecurityKey(Option<Box<KeyHeader>>),
@@ -776,7 +776,7 @@ impl KeyFile {
         Self::from_bytes(path, read_head(path, KEY_FILE_LIMIT)?)
     }
     /// Classifies key file bytes by their magic family first (spec §4.6):
-    /// in the default build any GOYOKH*/GOYOKS* is a security-key file,
+    /// in the keyless build any GOYOKH*/GOYOKS* is a security-key file,
     /// decided on the magic alone, with no length or grammar check, so a
     /// damaged or later copy is never taken for a wrong password; any other
     /// newer magic is NEWER_KEY_FORMAT; then the 0.8 formats by their exact
@@ -818,14 +818,14 @@ impl KeyFile {
         &self.bytes
     }
     /// The parsed header of a KF2 file this build opens; None for a 0.8
-    /// file and for a security-key file of the default build.
+    /// file and for a security-key file of the keyless build.
     pub fn header(&self) -> Option<&KeyHeader> {
         match &self.form {
             Form::Kf2(h) => Some(h),
             _ => None,
         }
     }
-    /// Whether the file needs a security key: in the default build from its
+    /// Whether the file needs a security key: in the keyless build from its
     /// magic family alone, else from its slots.
     pub fn needs_security_key(&self) -> bool {
         match &self.form {
@@ -835,7 +835,7 @@ impl KeyFile {
             Form::Legacy(_) => false,
         }
     }
-    /// What the default build says instead of opening a security-key file:
+    /// What the keyless build says instead of opening a security-key file:
     /// no derive, no failure count, no retry delay, never the AUTH text
     /// (spec §4.7). None for every other file, and in the security-key
     /// build.
@@ -1261,7 +1261,7 @@ pub struct KeyInfo {
     pub epoch: u64,
 }
 impl KeyInfo {
-    /// What the default build says about the file instead of opening it,
+    /// What the keyless build says about the file instead of opening it,
     /// as soon as it is chosen (spec §4.7); never in the security-key
     /// build.
     pub fn refusal(&self) -> Option<&'static str> {
@@ -1284,7 +1284,7 @@ pub fn key_info_of(path: &Path, bytes: Vec<u8>) -> Option<KeyInfo> {
     if !magic.starts_with(b"GOYOK") {
         return None;
     }
-    // The default build decides on the magic family alone; the
+    // The keyless build decides on the magic family alone; the
     // security-key build opens GOYOKH01 and GOYOKS01 and nothing else of
     // the family (a later one is NEWER_KEY_FORMAT there).
     #[cfg(not(feature = "security-key"))]
@@ -2065,10 +2065,10 @@ mod tests {
         assert!(is_sync_key_file(ks.bytes, &kh.vault_id).is_none());
         assert!(is_sync_key_file(kh.bytes, &kh.vault_id).is_none());
     }
-    /// The default build refuses each pinned security-key file on the magic
+    /// The keyless build refuses each pinned security-key file on the magic
     /// family alone, the damaged and newer copies with the damaged wording,
     /// never as a wrong password and with no key derivation (spec §4.7,
-    /// §14.2-7). Default build only (S45-1 #16).
+    /// §14.2-7). Keyless build only (S45-1 #16).
     #[cfg(not(feature = "security-key"))]
     #[test]
     fn security_key_fixtures_are_refused_on_their_magic() {
@@ -2407,7 +2407,7 @@ mod tests {
             }
         }
         // A password-only file cut short or grown is refused before any
-        // Argon2; a security-key one still gets the default build's refusal
+        // Argon2; a security-key one still gets the keyless build's refusal
         // and never the AUTH text, and in the security-key build it is
         // damaged like any other.
         let derives = derive_count();
@@ -2949,7 +2949,7 @@ mod tests {
         }
     }
 
-    /// Default build only (S45-1 #16); `inbox`'s tests hold the
+    /// Keyless build only (S45-1 #16); `inbox`'s tests hold the
     /// security-key build's counterpart.
     #[cfg(not(feature = "security-key"))]
     #[test]

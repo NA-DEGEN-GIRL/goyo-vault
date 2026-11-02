@@ -95,7 +95,7 @@ macro_rules! fork_vault {
     };
 }
 /// S-ANCHOR-LASTRESORT, on its own status line after the refusals below:
-/// the default build's only way out of them (S23-1 #12). The security-key
+/// the keyless build's only way out of them (S23-1 #12). The security-key
 /// build offers the per-vault forget instead ([이 금고의 기록 지우고 다시
 /// 확인…], spec §5.10), which keeps every other vault's record.
 #[cfg(not(feature = "security-key"))]
@@ -1876,7 +1876,7 @@ pub(super) fn line_of(h: &KeyHeader, old: Option<&VaultLine>) -> VaultLine {
             .filter(|e| (e.epoch, e.tag) != (h.epoch, h.tag)),
     );
     hist.truncate(HIST_MAX);
-    // The default build has no security-key state: its lines list no slot
+    // The keyless build has no security-key state: its lines list no slot
     // and no broken pair record.
     #[cfg(not(feature = "security-key"))]
     let (slots, pbad) = (Vec::new(), Vec::new());
@@ -2974,7 +2974,7 @@ mod tests {
         );
         let near = ke03(vid, &[dk(9), dk(5), dk(0)], 5 + EPOCH_WINDOW, &[], 9);
         // More than EPOCH_SILENT above the last state this PC wrote: the
-        // security-key build gates it with G1, the default build takes it.
+        // security-key build gates it with G1, the keyless build takes it.
         #[cfg(not(feature = "security-key"))]
         assert_eq!(compare(&near, Some(&l5)), Ok(AnchorClass::Newer));
         #[cfg(feature = "security-key")]
@@ -2998,7 +2998,7 @@ mod tests {
         // An older state of this PC that predates the removal is a rollback.
         assert_eq!(compare(&k5, Some(&l7)), Ok(AnchorClass::Rollback));
         // A later file with removals this PC never knew: a silent update in
-        // the default build, G1 in the security-key build (T_new).
+        // the keyless build, G1 in the security-key build (T_new).
         let k8t = ke03(
             vid,
             &[dk(8), dk(7), dk(0)],

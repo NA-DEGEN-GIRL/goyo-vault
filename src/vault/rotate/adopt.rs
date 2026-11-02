@@ -5,7 +5,7 @@
 //! the checks is joined with this PC's into a union (kind 9) under a fresh
 //! data key, so no data key of the other file's choice ever becomes current.
 //! Both write through the key-change engine (S0-S5), so a crash anywhere
-//! leaves a pair that opens. The default build adopts password-only key
+//! leaves a pair that opens. The keyless build adopts password-only key
 //! files; the security-key build adds files with security keys, the public
 //! checks and the gate before any touch (`gate`), the fork options, and the
 //! union of slots and pair records (`hw`).
@@ -64,7 +64,7 @@ pub enum Source {
     },
 }
 /// The gate an adopt passed (spec §7.15a), bound to the file it was asked
-/// for: the preview and the write refuse any other file. The default build
+/// for: the preview and the write refuse any other file. The keyless build
 /// has no gate.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GatePass {
@@ -152,7 +152,7 @@ pub enum LostKeyAddOn {}
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Acks {
     /// S-ADOPT-PWONLY: a vault with security keys made password-only. The
-    /// default build never asks it (and refuses a yes); the security-key
+    /// keyless build never asks it (and refuses a yes); the security-key
     /// build requires it where the preview sets `password_only`.
     pub password_only: bool,
     pub union_password: UnionPassword,
@@ -839,7 +839,7 @@ impl Session {
     /// checks run again first; anything changed since the preview writes
     /// nothing. With security keys, `extra` are touches offered so that no
     /// key is suspended, and `consent` the keys S-SUSPEND named; the
-    /// default build has neither, and no gate holds an adopt there.
+    /// keyless build has neither, and no gate holds an adopt there.
     pub fn adopt(
         &mut self,
         r: Reauth,
@@ -1508,7 +1508,7 @@ pub(super) fn joined_tombs(a: &[Tombstone], b: &[Tombstone]) -> Vec<Tombstone> {
     out
 }
 
-/// Adopts of password-only key files (spec §14.4-10, the default build's
+/// Adopts of password-only key files (spec §14.4-10, the keyless build's
 /// rows): each PC with its own anchor folder and the Test KDF profile.
 #[cfg(test)]
 mod tests {
@@ -2291,7 +2291,7 @@ mod tests {
         let (ahead, state) = later(0xfb, silent);
         // More than EPOCH_SILENT above the last state this PC wrote: the
         // security-key build takes it only with its code (G1; round 3,
-        // finding 16), the default build silently.
+        // finding 16), the keyless build silently.
         #[cfg(feature = "security-key")]
         {
             let check = classify(&s, &ahead).unwrap();

@@ -1,7 +1,8 @@
-"""The checks every stage passes in both builds (spec v3 §11.4): rustfmt,
-the tests and clippy of the default build and of the security-key build
-(the lib and both binaries), and the server selftest. No network and no
-file written unless asked:
+"""The checks every stage passes in both editions (spec v3 §11.4): rustfmt,
+the tests, clippy and the release build of the default build (with
+security keys, the release) and of the keyless `--no-default-features`
+build (the lib and both binaries), and the server selftest. No network and
+no file written unless asked:
 
     python -X utf8 scripts/run_checks.py            the checks above
     python -X utf8 scripts/run_checks.py --deps     also check_dependencies.py
@@ -17,13 +18,17 @@ root = pathlib.Path(__file__).resolve().parents[1]
 args = set(sys.argv[1:])
 if args - {'--deps', '--mutate'}:
     sys.exit(__doc__)
-feature = ['--features', 'security-key']
+# The default build has security keys; the keyless edition turns them off.
+keyless = ['--no-default-features']
 steps = [
     ['cargo', 'fmt', '--check'],
     ['cargo', 'test', '--locked'],
-    ['cargo', 'test', '--locked', *feature],
+    ['cargo', 'test', '--locked', *keyless],
     ['cargo', 'clippy', '--all-targets', '--locked', '--', '-D', 'warnings'],
-    ['cargo', 'clippy', '--all-targets', '--locked', *feature, '--', '-D', 'warnings'],
+    ['cargo', 'clippy', '--all-targets', '--locked', *keyless, '--', '-D', 'warnings'],
+    # Code under cfg(not(debug_assertions)) builds only here.
+    ['cargo', 'build', '--release', '--locked', '--bins'],
+    ['cargo', 'build', '--release', '--locked', '--bins', *keyless],
 ]
 if '--deps' in args:
     steps.append([sys.executable, 'scripts/check_dependencies.py'])

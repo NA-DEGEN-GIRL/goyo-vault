@@ -45,7 +45,7 @@ pub use hw::{
 pub(super) use hw::{create_with_keys, probe_anchor};
 /// What S0 records beside the state a write becomes (spec §5.5 S0): the
 /// security-key build's removals, loss and broken pair records; nothing in
-/// the default build.
+/// the keyless build.
 #[cfg(not(feature = "security-key"))]
 type Landing = ();
 pub use adopt::{
@@ -361,7 +361,7 @@ impl Session {
     /// Re-authenticates for one key change (spec §5.3): takes the key file's
     /// lock, requires the key file on disk to be this session's, and opens
     /// it with `password` (and for a key file with security keys `touch`) to
-    /// this session's keys. The default build has no security key, so
+    /// this session's keys. The keyless build has no security key, so
     /// `touch` is None.
     pub fn reauth(&mut self, password: &str, touch: Option<&Touch>) -> Result<Reauth> {
         self.reauth_with(password, touch)
@@ -1392,7 +1392,7 @@ mod tests {
     /// The security-key build gates a key file changed elsewhere in a way
     /// the gate guards (a removal of a key this PC never knew, a silent
     /// jump; spec §5.10, §7.15a): the user types the code the other PC
-    /// shows, which is the file's own. The default build has no gate.
+    /// shows, which is the file's own. The keyless build has no gate.
     pub(super) fn pass_gate(s: &mut Session) {
         #[cfg(feature = "security-key")]
         if s.gate_pending() {
@@ -2604,7 +2604,7 @@ mod tests {
             super::super::ANCHOR_RELIST,
             super::super::ANCHOR_DOWNGRADE,
         ] {
-            // The default build's only way out; the security-key build
+            // The keyless build's only way out; the security-key build
             // offers the per-vault forget instead (spec §9.3).
             #[cfg(not(feature = "security-key"))]
             assert!(text.ends_with(anchor::LAST_RESORT));
@@ -2617,7 +2617,7 @@ mod tests {
         let mut s = login(&pc, NEW).unwrap();
         assert_eq!(notices(&mut s), []);
         // A later file with a removal (a GOYOKE03 after keys off on another
-        // PC): taken silently in the default build (the security-key build
+        // PC): taken silently in the keyless build (the security-key build
         // asks G1 for a removal of a key this PC never knew), and the
         // removal recorded.
         let dk3 = [0x63; 32];

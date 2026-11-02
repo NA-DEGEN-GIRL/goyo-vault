@@ -34,8 +34,8 @@ const HELPER_FRESH: u64 = 600;
 pub const KEYSYNC_PIN: &str = "PIN 없이 등록한 보안 키 {list}을(를) 빼고 PIN으로 다시 등록하세요(보안 키를 끄고 PIN 사용으로 다시 켜기).";
 pub const KEYSYNC_NOSYNC: &str = "열쇠 파일 동기화는 이 금고의 동기화를 켠 뒤에만 켤 수 있습니다.";
 pub const KEYSYNC_NOTRANSPORT: &str = "이 Windows에서는 보안 키의 연결 방식을 확인할 수 없어 열쇠 파일 동기화를 켤 수 없습니다. Windows를 업데이트하세요.";
-pub const KEYSYNC_NOHELPER: &str = "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 최근 10분 동안 응답하지 않았습니다. 그 goyo-sync를 실행한 뒤 다시 하세요.";
-pub const KEYSYNC_OFF_PENDING: &str = "서버의 열쇠 파일 삭제가 끝난 뒤 다시 켜세요. (goyo-sync(보안 키 빌드)가 실행 중이어야 하고, 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받아야 합니다.)";
+pub const KEYSYNC_NOHELPER: &str = "열쇠 파일 동기화를 지원하는 goyo-sync가 최근 10분 동안 응답하지 않았습니다. 그 goyo-sync를 실행한 뒤 다시 하세요.";
+pub const KEYSYNC_OFF_PENDING: &str = "서버의 열쇠 파일 삭제가 끝난 뒤 다시 켜세요. (goyo-sync가 실행 중이어야 하고, 이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받아야 합니다.)";
 pub const KEYSYNC_TAKEN: &str =
     "서버에 이미 이 금고의 열쇠 파일이 있습니다(다른 PC에서 켬). 그 파일을 받으세요.";
 pub const KEYSYNC_NOLINE: &str = "서버가 이 PC의 연결에서 이 금고의 열쇠 파일 동기화를 허용하지 않습니다. 서버 관리자가 이 PC의 강제 명령에 serve --key-sync=<금고 ID>를 넣어야 합니다.";

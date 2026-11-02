@@ -1,11 +1,8 @@
-# Security keys (experimental)
+# Security keys
 
 [한국어](SECURITY_KEY.md) · <b>English</b>
 
-> [!WARNING]
-> **Experimental: not verified with real security keys. Not in the default build or the release ZIP.**
->
-> This feature was tested only with a fake security key (a test stand-in). What must still be checked on real keys is in the [real-key checklist](#real-key-checklist) at the end, and none of it has been run. **Do not use it for an important vault yet.** If you try it, practise first on a test vault filled with fake values.
+Since 0.11.0 security-key support is part of the default build, so the install ZIP that `python scripts/package_release.py` makes has it. It is turned on per vault; a vault without it still opens with the key file and the password alone. What was and was not checked on real security keys is in [Verified on real hardware, and known limits](#verified-on-real-hardware-and-known-limits). The first time, turn it on for a test vault filled with fake values, and try adding a key, removing a lost key and turning keys off once each.
 
 ## What it does
 
@@ -20,26 +17,21 @@ Inside, there are two secrets:
 
 > **If every registered security key is lost or reset, this vault can never be opened again.** Not with the password and the key file, not by its creator, not by the developer; there is no recovery code. Register 2 or more keys and keep a spare elsewhere. Write each key's number (security key 1, 2, …) on the physical key.
 
-## Building the security-key build
+## Builds
 
-The install ZIP (`python scripts/package_release.py`) is always the default build, without security keys. You build the security-key build yourself.
+In this document the **security-key build** is a build with security-key support: the default build since 0.11.0 and its install ZIP. A **keyless build** is one made with `--no-default-features`, or the install ZIP of 0.9.0 or 0.10.0.
 
-1. Get the source and make the default ZIP once as in the README's 'Install', so you have the `GoyoVault` folder.
-2. In the same source folder, build the security-key build:
-   ```powershell
-   cargo build --release --locked --bins --features security-key
-   ```
-3. Check that `target\release\goyo-vault.exe --self-check | Out-Host` shows `security-key: EXPERIMENTAL build` and `salt self-test: PASS`. If Windows' WebAuthn is available it also shows `WebAuthn API <number>`.
-   If Microsoft Defender blocks or quarantines the unsigned executables you just built, follow 'When Windows Defender or SmartScreen blocks it' under the README's 'Building from source': restore or allow them only after Protection history shows they are the very files you built.
-4. Copy `target\release\goyo-vault.exe` and `goyo-sync.exe` over the files of the same name in the `GoyoVault` folder. Replace **both**: only the security-key build of goyo-sync does key-file sync. The folder's `SHA256SUMS.txt` (the hash list of the default build) then no longer matches these two files.
+- Installing is as in the README's 'Install'; there is nothing extra to build. `goyo-vault.exe --self-check | Out-Host` shows `security-key: built` and `salt self-test: PASS`, and `WebAuthn API <number>` if Windows' WebAuthn is available (`WebAuthn API: not available` if not).
+- If you used a build you made yourself with `--features security-key` in 0.9.0 or 0.10.0, extract the 0.11.0 ZIP over the same `GoyoVault` folder. The key-file and vault-file formats are the same. Replace `goyo-vault.exe` and `goyo-sync.exe` **together**.
+- If you need a build without security keys, build it yourself: `cargo build --release --locked --bins --no-default-features`. Its `--self-check` shows `security-key: not built`; it has no code that loads `webauthn.dll` and no key-file sync. The install ZIP is always the security-key build.
 
-To go back to the default build, first use **Turn off keys** in the security-key build. The default build does not open a key file locked by a security key (see [What the default build does with a security-key file](#what-the-default-build-does-with-a-security-key-file)). Then, on **every other PC that uses this vault, while it still runs the security-key build**, take that change (carry the new key file of the PC that turned keys off by USB, 'Receive a new key file', type the key check code). Switch a PC to the default build only after it took the change. A PC that has not taken it still records this vault as a security-key vault, so both builds refuse a password-only key file there. The only way out is then to delete that PC's key record (`goyo-vault.keys`), which drops the record of every vault.
+To switch to a keyless build, first use **Turn off keys** in the security-key build. A keyless build does not open a key file locked by a security key (see [What a keyless build does with a security-key file](#what-a-keyless-build-does-with-a-security-key-file)). Then, on **every other PC that uses this vault, while it still runs the security-key build**, take that change (carry the new key file of the PC that turned keys off by USB, 'Receive a new key file', type the key check code). Switch a PC to a keyless build only after it took the change. A PC that has not taken it still records this vault as a security-key vault, so both builds refuse a password-only key file there. The only way out is then to delete that PC's key record (`goyo-vault.keys`), which drops the record of every vault.
 
-**Windows' `webauthn.dll`.** The security-key build loads `webauthn.dll` from System32 only when it opens a key file with security keys, or when you turn keys on or register one (there is no static import, and a vault without keys never loads it). That DLL then brings in the System32 DLLs it uses itself: at load combase, oleaut32, rpcrt4, windows.storage, advapi32, sechost, msvcrt, ntmarta; at the first calls cryptngc, winsta, bcryptprimitives; at the first touch dpapi, bcrypt, crypt32. The vault's cryptography never uses them. The window that asks for the touch and the PIN is Windows' own.
+**Windows' `webauthn.dll`.** The security-key build loads `webauthn.dll` from System32 only when it opens a key file with security keys, or when you turn keys on or register one (and in `--self-check`, to check it; there is no static import, and a vault without keys never loads it). That DLL then brings in the System32 DLLs it uses itself: at load combase, oleaut32, rpcrt4, windows.storage, advapi32, sechost, msvcrt, ntmarta; at the first calls cryptngc, winsta, bcryptprimitives; at the first touch dpapi, bcrypt, crypt32. The vault's cryptography never uses them. The window that asks for the touch and the PIN is Windows' own.
 
 ## Turning it on
 
-**A new vault.** In 'Create', turn on **Security keys too (experimental)**. The key PIN is always used (see PIN below).
+**A new vault.** In 'Create', turn on **Security keys too**. The key PIN is always used (see PIN below).
 
 **A vault you already use.** In 'Key management', check **Also change the password (recommended)**, enter the current password, and press **Turn on security keys**. The data key changes too.
 
@@ -55,16 +47,16 @@ To go back to the default build, first use **Turn off keys** in the security-key
 
 A vault made in 0.8 or used without security keys (key file `GOYOKE01`/`GOYOKE02`, or `GOYOKE03` after a password change) is turned on the same way.
 
-- **Before it starts,** "With security keys on, every time this vault is opened you also plug in one registered security key, touch it and enter its PIN…" comes first: have every key you will register at that PC, and if the vault is used on other PCs too, Goyo Vault there must be the security-key build.
+- **Before it starts,** "With security keys on, every time this vault is opened you also plug in one registered security key, touch it and enter its PIN…" comes first: have every key you will register at that PC, and if the vault is used on other PCs too, Goyo Vault there must be 0.11.0 or later with security-key support.
 - **What changes:** the entries and the vault ID stay; the data key changes and a new key file (`GOYOKH01`) is written (with a new key check code). In a former OTP vault, the OTP secret left in the key file is erased now. The key file from before opens nothing saved afterwards, and that PC now touches a registered key at every unlock. An interruption (power loss) is finished by the next unlock so that either the old or the new key file opens. Turning keys off later gives a password-only `GOYOKE03` again, with every entry.
 - **Afterwards** a dialog says once what the other PCs must do. In a vault that syncs, the other PCs stop syncing until they take this PC's new key file (their changes meanwhile stay on them and are merged once they take it).
 
-**On every other PC** (which must run the security-key build too):
+**On every other PC** (which must run the security-key build, 0.11.0 or later, too):
 
 - **By USB:** carry the new key file over and take it with 'Key management' › **Receive a new key file…**: type the changing PC's key check code (nothing about the change is shown before the code) and touch one security key registered in the new key file. That PC's current password confirms it is you.
 - **Through the server (key-file sync):** if the PC that turned keys on also turned on **key-file sync** (see 'Key-file sync' below), no USB is needed. A PC without security keys says "Another PC turned security keys on for this vault, so sync stopped. The new key file comes through the server: take it with 'Receive the new key file from the server…' in 'Key management'…", and 'Key management' shows "The server holds a new key file (revision N) from another PC that turned security keys on…" with **Receive the new key file from the server…**. Enter the current password and press it: it asks the changing PC's key check code (or see 'Trust this server and take it without a code…' below), has you touch one security key registered in the new key file, shows what changes and asks key-file sync's danger question. Once taken, that PC uses the same key file (`GOYOKS01`) and syncs again. Its goyo-sync must be the security-key build too, and its forced-command line needs `--key-sync=<vault ID>` as well for the server's key file to reach it. While the server holds no key file yet, the button does not show; take it by USB.
 - **A PC with a 0.8 key file:** a 0.8 key file has no key check code, so opening a vault to which sync brought a copy from a PC that turned keys on first shows "This PC has not confirmed this key file yet… this key file has the old (0.8) format, which no key check code can confirm", with no code field (it never asks for a code that cannot match). Only if keys were turned on on another PC and this is the key file this PC has been using, press **Trust this key file without a code…** (danger question, default No), then take the new key file in 'Key management' as above. Until then no entry is edited and nothing is uploaded.
-- **A PC with the default build** cannot take a security-key file and stops with "Another PC turned on security keys for this vault, so sync stopped. This Goyo Vault build does not support security keys…". Switch that PC to the security-key build, then take it ('Building the security-key build' above).
+- **A PC with a keyless build** (the 0.9.0 or 0.10.0 ZIP, say) cannot take a security-key file and stops with "Another PC turned on security keys for this vault, so sync stopped. This Goyo Vault build does not support security keys…". Update that PC to 0.11.0 or later, then take it ('Builds' above).
 
 **Room on the security key.** Each registration uses one 'discoverable credential' slot on the key (a YubiKey 5 has about 25 or 100, depending on its firmware). When they are full, new registrations fail; delete the entries of removed keys or failed registrations with the key vendor's tool (for a YubiKey `ykman fido credentials delete`, on Windows from an administrator prompt; it needs the key's PIN). Entries are named `Goyo Vault <first 8 of the vault ID> key <number> <registration time>`, and only an entry whose time matches the 'label' shown in Key management belongs to this vault. Windows Settings' passkey list is for passkeys saved on the PC and is expected not to show entries on a security key (not verified).
 
@@ -200,13 +192,13 @@ For when someone may have known a PIN and briefly touched the security key (a su
 - If this record keeps the right key file from opening (a diverged file, a missing removal record, …), the security-key build offers **Forget this vault's record and confirm again…** on the login screen (and in 'Key management' while a gate waits) instead of deleting the whole file. After the password and a touch have opened it, it forgets only this vault's record and checks that key file again as one it has never seen (type another PC's key check code). Do not press it if the key file may be old or forged. Deleting the whole file drops every other vault's record and waiting gates too (a due review stays, thanks to the record below).
 - **The merge log** (`%LOCALAPPDATA%\GoyoVault\goyo-vault.merges\<vault ID>.log`): in a vault that uses security keys and sync, one line per change that came in by sync, with only the entry ID and the time (no title, no content). The review list reads it. It is per PC, never synced, and whoever can write that folder can delete lines.
 
-## Key-file sync (optional, experimental)
+## Key-file sync (optional)
 
 A per-vault option of the security-key build. It is off by default; when on, the key file also travels between PCs through the server, so a password change or a key removal no longer needs a USB carry. **In exchange, to anyone with access to the server the key file is no longer a separately guarded factor.**
 
 |Mode|Build|What the server holds|Who can decrypt with the server's data|
 |---|---|---|---|
-|1. No security keys|default|vault ciphertext only|nobody (the key file never leaves the PCs)|
+|1. No security keys|any build|vault ciphertext only|nobody (the key file never leaves the PCs)|
 |2. Security keys, key file on the PCs only|security-key build|vault ciphertext only|nobody (the key file never leaves the PCs)|
 |3. Security keys + key-file sync|security-key build|vault ciphertext **and** every security-key key file uploaded. Assume a hacked server keeps them all.|whoever has **the password and a registered security key with its PIN**. To anyone with the server or any PC's sync SSH key, the key file is no longer a separate factor. Old key files stay on a hacked server for good, so a removed key and the old password open the history up to that key's removal.|
 
@@ -247,7 +239,7 @@ A per-vault option of the security-key build. It is off by default; when on, the
 
 - Conditions: security keys on in PIN mode with every key registered with a PIN; sync on for that vault; this Windows reports how the key is connected (USB/NFC); the security-key build's goyo-sync checked the server within the last 10 minutes; the server holds no key file of this vault yet (if another PC turned it on, take that file with [Get…]).
 - 'Key management' › **Turn key-file sync on…** → a danger question (default No) that shortens the 14 points to 10 → the password and one touch. The key file is written again (the data key stays) and goyo-sync uploads it.
-- This one button in Goyo Vault is the only switch. The line beside it says where this vault's key file lives: **Key file: kept on this PC only (other PCs get it by USB)** or **Key file: synced through the server (experimental)**.
+- This one button in Goyo Vault is the only switch. The line beside it says where this vault's key file lives: **Key file: kept on this PC only (other PCs get it by USB)** or **Key file: synced through the server**.
 - Other PCs take this change by typing this PC's key check code, and see the same explanation of the risks.
 - On a vault with key-file sync, the PC that changed the keys (on, a key added or removed, a pairing, re-locking every key, a password change, uploading this PC's state) says at every unlock, in the status line, "Not yet confirmed that the other PCs took this key change…" ("…this removal…" in red for a removal), and the top of the list in 'Key management' says what each other PC must do to take it (a removal: pick the removed keys, or type this PC's code on a PC that never knew a removed key; a key added or every key re-locked: type this PC's code; on, a re-upload or uploading this PC's state: the next unlock, and a PC that kept its key file to itself types the code; a password change or a pairing: the next unlock). Once every PC took it, press **All PCs confirmed** in 'Key management'. Until then the change is not complete. This reminder lives only in this PC's key record and is not protected cryptographically.
 
@@ -259,7 +251,7 @@ A per-vault option of the security-key build. It is off by default; when on, the
 - If two PCs change the key at once, it says the key file split from the server's and sync stops. Join them on one PC with **Get…** (**Use the other PC's** or **Join both**). If nothing like that happened, the server copy may be forged.
 - When two PCs **only removed keys** from the same state (the same lost key removed on each PC), they join by themselves. The PC whose upload came second opens the other PC's key file at its next unlock with that unlock's touch and password and, asking nothing, writes a key file that joins both (a new data key). The status line says "Merged the key removals made apart on two PCs…", and the PC that uploaded first takes the result at its next unlock with no confirmation. If one side also changed the password, or this PC's key is out of that key file, it cannot be opened without a question, so it is not joined by itself; when "…they can be merged with [Get…]" shows, join them with **Get…** (it asks for the other password or another key). If that key file does not open with this PC's security key and password, nothing is written, it is refused as "a forged link", and it is not tried again until Goyo Vault restarts.
 - While the server refuses this PC's key file, this PC's vault does not go up either (goyo-sync state `keyfile` or `refused`). Bring goyo-sync and the server script to the same version.
-- If the server no longer has this vault's key file ('Key file: synced through the server (experimental) · not on the server'), another PC may have turned it off. Then do not upload it again; take that PC's key file by USB. Press **Upload the key file again** only when you are sure nobody turned it off and it was deleted. Until then this PC neither merges nor uploads server copies.
+- If the server no longer has this vault's key file ('Key file: synced through the server · not on the server'), another PC may have turned it off. Then do not upload it again; take that PC's key file by USB. Press **Upload the key file again** only when you are sure nobody turned it off and it was deleted. Until then this PC neither merges nor uploads server copies.
 - If the PC that made a waiting change is gone, use **Upload this PC's state, no other PC…** (see 'The gate on other PCs' above). For a change with no such button (one that removes a key of this PC, say), run 'Remove a lost key' or turn key-file sync off. End it with **Don't take…** only when you are sure the change is forged.
 
 ### Auto-apply key changes (trust this server)
@@ -316,9 +308,27 @@ If the server keeps hiding a key change from a PC (a freeze), that PC stays in t
 - A vault with key-file sync: "A key file in which another PC changed the security keys or a setting is on the server…", or "A key change to confirm is on the server" in 'Key management'.
 - A vault whose key file is on the PCs only: "Another PC changed this vault's key, so sync stopped…".
 
+## Verified on real hardware, and known limits
+
+**Checked with real keys.** All on a YubiKey 5C NFC, Windows 11 26200 (WebAuthn API 9) and an HID OMNIKEY 5022 NFC reader.
+
+- Registering and opening over USB and NFC, the key's PIN, registering two keys and pairing them.
+- Turning security keys on later for a vault used with the password only.
+- Key-file sync through a real SSH server between two installations on one PC with separate `%LOCALAPPDATA%` (standing in for two PCs), and automatic key changes.
+- A key's answer is the same at every touch and over USB and NFC, credProtect 3, two salt values in one touch, an allow list of two keys, the error for an already registered key ('passed' in the checklist below).
+
+Findings of several LLM security reviews were addressed as well ([SECURITY_REVIEW.md](SECURITY_REVIEW.md), Korean). There was no professional security audit.
+
+**Known limits.** The following were not checked. The result of each item is in the [real-key checklist](#real-key-checklist) at the end.
+
+- Windows builds other than Windows 11 26200 (API 9), such as 22000, 22621, 22631 and 26100, and WebAuthn API 4-8.
+- Keys other than the YubiKey 5C NFC (other YubiKey firmware, other makers).
+- Error codes and what the screen says for them: a key whose credential slots are full, a key after a FIDO reset, user cancel, timeout, a locked PIN.
+- Whether a key's answer stays the same across reboots, PIN changes and months, whether a lookup without the PIN really fails, whether phones, Windows Hello and synced passkeys are refused.
+- Flows with three or four keys at once, a power cut on a real exFAT USB stick while the key file is replaced, and whether long flows finish within the default 1-minute auto-lock.
+
 ## Remaining risks
 
-- **Only partly verified with real keys.** That a key's answer is the same at every touch and over USB and NFC, credProtect 3, two salt values in one touch and an allow list of two keys were checked on a YubiKey 5C NFC. Whether the answer stays the same across reboots, PIN changes and months, whether a lookup without the PIN really fails, whether phones and Windows Hello are refused, and more, are confirmed only once the 'not run' items of the checklist below pass.
 - **A key answer obtained once lasts.** Whoever briefly had the key with its PIN and touched it has, in effect, a clone until that key is removed or 'Re-lock all keys' runs. Such a clone can pass the 'pick the lost keys' gate too; only typing the code stops it. Give every key its own PIN.
 - **Freeze** (above). No design avoids it.
 - **A new PC or a disaster recovery with no other PC to check against** can only trust. So does a PC without security keys that takes a file with **Trust this server and take it without a code…**: someone who took over the server and knows the password could have made it with their own security key, and could then read what that PC saves afterwards. When you can see the code, take it with the code.
@@ -333,17 +343,17 @@ If the server keeps hiding a key change from a PC (a freeze), that PC stays in t
 - **What the server sees.** In every mode: the vault file header (key ID, revision, state tag, whether security keys and key-file sync are used), so how many key changes there were and roughly when. With key-file sync, also the whole key file: change kinds, the authorizing key's number, the numbers of keys, removal records and pairing records, registration times, credential IDs, change times and a reported loss date.
 - **Windows.** The PIN window is outside screen-capture blocking, and the PIN and the key's answer pass through Windows, whose buffers cannot be wiped.
 
-The detailed threat analysis is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md) ('0.9.0 change: security keys (experimental) and key-file sync (experimental)', in Korean), the file formats in [FORMAT.md](FORMAT.md) (Korean).
+The detailed threat analysis is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md) ('0.9.0 change: security keys and key-file sync', in Korean), the file formats in [FORMAT.md](FORMAT.md) (Korean).
 
-## What the default build does with a security-key file
+## What a keyless build does with a security-key file
 
-The `goyo-vault.exe` of the release ZIP does not open a key file locked by a security key (one whose first 8 bytes start with `GOYOKH` or `GOYOKS`). As soon as you choose such a file, and when you press 'Open' or 'Restore', it looks at the first 8 bytes only, before checking any password, and says "This key file opens only with a security key (YubiKey or similar)…". It never says the password is wrong, does not count a failed attempt and starts no retry delay. If the file is cut short, or a newer version made it so that it fails the format check, it adds "The file may also be damaged, or made by a newer version." The default build cannot tell whether such a file is damaged, so it never replaces it with a temp file (`.goyotmp`) left by an interrupted save either. A vault file saved under a security-key file, opened with a key file that lacks its key, gets "This vault file was saved with a key file locked by a security key…" and is not opened. Opening any of these files needs a build with the security-key feature.
+The `goyo-vault.exe` of a keyless build (the 0.9.0 or 0.10.0 ZIP, `--no-default-features`) does not open a key file locked by a security key (one whose first 8 bytes start with `GOYOKH` or `GOYOKS`). As soon as you choose such a file, and when you press 'Open' or 'Restore', it looks at the first 8 bytes only, before checking any password, and says "This key file opens only with a security key (YubiKey or similar)…". It never says the password is wrong, does not count a failed attempt and starts no retry delay. If the file is cut short, or a newer version made it so that it fails the format check, it adds "The file may also be damaged, or made by a newer version." A keyless build cannot tell whether such a file is damaged, so it never replaces it with a temp file (`.goyotmp`) left by an interrupted save either. A vault file saved under a security-key file, opened with a key file that lacks its key, gets "This vault file was saved with a key file locked by a security key…" and is not opened. Opening any of these files needs the security-key build (the default build of 0.11.0 or later).
 
 If a received key file is refused as "an unexplained change" (another PC set the password back to one this PC still uses), change this PC's password first. The file then counts as diverged, and 'Receive a new key file' joins the two.
 
 ## Real-key checklist
 
-Before security keys can be on by default, or key-file sync can leave 'experimental', all of the following must pass on real keys. Any failure keeps the feature off by default. If Windows cannot enforce the PIN, USB/NFC only and the raw key answer, key-file sync is not offered at all.
+What to check on real security keys and Windows. Before security keys went into the default build in 0.11.0, the 'passed' items below and the flows in [Verified on real hardware, and known limits](#verified-on-real-hardware-and-known-limits) above (USB, NFC, PIN, two keys, turning keys on for a password-only vault, key-file sync through a real server, automatic key changes) were checked on real keys. 'Not run' items are known limits. If one fails on a new Windows build or another key, do not turn security keys on there until it is fixed. Key-file sync relies on an enforced PIN, USB/NFC only and the raw key answer; Goyo Vault does not turn it on when it cannot confirm the PIN and the transport (see 'Conditions' above).
 
 **Result: partly run.** Every 'passed' below was checked on a **YubiKey 5C NFC, Windows 11 26200, API 9** (six keys, an HID OMNIKEY 5022 NFC reader). The rest was not run. What the checks changed: security keys always use the PIN (PIN above), every Windows call names Goyo Vault's window as its owner (owner 0 fails at once with 0x80090027), and a key used over NFC is unplugged before the window opens.
 
@@ -364,13 +374,13 @@ Before security keys can be on by default, or key-file sync can leave 'experimen
 |13|Three registration windows in a row (no re-plugging), the flow of windows, equal values|not run|
 |14|Transport values for USB and NFC; phones and Windows Hello refused; BE and BS are 0 on a YubiKey 5; synced passkeys refused|partly passed: USB is 0x1 and NFC 0x2, BE and BS are always 0, the AAGUID is zero (no attestation); NFC works with the PIN typed first; a key plugged into USB when the window opens is used over USB (verified on YubiKey 5C NFC, Windows 11 26200, API 9); phones, Windows Hello and synced passkeys refused not run|
 |15|The Windows window comes to the front, owner disabling breaks nothing, away and idle timers pause, and the 150 s cap works|partly passed: with owner window 0 MakeCredential fails at once with 0x80090027, with a real window it works (verified on YubiKey 5C NFC, Windows 11 26200, API 9); coming to the front, the timers and the 150 s cap not run|
-|16|Thread and handle hygiene after many touches, no DLL loaded from beside the exe, `check_dll_planting.py --webauthn` passes|not run|
+|16|Thread and handle hygiene after many touches, no DLL loaded from beside the exe, `check_dll_planting.py --webauthn` passes|partly passed: `check_dll_planting.py --webauthn` passes in the 0.11.0 release checks (Windows 11 26200; with `webauthn.dll` and the DLLs it uses planted, `--self-check` loads none of them from that folder); thread and handle hygiene after many touches not run|
 |17|The Windows window and error after a FIDO reset of a registered key; failure at the same step as a wrong password; removal with another key and re-adding|not run|
 |18|Credential slot counts (about 25 / 100), the error when they are full, deleting one entry with `ykman fido credentials delete`, and whether Windows Settings can delete one|not run|
 |19|Four real keys: remove one with one touch of another, each remaining key opens on its own, re-register the same key, re-lock all keys, an answer captured before stops working after re-locking|not run|
-|19a|Several touches in one session (registering 4 keys in a row, pairing 3 keys), with key swaps and PIN entry|not run|
+|19a|Several touches in one session (registering 4 keys in a row, pairing 3 keys), with key swaps and PIN entry|partly passed: registering two keys at once and pairing them (with key swaps and PIN entry, over USB and NFC); three or four keys not run|
 |19b|credProtect 3 stays enforced on every pairing and re-lock touch|not run|
 |20|A real exFAT USB stick pulled, or the power cut, during the key-file replace, then automatic recovery|not run|
 |21|Two real PCs and a 0.9 server: password change, taking it, equal codes; a key file shared on USB; joining an add-key race|not run|
-|22|Two real PCs, two real keys, a `--key-sync` server: turning on, password change, addition (code), lost-key removal (pick) with review and history cleanup, simultaneous removals joined, a spare key paired later, turning off (deletion answered, no key file left on the server, a power cut midway), a new PC, and the vault lock on the real server's data folder|not run|
+|22|Two real PCs, two real keys, a `--key-sync` server: turning on, password change, addition (code), lost-key removal (pick) with review and history cleanup, simultaneous removals joined, a spare key paired later, turning off (deletion answered, no key file left on the server, a power cut midway), a new PC, and the vault lock on the real server's data folder|partly passed: key-file sync through a real SSH server between two installations on one PC with separate `%LOCALAPPDATA%` (standing in for two PCs), automatic key changes, and turning keys on for a password-only vault; results per sub-item not recorded|
 |23|Timing with real windows: re-locking 4 keys, pairing 3 keys, registering 2 keys, and taking another PC's code each finish within the default 1-minute auto-lock, and Win+L locks at once during any of them|not run|

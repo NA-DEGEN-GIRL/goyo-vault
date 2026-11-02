@@ -16,10 +16,10 @@ dialog on the desktop.
 Usage: python scripts/check_dll_planting.py [--webauthn] [exe ...]
 (default: target/release/goyo-vault.exe and target/release/goyo-sync.exe)
 
---webauthn (a security-key build, the manual checklist only; spec v3 §12):
-webauthn.dll joins the DLLs loaded at run time, and the import closure of
-each of them is planted too, since `--self-check` of that build loads
-webauthn.dll and its dependencies.
+--webauthn (goyo-vault.exe of the security-key build, the release;
+package_release.py passes it; spec v3 §12): webauthn.dll joins the DLLs
+loaded at run time, and the import closure of each of them is planted too,
+since `--self-check` of that build loads webauthn.dll and its dependencies.
 """
 import ctypes, os, pathlib, shutil, struct, subprocess, sys, tempfile, winreg
 

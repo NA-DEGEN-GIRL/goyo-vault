@@ -4,7 +4,7 @@ One ZIP with goyo-vault.exe, the optional sync helper goyo-sync.exe, the
 server script, the example settings and the documents. goyo-sync.exe does
 nothing until the user opens it, and goyo-vault.exe cannot start it.
 """
-import hashlib, json, os, pathlib, shutil, subprocess, sys, zipfile
+import hashlib, json, os, pathlib, re, shutil, subprocess, sys, zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
 # RUSTFLAGS (or a per-target CARGO_TARGET_<triple>_RUSTFLAGS / CARGO_BUILD_RUSTFLAGS)
 # would silently replace the hardening flags in .cargo/config.toml. Set but
@@ -17,13 +17,15 @@ for name in os.environ:
 inputs = ['src', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo', 'assets', 'server', 'goyo-sync.conf.example']
 if subprocess.check_output(['git', 'status', '--porcelain', '--', *inputs], cwd=root).strip():
     sys.exit('Refusing to package: commit the source changes first (git status).')
-# The release is always the default build: no feature may be on by default
-# (spec §12), and the build below passes none.
+# The release is always the default build, which is the security-key build:
+# exactly that feature on by default (spec §12), and the build below passes
+# no feature flag. `--no-default-features` (the keyless edition) is never
+# packaged.
 manifest = json.loads(subprocess.check_output(
     ['cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1'], cwd=root))
 own = next(p for p in manifest['packages'] if p['name'] == 'goyo-vault')
-if own['features'].get('default'):
-    sys.exit(f"Refusing to package: the release is the default build, but default features are {own['features']['default']}.")
+if own['features'].get('default') != ['security-key']:
+    sys.exit(f"Refusing to package: the release is the security-key build, but default features are {own['features'].get('default')}.")
 # Panic locations embed source paths, e.g. C:\Users\<name>\.cargo\registry\...
 # Remap the machine-specific prefixes so the published exe names no user or folder.
 cargo_home = pathlib.Path(os.environ.get('CARGO_HOME') or pathlib.Path.home()/'.cargo')
@@ -40,27 +42,34 @@ for program in ('goyo-vault.exe', 'goyo-sync.exe'):
     # The cheap test KDF, the anchor folder and the clock a test sets and
     # the fake authenticator exist only in builds with debug assertions
     # (src/crypto.rs, src/vault/anchor.rs, src/fido/fake.rs); any marker in a
-    # release exe means they were on. WebAuthn and the key-file sync channel
-    # exist only in the security-key build (spec §12): the key channel's
-    # magics, and `webauthn` in any case, mean the release is not the
-    # default build.
+    # release exe means they were on. That the exes are the security-key
+    # build (`webauthn` in goyo-vault.exe, the key-file sync channel's
+    # magics in goyo-sync.exe) is checked by inspect_pe.py below.
     hooks = (('goyo-test-kdf', 'test KDF'), ('goyo-test-anchor', 'test anchor folder'),
-             ('goyo-test-clock', 'test clock'), ('goyo-fake-authenticator', 'fake authenticator'),
-             ('webauthn', 'security-key build'), ('goyoskO2', 'key-file sync channel'),
-             ('goyoskI2', 'key-file sync channel'), ('goyoskR1', 'key-file sync channel'))
+             ('goyo-test-clock', 'test clock'), ('goyo-fake-authenticator', 'fake authenticator'))
     for marker, hook in hooks:
         marker = marker.lower()
         if marker.encode() in binary.lower() or marker.encode('utf-16-le') in binary.lower():
             sys.exit(f'Refusing to package: {program} contains the {hook} ({marker}).')
-subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
-subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
-subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-vault.exe', 'target/release/goyo-sync.exe'], cwd=root)
+# The PE checks of the security-key build; they write docs/binary-inspection*.json.
+feature = ['--feature', 'security-key']
+subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'vault', *feature, 'target/release/goyo-vault.exe'], cwd=root, stdout=subprocess.DEVNULL)
+subprocess.check_call([sys.executable, 'scripts/inspect_pe.py', '--profile', 'sync', *feature, 'target/release/goyo-sync.exe'], cwd=root, stdout=subprocess.DEVNULL)
+# goyo-vault.exe's --self-check loads webauthn.dll: plant its closure too.
+subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', '--webauthn', 'target/release/goyo-vault.exe'], cwd=root)
+subprocess.check_call([sys.executable, 'scripts/check_dll_planting.py', 'target/release/goyo-sync.exe'], cwd=root)
 # Both programs check their own cryptography (and goyo-sync its windows),
-# and say which build they are (spec §8.8): the release is the default one.
+# and say which build they are (spec §8.8): the release is the security-key
+# build. goyo-vault.exe also checks its salt derivation and says whether
+# Windows' WebAuthn API is there (a PC without webauthn.dll says so).
+webauthn = re.compile(r'WebAuthn API (\d+|: not available)')
 for program in ('goyo-vault.exe', 'goyo-sync.exe'):
     check = subprocess.run([str(release/program), '--self-check'], cwd=root, capture_output=True, text=True)
     lines = check.stdout.splitlines()
-    if check.returncode != 0 or 'HKDF self-test: PASS' not in lines or 'security-key: not built' not in lines:
+    ok = check.returncode == 0 and 'HKDF self-test: PASS' in lines and 'security-key: built' in lines
+    if program == 'goyo-vault.exe':
+        ok = ok and 'salt self-test: PASS' in lines and any(webauthn.fullmatch(line) for line in lines)
+    if not ok:
         sys.exit(f'Refusing to package: {program} --self-check failed: {check.stdout.strip()} {check.stderr.strip()}')
 # The server script runs on the user's server, so check the shipped copy here:
 # it must compile and pass its own selftest (CAS, history, key-file refusal).

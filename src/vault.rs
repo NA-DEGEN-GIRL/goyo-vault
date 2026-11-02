@@ -4943,7 +4943,7 @@ mod workflow_tests {
             Some(vec!["3".into(), "0".into()])
         );
         // Security-key files, damaged and newer ones included, on their
-        // magic family alone (the default build; S45-1 #16).
+        // magic family alone (the keyless build; S45-1 #16).
         fs::write(&v, &good).unwrap();
         #[cfg(not(feature = "security-key"))]
         {
@@ -4984,7 +4984,7 @@ mod workflow_tests {
     /// file is chosen, and by the precheck, the unlock and a Restore, none
     /// of which counts as a failed attempt. Damaged copies and newer magics
     /// of the family get the damaged wording; nothing is ever the AUTH text
-    /// and nothing is written (spec §4.7, §14.2-7). Default build only
+    /// and nothing is written (spec §4.7, §14.2-7). Keyless build only
     /// (S45-1 #16); the next test is the security-key build's.
     #[cfg(not(feature = "security-key"))]
     #[test]
@@ -5163,7 +5163,7 @@ mod workflow_tests {
     /// SUBMIT refuses it as the file dialog did, and no temp file stands in
     /// for it or replaces it, not even a password-only key file of the same
     /// vault that the password opens (spec §4.6, §4.7, §5.12 rule i,
-    /// §14.2-7). Default build only (S45-1 #16).
+    /// §14.2-7). Keyless build only (S45-1 #16).
     #[cfg(not(feature = "security-key"))]
     #[test]
     fn security_key_files_are_never_replaced_by_a_temp_file() {

@@ -16,14 +16,20 @@ Profiles (default vault):
 Both need ASLR, high-entropy ASLR, DEP, CFG, CET, DependentLoadFlags 0x800
 (System32 only), no delay imports, no import by ordinal and the GUI
 subsystem. Neither imports webauthn.dll: the security-key build loads it at
-run time from System32 (spec v3 §8.1, §12). The release is the default
-build, which has no WebAuthn code at all: no `webauthn` text in goyo-vault.exe
-(ASCII or UTF-16LE, any case), no message pump or thread of a ceremony,
-and no key-file sync magic in goyo-sync.exe.
+run time from System32 (spec v3 §8.1, §12).
 
---feature security-key (the manual checklist only) inspects a security-key
-build: those string and import rules are relaxed, the static-import ban on
-webauthn.dll stays, and it writes only to --out, never to docs/.
+--feature security-key inspects the security-key build, which is the
+default build and the release (package_release.py runs it for both exes):
+goyo-vault.exe must hold `webauthn` (the name it loads; ASCII or UTF-16LE,
+any case) and goyo-sync.exe the key-file sync channel's magics, so a
+keyless exe is not taken for the release. It writes docs/binary-inspection*.json
+unless --out names another file.
+
+Without --feature it inspects the keyless edition (`--no-default-features`),
+which has no WebAuthn code at all: no `webauthn` text in goyo-vault.exe, no
+message pump or thread of a ceremony, and no key-file sync magic in
+goyo-sync.exe. It writes only to --out, never to docs/, which describe the
+release.
 """
 import argparse, hashlib, json, pathlib, struct, sys
 
@@ -42,8 +48,8 @@ parser.add_argument('--profile', choices=sorted(DEFAULTS), default='vault')
 parser.add_argument('--out')
 parser.add_argument('--feature', choices=['security-key'])
 args = parser.parse_args()
-if args.feature and not args.out:
-    sys.exit('inspect_pe.py --feature writes only to --out: docs/binary-inspection*.json describe the release (default) build.')
+if not args.feature and not args.out:
+    sys.exit('inspect_pe.py without --feature (the keyless edition) writes only to --out: docs/binary-inspection*.json describe the release, the security-key build.')
 p = pathlib.Path(args.exe or DEFAULTS[args.profile][0])
 out = pathlib.Path(args.out or DEFAULTS[args.profile][1])
 b = p.read_bytes()
@@ -124,15 +130,22 @@ def holds(text):
 CEREMONY = {'user32.dll': {'PeekMessageW', 'MsgWaitForMultipleObjectsEx'},
             'kernel32.dll': {'CreateThread', 'GetExitCodeThread', 'SetThreadDescription',
                              'SwitchToThread', 'ExitThread'}}
-if not args.feature:
+KEY_SYNC = ('GOYOSKO2', 'GOYOSKI2', 'GOYOSKR1')
+if args.feature:
     if args.profile == 'vault':
-        assert not holds('webauthn'), 'goyo-vault.exe holds "webauthn": not the default build'
+        assert holds('webauthn'), 'goyo-vault.exe lacks "webauthn": not the security-key build'
+    else:
+        for magic in KEY_SYNC:
+            assert holds(magic), f'goyo-sync.exe lacks {magic}: not the security-key build'
+else:
+    if args.profile == 'vault':
+        assert not holds('webauthn'), 'goyo-vault.exe holds "webauthn": not the keyless build'
         for dll, names in imports.items():
             extra = sorted(set(names) & CEREMONY.get(dll.lower(), set()))
-            assert not extra, f'{dll}!{extra}: a ceremony pump or thread in the default build'
+            assert not extra, f'{dll}!{extra}: a ceremony pump or thread in the keyless build'
     else:
-        for magic in ('GOYOSKO2', 'GOYOSKI2', 'GOYOSKR1'):
-            assert not holds(magic), f'goyo-sync.exe holds {magic}: not the default build'
+        for magic in KEY_SYNC:
+            assert not holds(magic), f'goyo-sync.exe holds {magic}: not the keyless build'
 if args.profile == 'vault':
     # Only these DLLs may load before main runs; anything else (wtsapi32
     # pulled SspiCli.dll from the exe folder) must be loaded at run time
@@ -181,6 +194,7 @@ else:
             assert n != 'ProcessPrng' or lower == 'bcryptprimitives.dll', f'{dll}!{n}: unexpected RNG import'
             assert n not in ('WinExec',) and not n.startswith('ShellExecute'), f'{dll}!{n}: only CreateProcessW (ssh.exe, ssh-keygen.exe, itself with --background or, from the tray menu, with no argument) may start a program'
 
+report['build'] = args.feature or 'keyless'
 output = json.dumps(report, indent=2)
-out.write_text(output, encoding='utf-8')
+out.write_text(output, encoding='utf-8', newline='\n')
 print(json.dumps({'profile':args.profile,'bytes':len(b),'sha256':report['sha256'],'dependent_load_flags':hex(flags),'dlls':list(imports)}, indent=2))

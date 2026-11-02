@@ -2141,7 +2141,7 @@ pub(in crate::vault) mod tests {
         }
     }
 
-    /// The security-key build's counterpart of the default build's magic
+    /// The security-key build's counterpart of the keyless build's magic
     /// family test (spec §4.6, §14.2-4): GOYOKH01 and GOYOKS01 parse in full
     /// and need a touch, a damaged one is AUTH_ERROR like any damaged file,
     /// GOYOKH02 and GOYOKS02 are newer, and no relabel opens.

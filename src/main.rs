@@ -464,7 +464,7 @@ struct KeysShown {
     texts: Vec<String>,
 }
 /// What holds key changes while a changed key file waits for its gate
-/// (spec §5.2); never in the default build.
+/// (spec §5.2); never in the keyless build.
 fn gate_hold(s: &Session) -> Option<Hold> {
     #[cfg(feature = "security-key")]
     return s.gate_pending().then_some(Hold::GatePending);
@@ -475,7 +475,7 @@ fn gate_hold(s: &Session) -> Option<Hold> {
     }
 }
 /// The server's key file with keys that a PC without keys takes (see
-/// Hold::ServerKeysOn); never in the default build.
+/// Hold::ServerKeysOn); never in the keyless build.
 fn server_hold(s: &Session) -> Option<Hold> {
     #[cfg(feature = "security-key")]
     return s.pwonly_server_file().map(|epoch| Hold::ServerKeysOn {
@@ -489,7 +489,7 @@ fn server_hold(s: &Session) -> Option<Hold> {
     }
 }
 /// A removal that never landed, which [다시 하기] reopens (spec §9.2);
-/// never in the default build.
+/// never in the keyless build.
 fn redo_hold(s: &Session) -> Hold {
     #[cfg(feature = "security-key")]
     if let Some(redo) = s.redo() {
@@ -1785,7 +1785,7 @@ impl App {
             SetFocus(self.handle(CURRENT_PASS));
         }
     }
-    /// "열쇠 관리" (spec §9.1, default build): the password change, another
+    /// "열쇠 관리" (spec §9.1, keyless build): the password change, another
     /// PC's key file and the key backup; for a KF2 key file its key code;
     /// and what holds key changes, with the button that acts on it and the
     /// fields its re-authentication reads.
@@ -4882,7 +4882,7 @@ fn used() {
 }
 /// A WM_QUIT reached a ceremony's pump and was posted again (spec §8.6): the
 /// app is ending, so every flow that is still running is void; never in the
-/// default build, which has no pump of its own.
+/// keyless build, which has no pump of its own.
 fn quitting() -> bool {
     #[cfg(feature = "security-key")]
     return QUIT_SEEN.with(Cell::get);
@@ -6352,7 +6352,7 @@ fn main() {
             println!("security-key: not built");
             #[cfg(feature = "security-key")]
             {
-                println!("security-key: EXPERIMENTAL build");
+                println!("security-key: built");
                 if goyo_vault::fido::self_test().is_err() {
                     eprintln!("FAIL: salt self-test");
                     std::process::exit(1);
@@ -11530,7 +11530,7 @@ mod tests {
 
     /// SUBMIT (or Enter) on Restore runs as a flow through phased_command
     /// in both builds (spec §9.2a; S45-1 #13, S45-2 #17), as on Create: the
-    /// default build's has no question and no ceremony, the security-key
+    /// keyless build's has no question and no ceremony, the security-key
     /// build's a touch.
     #[test]
     fn restore_submit_runs_as_a_flow() {

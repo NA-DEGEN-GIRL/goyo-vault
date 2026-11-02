@@ -122,7 +122,7 @@ pub const ROW_CLONED: &str = "복제됐을 수 있음: 모든 키 새로 잠그�
 pub const FULL: &str = "다른 키를 모두 대신할 수 있는 키: 보안 키 {list}";
 pub const FULL_NONE: &str = "다른 키를 모두 대신할 수 있는 키: 없음 ('짝 맺기'를 하세요)";
 /// S-KEYS-NOTE.
-pub const KEYS_NOTE: &str = "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다. 실험 기능입니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.";
+pub const KEYS_NOTE: &str = "보안 키(YubiKey 등 FIDO2)를 켜면 열쇠 파일을 비밀번호와 등록한 보안 키 둘 다로 잠급니다.\n등록한 키를 모두 잃으면 누구도(만든 사람도) 이 금고를 열 수 없고 복구 방법도 없으니 2개 이상 등록하세요. 키는 한 PC에서 함께 등록해야 서로 짝을 맺고, 하나를 잃어도 남은 키 하나로 바로 뺄 수 있습니다. 키마다 PIN을 다르게 정하고, 키 번호를 실물 키에 적어 두세요.";
 /// S-KEYCODE-NOTE-SK.
 pub const KEYCODE_NOTE: &str =
     "다른 PC에서 이 금고의 보안 키 추가나 설정 변경을 받을 때 이 코드를 입력합니다.";
@@ -140,7 +140,7 @@ pub const NEW_CONFIRM: &str = "새 비밀번호 확인";
 pub const KEYBACKUP_DUE: &str = "이 열쇠 파일은 아직 '열쇠 백업'으로 백업하지 않았습니다. 열쇠 파일을 잃으면 보안 키와 비밀번호가 있어도 열 수 없습니다.";
 
 // Create (spec §9.1, §9.2 "Create with keys").
-pub const SK_LABEL: &str = "보안 키로도 잠그기 (실험)";
+pub const SK_LABEL: &str = "보안 키로도 잠그기";
 /// S-CREATE-NOTE, on the status line when the toggle turns on.
 pub const CREATE_NOTE: &str = "열 때마다 등록한 보안 키를 연결하고 터치하고 키의 PIN을 입력합니다. 모두 잃으면 누구도 복구할 수 없으니 2개 이상, 지금 함께 등록하세요(함께 등록한 키끼리 짝을 맺습니다). 등록할 때 키마다 Windows 창이 세 번 열립니다. PIN이 없는 키는 그때 PIN을 정하며, 키마다 PIN을 다르게 정하세요.";
 pub const SK_OFF_NOTE: &str = "보안 키 없이 비밀번호와 열쇠 파일로 여는 금고를 만듭니다.";
@@ -182,11 +182,11 @@ pub const KEYS_ON_DONE: &str =
     "보안 키를 켰습니다. 보안 키 {n}개가 등록되었고 서로 짝을 맺었습니다.";
 /// S-KEYSON-PLAN: what keys on means, before S-ROTATE, for a vault made
 /// without keys (a user who never used them).
-pub const KEYSON_PLAN: &str = "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키 빌드여야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.";
+pub const KEYSON_PLAN: &str = "보안 키를 켜면 앞으로 이 금고를 열 때마다 비밀번호와 함께, 등록한 보안 키 하나를 연결해 터치하고 그 키의 PIN을 입력합니다.\n• 등록할 보안 키를 모두 지금 이 PC에 준비하세요(2개 이상 권장). 키마다 Windows 창이 세 번 열립니다.\n• 이 금고를 다른 PC에서도 쓴다면, 그 PC의 고요 금고도 보안 키를 지원하는 0.11.0 이상이어야 하고 끝난 뒤 그 PC마다 이 PC의 새 열쇠 파일을 받아야 합니다.";
 /// S-KEYSON-OTHERS: after keys on, what every other PC of the vault does.
-pub const KEYSON_OTHERS: &str = "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.";
+pub const KEYSON_OTHERS: &str = "다른 PC에서도 이 금고를 쓴다면, 그 PC마다 이 PC의 새 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키를 지원하는 0.11.0 이상이어야 합니다.";
 /// The same for a vault that syncs: those PCs halt until then.
-pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키 빌드여야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.";
+pub const KEYSON_OTHERS_SYNCED: &str = "동기화 중인 금고입니다. 다른 PC는 이 PC의 새 열쇠 파일을 받을 때까지 동기화를 멈춥니다. 그 PC마다 이 열쇠 파일을 USB로 가져가 '열쇠 관리 › 새 열쇠 파일 받기'로 받고, 이 PC의 열쇠 확인 코드를 입력한 뒤 등록한 보안 키 하나를 터치하세요. 그 PC의 고요 금고는 보안 키를 지원하는 0.11.0 이상이어야 합니다.\n이 PC에서 열쇠 파일 동기화도 켜면, 그 PC는 USB 대신 '열쇠 관리'의 '서버의 새 열쇠 파일 받기…'로 받을 수 있습니다.";
 /// The Keys screen of a PC without security keys whose vault's server
 /// holds another PC's key file with keys (keys on, then key-file sync):
 /// [서버의 새 열쇠 파일 받기…] and what it asks (S-PWONLY-SERVER).
@@ -1546,7 +1546,7 @@ impl App {
 
 impl App {
     /// What this build's screens and controls allow (see App::allows);
-    /// None for the commands the default build decides.
+    /// None for the commands the keyless build decides.
     pub(crate) fn allows_sk(&self, id: i32) -> Option<bool> {
         match (self.screen, id) {
             (Screen::Pair, _) => Some(
@@ -1698,7 +1698,7 @@ pub(crate) fn flow(h: Hwnd, id: i32) -> crypto::Result<()> {
 }
 
 /// The login note of the key file at `key` (spec §9.1): S-LOGIN-NOTE with
-/// its PIN line, S-LOGIN-PWONLY, or the default build's note.
+/// its PIN line, S-LOGIN-PWONLY, or the keyless build's note.
 fn login_note(key: &Path) -> String {
     match vault::login_keys(key) {
         Some(vault::LoginKeys::Keys { n, pin }) => {
@@ -4240,7 +4240,7 @@ fn unrepaired_line(pair: Option<(u8, u8)>) -> Option<String> {
 /// any question; S-ROTATE and the gate; the touch plan of a write that
 /// removes nothing (S-SUSPEND when no live key reaches every other), its
 /// touch, the Reauth with that touch and any planned extra touches; the
-/// write; S-BACKUP. A key file without keys keeps the default build's flow.
+/// write; S-BACKUP. A key file without keys keeps the keyless build's flow.
 fn password_flow(h: Hwnd) -> crypto::Result<()> {
     let (t, (new_password, reach, synced)) = take(h, SUBMIT, |a, t| {
         let keys = t.keys.as_ref().ok_or(vault::NOT_PLANNED)?;
@@ -4895,7 +4895,7 @@ fn fork_text(take_other: bool, both: bool) -> String {
         .join(" ")
 }
 /// [열기] on `Screen::Adopt` in this build (spec §9.2 "Adopt", §5.8): the
-/// default build's one flow with what security keys add: the fork option
+/// keyless build's one flow with what security keys add: the fork option
 /// (S-FORK with no default, no hint and no key number), the option's gate
 /// (S-LOSTPICK or S-GATE-CODE) before any touch, the Reauth touch (with two
 /// salts where the two files' seeds differ), a touch of a key of the other
@@ -5207,7 +5207,7 @@ fn adopt_from(h: Hwnd, taking: Taking) -> crypto::Result<()> {
     let (epoch, tag) = (check.other.epoch, check.other.tag);
     // A: the fork option, then its gate; nothing about the change before.
     // Two password-only files have no options: they are joined, as in the
-    // default build.
+    // keyless build.
     let hardware = keys.is_some() || other.needs_security_key();
     let fork_options = check.fork && hardware && !removal;
     let mut option = if fork_options {
@@ -5742,8 +5742,8 @@ pub const KEYS_NOTE_SYNCED: &str = "이 열쇠 파일은 서버로 동기화됩�
 /// The Keys screen's key-file sync line (spec §9.1, §2.29): where this
 /// vault's key file lives, in one line, beside the one switch.
 pub const KS_OFF: &str = "열쇠 파일: 이 PC에만 보관 (다른 PC에는 USB로)";
-pub const KS_SAME: &str = "열쇠 파일: 서버로 동기화 (실험)";
-pub const KS_GONE: &str = "열쇠 파일: 서버로 동기화 (실험) · 서버에 없음";
+pub const KS_SAME: &str = "열쇠 파일: 서버로 동기화";
+pub const KS_GONE: &str = "열쇠 파일: 서버로 동기화 · 서버에 없음";
 pub const KS_READY: &str = "서버에 새 열쇠 파일 있음 (수정 {e})";
 pub const KS_GATE: &str = "서버에 확인할 열쇠 변경 있음 (수정 {e})";
 pub const KS_FORK: &str = "서버의 열쇠 파일과 갈라짐 (수정 {e}) · [받기…]로 합치세요";
@@ -5799,7 +5799,7 @@ pub const REUPLOADED: &str = "열쇠 파일을 다시 올리도록 했습니다.
 pub const KEYSYNC_OFF_ASK: &str = "열쇠 파일 동기화를 끕니다. 서버에 열쇠 파일 삭제를 요청하고 데이터 키를 바꿉니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다. 계속할까요?";
 pub const KEYSOFF_SYNCED: &str = "이 열쇠 파일은 열쇠 파일 동기화를 씁니다. 보안 키를 끄면 열쇠 파일 동기화도 끄고, 서버에 열쇠 파일 삭제를 요청합니다. 다른 PC는 동기화를 멈추고 이 열쇠 파일을 USB로 받아야 합니다.";
 pub const OFF_FORK: &str = "서버에 이 PC가 받지 않은 열쇠 파일(수정 {e})이 있습니다. 다른 PC의 변경일 수도, 위조된 파일일 수도 있습니다. 끄면 그 파일도 서버에서 지워지고, 다른 PC의 변경이라면 그 PC의 변경은 USB로 옮겨야 합니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남았던 열쇠 파일로 열리지 않습니다.";
-pub const OFF_NOHELPER: &str = "열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?";
+pub const OFF_NOHELPER: &str = "열쇠 파일 동기화를 지원하는 goyo-sync가 응답하지 않습니다. 끄기는 지금 하지만, 서버의 열쇠 파일은 그 goyo-sync가 실행될 때까지 지워지지 않습니다. 계속할까요?";
 pub const OFF_NOHELPER_NOVIEW: &str = "이 PC에 서버 확인 기록이 없어, goyo-sync가 서버를 확인한 뒤 이 PC를 한 번 더 잠금 해제해야 삭제 요청이 나갑니다.";
 pub const OFF_NOKEYS: &str = "이 PC의 서버 연결이 이 금고의 열쇠 파일 요청을 받지 않아(서버 강제 명령에 --key-sync=<금고 ID> 없음) 서버의 열쇠 파일을 지울 수 없습니다.
 열쇠 파일 동기화를 쓰던 금고에서 서버가 이렇게 답한다면 서버 설정이 바뀌었거나 서버가 해킹되었을 수 있습니다. 끄기는 그래도 데이터 키를 바꾸므로, 앞으로 저장하는 항목은 서버에 남은 열쇠 파일로 열리지 않습니다. 다만 서버 관리자가 이 PC의 줄에 그 설정을 넣거나 data/<id>/k/를 지울 때까지 이 PC의 금고는 서버에 올라가지 않습니다(서버의 열쇠 파일이 다른 상태를 요구합니다). 끌까요?";
@@ -5839,10 +5839,10 @@ pub const N_READY: &str =
 /// What to fix, and that goyo-sync checks again (spec §2.29).
 pub const N_NOKEYSYNC: &str = "서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정의 '강제 명령 줄…'이 만든 줄로 바꾸면 goyo-sync가 2분 안에 다시 확인합니다.";
 pub const N_KEYUP_REFUSED: &str = "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.";
-pub const N_HELPER: &str = "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync(보안 키 빌드)의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.";
+pub const N_HELPER: &str = "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.";
 /// S-KEYSYNC-OFF-ADMIN (spec §7.16 step 7), once, after the deletion line.
 pub const N_ADMIN: &str = "열쇠 파일 동기화를 다시 켜지 않을 거라면, 모든 PC가 이 끄기를 받은 뒤(이 열쇠 파일을 USB로 받거나 그 PC에서 직접 끔) 서버 관리자에게 모든 PC의 강제 명령에서 이 금고 ID를 --key-sync 목록에서 빼 달라고 하세요. 빼지 않으면 그 줄의 동기화 키를 훔친 사람이 이 금고의 업로드를 막을 수 있습니다.";
-/// KeyFork-SK (spec §7.4), in place of the default build's KeyFork.
+/// KeyFork-SK (spec §7.4), in place of the keyless build's KeyFork.
 pub const N_KEYFORK_SK: &str = "두 PC에서 따로 열쇠를 바꿔 열쇠 파일이 갈라졌습니다. 동기화를 멈췄습니다. 한 PC에서 '열쇠 관리 › 새 열쇠 파일 받기'로 다른 PC의 열쇠 파일을 받으세요. 보안 키 구성이 다르면 잃어버린 키를 고르거나 다른 PC의 열쇠 확인 코드를 입력해야 합니다. 키를 잃어버렸다면 이 PC에서도 '잃어버린 키 제거'를 하세요. 그런 일이 없었다면 서버 사본이 위조되었을 수 있습니다.";
 /// KeyFork-SK-AUTO (spec §7.4, S6-2 #5): the kind-9 merge joins it at the
 /// next unlock with no question; conditional, with the forgery sentence.
@@ -5854,7 +5854,7 @@ pub const N_KEYFORK_MERGE: &str = "두 PC에서 따로 열쇠를 바꿔 열쇠 �
 
 /// KeyChangedServer (spec §2.30, Task 2 of the auto-apply round): a vault
 /// copy under another PC's newer key, written under key-file sync. The new
-/// key file comes through the server, so the default build's "this build
+/// key file comes through the server, so the keyless build's "this build
 /// cannot take it" and the USB advice of KeyChanged do not apply.
 pub const N_KEY_CHANGED_SERVER: &str = concat!(
     "다른 PC에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. 새 열쇠 파일은 서버로 옵니다. '열쇠 관리'의 [받기…]로 받거나 다음 잠금 해제 때 받으세요.",
@@ -6566,12 +6566,12 @@ mod tests {
         let two = keys_on_done(2, false);
         assert!(!two.danger && two.lines == [fill(KEYS_ON_DONE, &[&2])]);
         // After keys on, every other PC takes the new key file by USB with
-        // the code and a touch, on the security-key build; a synced one has
-        // halted until then.
+        // the code and a touch, on 0.11.0 or later with security keys; a synced
+        // one has halted until then.
         assert_eq!(keys_on_others(false), KEYSON_OTHERS);
         assert_eq!(keys_on_others(true), KEYSON_OTHERS_SYNCED);
         for text in [KEYSON_OTHERS, KEYSON_OTHERS_SYNCED, KEYSON_PLAN] {
-            assert!(text.contains("보안 키 빌드"), "{text}");
+            assert!(text.contains("보안 키를 지원하는 0.11.0 이상"), "{text}");
             assert!(text.contains("새 열쇠 파일"), "{text}");
         }
         assert!(KEYSON_OTHERS_SYNCED.contains("동기화를 멈춥니다"));

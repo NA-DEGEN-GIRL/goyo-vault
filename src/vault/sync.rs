@@ -787,7 +787,7 @@ impl Own<'_> {
                     Header::Legacy => (false, 0),
                 };
                 // The security-key build opens a security-key file: only the
-                // default build is told it cannot (KeyChanged{hardware}).
+                // keyless build is told it cannot (KeyChanged{hardware}).
                 let hardware = cfg!(not(feature = "security-key")) && flags & 1 != 0;
                 // A key file that came through the server is taken from
                 // there: by a PC with keys with [받기…] or its next unlock,
@@ -3105,7 +3105,7 @@ mod tests {
             let unknown = |epoch, flags| keyed(&id, &random, state(epoch, [3; 16]), flags);
             let halt = Want::Halt;
             // A copy whose writer's key file needs a security key: the
-            // default build cannot take that key file at any epoch (spec
+            // keyless build cannot take that key file at any epoch (spec
             // §2.18 #58); the security-key build judges it like any other.
             // One written under key-file sync (flags 3) at a later state is
             // a change [받기…] or the next unlock takes on a PC with keys
