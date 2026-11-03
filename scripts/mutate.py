@@ -154,6 +154,8 @@ SERVERKEY = 'src/vault/serverkey.rs'
 SETUP = 'src/bin/goyo-sync/setup.rs'
 KEYS_GUI = 'src/bin/goyo-sync/keys_gui.rs'
 SYNC_GUI = 'src/bin/goyo-sync/gui.rs'
+KEYSETUP = 'src/bin/goyo-sync/keysetup.rs'
+KEYSETUP_T = 'keysetup::tests::'
 FORCED_LINE_T = 'gui::tests::the_forced_command_line_names_the_vaults_that_use_key_sync'
 SUPERSEDED_T = KS_T + 'a_change_whose_pc_is_gone_is_superseded'
 NO_SUPERSEDE_T = KS_T + 'a_removal_is_never_superseded_and_an_on_is'
@@ -2050,6 +2052,40 @@ ROWS = [
      '        if !merged && !deferred && (!login || rekeyed) {',
      '        if !merged && (!deferred || gated.is_some()) && (!login || rekeyed || gated.is_some()) {',
      [NO_WRITE_PENDING]),
+    # The one-button key setup of goyo-sync's settings window (keysetup.rs,
+    # the server script's authorize).
+    ('K1 server: authorize leaves a usual login key alone', 13, 'keyless', 'sync', SERVER,
+     """            if b'command="' not in text[:m.start()]:\n                raise AuthFail('UNRESTRICTED')\n""",
+     '',
+     [SELFTEST]),
+    ('K1 server: authorize takes an ed25519 key only', 13, 'keyless', 'sync', SERVER,
+     '    if len(key) != len(ED25519_HEAD) + 32 or not key.startswith(ED25519_HEAD):\n        return None\n',
+     '',
+     [SELFTEST]),
+    ('K1 server: authorize takes no .. in the script path', 13, 'keyless', 'sync', SERVER,
+     "    if any(seg in ('.', '..') for seg in remote.split('/')) or name in ('', '.', '..') or '~' in name:\n",
+     "    if name in ('', '.', '..') or '~' in name:\n",
+     [SELFTEST]),
+    ('K1 server: authorize drops the other lines of its key', 13, 'keyless', 'sync', SERVER,
+     '    for i in reversed(hits[1:]):\n        del lines[i]\n',
+     '',
+     [SELFTEST]),
+    ('K2 goyo-sync makes no key over an existing file', 13, 'feature', 'sync', KEYSETUP,
+     '    if present(path) || present(&pub_file(path)) {\n        return Err(Outcome::Taken);\n    }\n',
+     '',
+     [KEYSETUP_T + 'a_new_key_is_made_registered_and_checked']),
+    ('K2 goyo-sync limits a new key to this account', 13, 'feature', 'sync', KEYSETUP,
+     '        Ok(out) if out.code == Some(0) && out.killed.is_none() => Ok(()),\n        _ => Err(Outcome::Acl),',
+     '        _ => Ok(()),',
+     [KEYSETUP_T + 'a_new_key_is_made_registered_and_checked']),
+    ('K2 goyo-sync saves the key only after its own check', 13, 'feature', 'sync', KEYSETUP,
+     '        Checked::Ok { .. } => Outcome::Ready(authorized),\n        checked => Outcome::Verify(checked),',
+     '        _ => Outcome::Ready(authorized),',
+     [KEYSETUP_T + 'an_existing_key_and_every_stop']),
+    ('K2 a stale settings window keeps a key it did not change', 13, 'feature', 'sync', SYNC_GUI,
+     '    fn save(&mut self) {\n        self.take_disk_changes();\n',
+     '    fn save(&mut self) {\n',
+     ['gui::tests::one_button_setup_makes_registers_and_saves_the_key']),
 ]
 
 # The default build has security keys; 'keyless' turns them off.

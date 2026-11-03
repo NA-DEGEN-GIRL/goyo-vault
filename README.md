@@ -329,7 +329,7 @@ target/release/goyo-sync.exe --self-check
 - 아이콘은 `scripts/make_icon.ps1`로 다시 만들 수 있습니다. `build.rs`가 `assets/goyo.ico`를 실행 파일에 넣습니다.
 - 화면 미리보기는 `cargo test ui_preview -- --ignored`로 만듭니다. 결과는 `test-output/ui-preview/`에 저장되며, 이때 미리보기 창이 잠깐 화면에 뜹니다. goyo-sync 설정 창은 `cargo test --bin goyo-sync sync_ui_preview -- --ignored`로 `test-output/sync-ui-preview/`에 만듭니다.
 
-goyo-vault.exe에는 런타임 네트워크 코드, 원격 분석, 자동 업데이트, 외부 프로세스 실행 코드가 없습니다. goyo-sync.exe는 System32\OpenSSH의 `ssh.exe`·`ssh-keygen.exe`(호스트 키 지문 확인)와, 백그라운드 동기화를 위한 자기 자신(`--background`), 알림 영역 메뉴의 '설정 열기'로 여는 자기 자신(인자 없이, 설정 창)만 실행합니다. CRT는 정적으로 링크합니다.
+goyo-vault.exe에는 런타임 네트워크 코드, 원격 분석, 자동 업데이트, 외부 프로세스 실행 코드가 없습니다. goyo-sync.exe는 System32\OpenSSH의 `ssh.exe`·`ssh-keygen.exe`(호스트 키 지문 확인, 보안 키 빌드에서는 동기화 전용 키 만들기)와 그 키의 권한을 정하는 System32의 `icacls.exe`(보안 키 빌드), 백그라운드 동기화를 위한 자기 자신(`--background`), 알림 영역 메뉴의 '설정 열기'로 여는 자기 자신(인자 없이, 설정 창)만 실행합니다. CRT는 정적으로 링크합니다.
 
 ## 라이선스
 

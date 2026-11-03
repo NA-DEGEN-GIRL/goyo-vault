@@ -192,7 +192,7 @@ else:
         for n in names:
             assert not crypto(n), f'{dll}!{n}: OS crypto/RNG imported'
             assert n != 'ProcessPrng' or lower == 'bcryptprimitives.dll', f'{dll}!{n}: unexpected RNG import'
-            assert n not in ('WinExec',) and not n.startswith('ShellExecute'), f'{dll}!{n}: only CreateProcessW (ssh.exe, ssh-keygen.exe, itself with --background or, from the tray menu, with no argument) may start a program'
+            assert n not in ('WinExec',) and not n.startswith('ShellExecute'), f'{dll}!{n}: only CreateProcessW (ssh.exe, ssh-keygen.exe, icacls.exe, itself with --background or, from the tray menu, with no argument) may start a program'
 
 report['build'] = args.feature or 'keyless'
 output = json.dumps(report, indent=2)

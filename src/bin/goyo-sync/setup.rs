@@ -406,6 +406,12 @@ pub fn install_command(remote: &str, python: &str) -> Result<String, Unsafe> {
 /// which may be bound to a forced command that only runs `serve`.
 pub fn install_args(config: &Config) -> Result<Vec<OsString>, Unsafe> {
     let command = install_command(&config.remote, &config.python)?;
+    Ok(login_args(config, command))
+}
+/// The helper's fixed options and host with `command` (one already built
+/// from checked settings only) instead of `serve`, over the usual login:
+/// never the dedicated key (see [`install_args`]).
+pub fn login_args(config: &Config, command: String) -> Vec<OsString> {
     let mut plain = config.clone();
     plain.identity = None;
     let mut args = ssh_options(&plain);
@@ -415,7 +421,7 @@ pub fn install_args(config: &Config) -> Result<Vec<OsString>, Unsafe> {
         .map_or(args.len(), |i| i + 2);
     args.truncate(end);
     args.push(command.into());
-    Ok(args)
+    args
 }
 /// The helper's argv with one change, for the single call after the user
 /// agreed to trust a first-seen host key: ssh then stores a key it has never
@@ -448,6 +454,10 @@ pub type MakeRunner = Arc<dyn Fn() -> Box<dyn Runner> + Send + Sync>;
 pub enum Tool {
     Ssh,
     Keygen,
+    /// `<System32>\icacls.exe`: a new dedicated key's permissions
+    /// (keysetup.rs).
+    #[cfg(feature = "security-key")]
+    Icacls,
 }
 pub trait Runner: Send {
     /// One run with `input` on stdin, bounded like every ssh call.
@@ -488,10 +498,15 @@ impl Runner for SshRunner {
         let Some(dir) = &self.openssh else {
             return Err(Failure::Missing);
         };
-        let program = dir.join(match tool {
-            Tool::Ssh => "ssh.exe",
-            Tool::Keygen => "ssh-keygen.exe",
-        });
+        let program = match tool {
+            Tool::Ssh => dir.join("ssh.exe"),
+            Tool::Keygen => dir.join("ssh-keygen.exe"),
+            #[cfg(feature = "security-key")]
+            Tool::Icacls => match dir.parent() {
+                Some(system) => system.join("icacls.exe"),
+                None => return Err(Failure::Missing),
+            },
+        };
         if !program.is_file() {
             return Err(Failure::Missing);
         }
@@ -500,7 +515,7 @@ impl Runner for SshRunner {
         // failure (see transport::SshLog).
         let log = match tool {
             Tool::Ssh => Some(SshLog::create(&log_dirs()).ok_or(Failure::Start)?),
-            Tool::Keygen => None,
+            _ => None,
         };
         let mut command = Command::new(&program);
         if let Some(log) = &log {
@@ -1371,18 +1386,27 @@ pub(crate) mod tests {
         pub(crate) tool: Tool,
         pub(crate) args: Vec<String>,
         pub(crate) input: usize,
+        /// What went to stdin, when it was short (not a script install).
+        pub(crate) stdin: Vec<u8>,
     }
     /// A runner that answers from a script and records every call; shared,
     /// so a test keeps a handle while a worker thread owns a clone.
     type Shared = Arc<Mutex<(VecDeque<Result<Output, Failure>>, Vec<Ran>)>>;
+    /// What a run does besides answering (a program that makes a file).
+    type Effect = Arc<Mutex<Option<Box<dyn Fn(Tool, &[String]) + Send>>>>;
     #[derive(Clone, Default)]
-    pub(crate) struct Script(Shared);
+    pub(crate) struct Script(Shared, Effect);
     impl Script {
         pub(crate) fn with(replies: impl IntoIterator<Item = Result<Output, Failure>>) -> Self {
-            Self(Arc::new(Mutex::new((
-                replies.into_iter().collect(),
-                Vec::new(),
-            ))))
+            Self(
+                Arc::new(Mutex::new((replies.into_iter().collect(), Vec::new()))),
+                Effect::default(),
+            )
+        }
+        /// Runs `effect` on every later run, before it answers.
+        #[cfg(feature = "security-key")]
+        pub(crate) fn on_run(&self, effect: impl Fn(Tool, &[String]) + Send + 'static) {
+            *self.1.lock().unwrap() = Some(Box::new(effect));
         }
         pub(crate) fn ran(&self) -> Vec<Ran> {
             self.0.lock().unwrap().1.clone()
@@ -1400,14 +1424,23 @@ pub(crate) mod tests {
             _timeout: Duration,
             _beat: &mut dyn FnMut(),
         ) -> Result<Output, Failure> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            if let Some(effect) = &*self.1.lock().unwrap() {
+                effect(tool, &args);
+            }
             let mut s = self.0.lock().unwrap();
             s.1.push(Ran {
                 tool,
-                args: args
-                    .iter()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect(),
+                args,
                 input: input.len(),
+                stdin: if input.len() <= 4096 {
+                    input.to_vec()
+                } else {
+                    Vec::new()
+                },
             });
             s.0.pop_front().expect("a run no reply was scripted for")
         }

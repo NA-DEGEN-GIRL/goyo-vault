@@ -686,7 +686,7 @@ fn ssh_log_is_fresh_bounded_and_removed() {
 /// each time; while the GUI tests make their windows, Windows sometimes
 /// fails to set one up and the child dies in its start-up with
 /// STATUS_DLL_INIT_FAILED (0xC0000142), printing nothing.
-fn python_command() -> Command {
+pub(crate) fn python_command() -> Command {
     use std::os::windows::process::CommandExt;
     let mut c = Command::new("python");
     c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW

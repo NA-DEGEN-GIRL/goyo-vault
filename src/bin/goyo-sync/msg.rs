@@ -177,8 +177,8 @@ messages! {
     StateKeyFile = "{}: 서버의 열쇠 파일과 이 금고 사본이 맞지 않아 서버가 받지 않았습니다. 새 열쇠 파일을 받으면 다시 올라갑니다.",
         "{}: the server did not take this vault copy because it does not match the server's key file. It is uploaded again once this PC has the new key file.";
     #[cfg(feature = "security-key")]
-    StateNoKeys = "{}: 이 PC의 서버 연결이 이 금고의 열쇠 파일 동기화를 받지 않습니다. 서버의 authorized_keys에서 이 PC 줄을 설정 창의 '강제 명령 줄…'이 만든 줄(serve --key-sync=<금고 ID>)로 바꾸세요. 그 뒤 2분 안에 다시 확인합니다. 변경은 이 PC에 저장되어 있습니다.",
-        "{}: this PC's server connection does not serve key-file sync for this vault. In the server's authorized_keys, replace this PC's line with the one 'Forced command line…' in the settings window makes (serve --key-sync=<vault ID>). It is checked again within two minutes. Changes are kept on this PC.";
+    StateNoKeys = "{}: 이 PC의 서버 연결이 이 금고의 열쇠 파일 동기화를 받지 않습니다(강제 명령에 serve --key-sync=<금고 ID> 없음). 설정 창의 '서버에 설치·업데이트'를 누르면 서버의 이 PC 줄에 목록의 금고가 들어갑니다. 그 뒤 2분 안에 다시 확인합니다. 변경은 이 PC에 저장되어 있습니다.",
+        "{}: this PC's server connection does not serve key-file sync for this vault (no serve --key-sync=<vault ID> in its forced command). Press 'Install or update on server' in the settings window to put the listed vaults into this PC's line on the server. It is checked again within two minutes. Changes are kept on this PC.";
     StderrLine = "  ssh: {}",
         "  ssh: {}";
 }

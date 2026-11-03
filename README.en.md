@@ -330,7 +330,7 @@ target/release/goyo-sync.exe --self-check
 - `scripts/make_icon.ps1` regenerates the icon; `build.rs` embeds `assets/goyo.ico` into the executable.
 - `cargo test ui_preview -- --ignored` renders every screen to `test-output/ui-preview/`. It briefly shows a preview window. `cargo test --bin goyo-sync sync_ui_preview -- --ignored` does the same for the goyo-sync settings window, to `test-output/sync-ui-preview/`.
 
-goyo-vault.exe has no network code, telemetry, auto-update or code that starts other programs. goyo-sync.exe starts only `ssh.exe` and `ssh-keygen.exe` (host key fingerprints) from System32\OpenSSH, and itself: with `--background` for background sync, and without arguments (the settings window) from the notification-area menu's 'Open settings'. The C runtime is linked statically.
+goyo-vault.exe has no network code, telemetry, auto-update or code that starts other programs. goyo-sync.exe starts only `ssh.exe` and `ssh-keygen.exe` (host key fingerprints; in the security-key build also making the dedicated sync key) from System32\OpenSSH, System32's `icacls.exe` to set that key's permissions (security-key build), and itself: with `--background` for background sync, and without arguments (the settings window) from the notification-area menu's 'Open settings'. The C runtime is linked statically.
 
 ## License
 

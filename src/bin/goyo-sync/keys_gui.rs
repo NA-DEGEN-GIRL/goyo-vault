@@ -2,8 +2,10 @@
 //! file only that build compiles, so the default exe carries none of them,
 //! with their English in `i18n::EN_SK`.
 use crate::{
+    config::Config,
     engine::tag,
     i18n::{fill, tr},
+    keysetup::{Key, Outcome, Plan},
     setup::{KeyGot, Live, ServerKey},
     syncfile,
 };
@@ -17,7 +19,10 @@ use std::{io::Read, path::Path};
 pub const LINE_BUTTON: &str = "강제 명령 줄…";
 /// Beside it: where key-file sync is switched, and why the line matters
 /// (spec §2.29 (sync)). The switch is goyo-vault's alone.
-pub const LINE_NOTE: &str = "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.";
+pub const LINE_NOTE: &str = "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 금고를 넣거나 뺀 뒤에는 '서버에 설치·업데이트'를 다시 누르세요.";
+/// The first paragraph of what [강제 명령 줄…] shows: the button above
+/// does all of it (keysetup.rs); the line is for a server kept by hand.
+pub const AUTO_LINE: &str = "'서버에 설치·업데이트'가 이 일을 자동으로 합니다: 이 PC 전용 키를 만들고(없을 때), 서버의 authorized_keys에 이 PC의 줄을 넣거나 바꾸고, goyo-sync.conf에 저장합니다. 서버를 직접 관리할 때만 아래처럼 하세요.";
 /// The vaults `--key-sync` can name at most (spec v3 §7.13). The line
 /// names only vaults in the settings list, which holds fewer, so none is
 /// ever left out.
@@ -61,16 +66,23 @@ fn incoming_flags(vault: &Path) -> u8 {
 /// `setup::install_command`): no character of the line's options can come
 /// from them.
 pub fn forced_line(python: &str, remote: &str, ids: &[[u8; 16]]) -> Option<String> {
+    let serve = serve_command(python, remote, ids)?;
+    Some(fill(
+        "restrict,command=\"{}\" <이 PC 전용 키의 공개 키> goyo-sync",
+        &[&serve],
+    ))
+}
+/// The forced command itself: `<python> -I <remote> serve`, with
+/// `--key-sync=` and the vault IDs comma-separated when there are any.
+/// [`forced_line`] shows it; keysetup.rs puts it on the server.
+pub fn serve_command(python: &str, remote: &str, ids: &[[u8; 16]]) -> Option<String> {
     crate::setup::install_command(remote, python).ok()?;
     let mut serve = format!("{python} -I {remote} serve");
     if !ids.is_empty() {
         let named: Vec<String> = ids.iter().map(|i| syncfile::hex(i)).collect();
         serve = format!("{serve} --key-sync={}", named.join(","));
     }
-    Some(fill(
-        "restrict,command=\"{}\" <이 PC 전용 키의 공개 키> goyo-sync",
-        &[&serve],
-    ))
+    Some(serve)
 }
 /// A vault the forced-command line names: its ID, its file name, and
 /// whether only the server's side said it uses key-file sync (the server's
@@ -118,10 +130,134 @@ pub fn forced_text(python: &str, remote: &str, named: &[Named]) -> String {
         }
         note
     };
-    fill(
+    let manual = fill(
         "서버의 ~/.ssh/authorized_keys에서 이 PC 전용 키의 줄을 다음 한 줄로 바꾸세요. 공개 키 자리에는 그 키의 .pub 파일 내용을 넣습니다.\n\n{}\n\n이 줄은 이 PC의 전용 키로는 goyo-sync 동기화만 하게 묶습니다(셸·전달 금지). --key-sync=에 적힌 금고만 열쇠 파일을 서버와 주고받을 수 있습니다.\n{}\n\n이 창에서 Ctrl+C를 누르면 창의 글 전체가 복사되니, authorized_keys에는 restrict,command=로 시작하는 그 한 줄만 남기세요.",
         &[&line, &note],
+    );
+    format!(
+        "{}
+
+{manual}",
+        tr(AUTO_LINE)
     )
+}
+
+/// [서버에 설치·업데이트]'s one question (keysetup.rs): what is installed,
+/// which key, the line that goes into authorized_keys (the public key
+/// named, not shown: a new key does not exist yet), what `--key-sync`
+/// allows and what it does not, and that the usual login does it.
+pub fn setup_question(c: &Config, plan: &Plan) -> String {
+    let path = plan.key.path().display();
+    let key = match plan.key {
+        Key::New(_) => fill(
+            "새로 만듭니다 · {} (ed25519, 암호 없음: 백그라운드 도우미가 혼자 씁니다. 이 Windows 계정만 읽을 수 있게 합니다)",
+            &[&path],
+        ),
+        Key::Existing(_) => fill("있는 키를 씁니다 · {}", &[&path]),
+    };
+    let name = plan
+        .key
+        .path()
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let line = match serve_command(&c.python, &c.remote, &plan.ids) {
+        Some(serve) => format!(
+            "restrict,command=\"{serve}\" ssh-ed25519 {} {}",
+            fill("<{}의 공개 키>", &[&name]),
+            plan.comment
+        ),
+        None => tr(UNSAFE_LINE).to_owned(),
+    };
+    let mut ids = if plan.ids.is_empty() {
+        tr("목록에 ID를 아는 금고가 없어 --key-sync가 없는 줄입니다(동기화만, 열쇠 파일 동기화는 안 됨). 금고를 넣은 뒤 이 버튼을 다시 누르면 줄이 바뀝니다.").to_owned()
+    } else {
+        fill(
+            "--key-sync=에는 이 창 목록의 금고 {}개의 ID가 모두 들어가, 그 금고들은 열쇠 파일을 이 서버에 둘 수 있게 됩니다. 그래도 고요 금고의 '열쇠 관리'에서 열쇠 파일 동기화를 켜기 전에는 서버에 열쇠 파일이 생기지 않습니다(금고 앱이 보내지 않은 열쇠 파일을 서버가 만들 일은 없음).",
+            &[&plan.ids.len()],
+        )
+    };
+    if plan.unknown > 0 {
+        ids = format!(
+            "{ids} {}",
+            fill(
+                "ID를 아직 모르는 금고 {}개(파일이 아직 없거나 동기화 형식이 아님)는 빠졌습니다. 동기화가 시작된 뒤 이 버튼을 다시 누르세요.",
+                &[&plan.unknown],
+            )
+        );
+    }
+    fill(
+        "{} 서버에 동기화 스크립트를 설치하거나 업데이트하고, 이 PC의 동기화 전용 키를 서버에 등록합니다.
+
+1. 스크립트: {}에 보내 {} -I로 selftest하고, PASS일 때만 기존 스크립트와 바꿉니다.
+2. 전용 키: {}
+3. 서버의 ~/.ssh/authorized_keys에 이 PC의 줄을 넣습니다. 같은 키의 줄이 있으면 그 줄만 바꾸고 다른 줄은 그대로 둡니다. 바꾸기 전에 authorized_keys.goyo-backup으로 백업합니다.
+
+{}
+
+{}
+4. 전용 키로 연결을 확인한 뒤 goyo-sync.conf의 전용 SSH 키 파일로 저장합니다.
+
+설치와 등록에는 평소의 ssh 로그인(기본 키나 ssh-agent)을 쓰고, 전용 키는 쓰지 않습니다. 계속할까요?",
+        &[&c.host, &c.remote, &c.python, &key, &line, &ids],
+    )
+}
+/// The server line after the setup succeeded: how many vaults the line
+/// names, and whether goyo-sync.conf still waits for '저장하고 시작'.
+pub fn ready_text(vaults: usize, saved: bool) -> String {
+    let done = fill(
+        "서버 설치 완료 · 동기화 전용 키 설정됨 (열쇠 파일 동기화 가능: 금고 {}개)",
+        &[&vaults],
+    );
+    if saved {
+        done
+    } else {
+        format!("{done} · {}", tr("'저장하고 시작'을 누르면 적용됩니다"))
+    }
+}
+/// The server line when the setup stopped after the install (the cases
+/// gui.rs does not word itself: ssh failures, an unsafe setting, a
+/// cancel).
+pub fn stop_text(outcome: &Outcome) -> String {
+    let clear = tr("'전용 SSH 키 파일'을 비우고 다시 누르면 새 키를 만듭니다.");
+    match outcome {
+        Outcome::NoHome => tr("스크립트는 설치했지만 전용 키를 둘 폴더(%USERPROFILE%\\.ssh)를 찾지 못했습니다. 서버는 그대로입니다.").to_owned(),
+        Outcome::Taken => tr("스크립트는 설치했지만 새 키 이름의 파일이 그새 생겨 덮어쓰지 않았습니다. 다시 누르세요.").to_owned(),
+        Outcome::Keygen(detail) if detail.is_empty() => tr("스크립트는 설치했지만 ssh-keygen이 전용 키를 만들지 못했습니다. 서버는 그대로입니다.").to_owned(),
+        Outcome::Keygen(detail) => fill(
+            "스크립트는 설치했지만 ssh-keygen이 전용 키를 만들지 못했습니다({}). 서버는 그대로입니다.",
+            &[&cut(detail)],
+        ),
+        Outcome::Acl => tr("스크립트는 설치했지만 새 전용 키를 이 Windows 계정만 읽게 하지 못했습니다(icacls). 서버는 그대로입니다.").to_owned(),
+        Outcome::Unreadable { permissions: true } => tr("스크립트는 설치했지만 다른 계정도 전용 키 파일을 읽을 수 있어 ssh-keygen이 읽지 않았습니다. 안내대로 고친 뒤 다시 누르세요.").to_owned(),
+        Outcome::Unreadable { permissions: false } => format!(
+            "{} {clear}",
+            tr("스크립트는 설치했지만 전용 키 파일을 읽지 못했습니다(암호가 걸린 키는 쓸 수 없음).")
+        ),
+        Outcome::NotEd25519 => format!(
+            "{} {clear}",
+            tr("스크립트는 설치했지만 전용 키가 ed25519가 아니어서 등록하지 않았습니다.")
+        ),
+        Outcome::Unrestricted => format!(
+            "{} {clear}",
+            tr("스크립트는 설치했지만 서버에 이 키가 강제 명령 없이(평소 로그인 키로) 있어 authorized_keys를 바꾸지 않았습니다.")
+        ),
+        Outcome::Script(line) => fill(
+            "스크립트는 설치했지만 서버의 authorized_keys를 고치지 못했습니다. 서버 출력: {}",
+            &[&cut(line)],
+        ),
+        Outcome::Verify(_) => tr("서버에 이 PC의 줄은 넣었지만 전용 키로 접속하지 못해 goyo-sync.conf는 그대로 두었습니다. '로그 보기'에서 이유를 확인하세요.").to_owned(),
+        Outcome::Ready(_) | Outcome::Refused(_) | Outcome::Failed(_) | Outcome::Cancelled => {
+            String::new()
+        }
+    }
+}
+/// At most 80 characters of a program's output in a line.
+fn cut(text: &str) -> String {
+    let mut s: String = text.chars().take(80).collect();
+    if text.chars().count() > 80 {
+        s.push('…');
+    }
+    s
 }
 
 /// What a listed vault's key view says the server holds as its key file,
@@ -233,7 +369,7 @@ pub fn uses_key_sync(vault: &Path, look: &KeyLook, live: Live) -> Option<([u8; 1
 /// server line has no `--key-sync=<id>` for a vault that uses key-file
 /// sync. The helper asks again every two minutes.
 pub fn no_keys() -> &'static str {
-    tr("열쇠: 서버가 허용 안 함 · '강제 명령 줄…'의 줄로 바꾸세요")
+    tr("열쇠: 서버가 허용 안 함 · '서버에 설치·업데이트'를 다시 누르세요")
 }
 /// A server-list row's key file (the list of "이 PC로 가져오기").
 pub fn server_key(key: ServerKey) -> Option<&'static str> {
@@ -268,7 +404,7 @@ pub fn fetched(
                 &[&path.display(), &version, &bytes, &listed, &open, &key_name],
             );
         }
-        KeyGot::NoKeys => tr("이 PC의 서버 줄이 열쇠 파일 요청을 허용하지 않아 서버에 이 금고의 열쇠 파일이 있는지 알 수 없습니다. 있다면 '강제 명령 줄…'의 줄을 서버에 넣고 '저장하고 시작'을 누르세요. 금고 목록에 '열쇠: 서버에 있음'이 보이면 고요 금고를 다시 열거나 '찾기'로 이 파일을 다시 고르세요. '서버에서 가져온 금고' 화면이 이어서 안내합니다. 아니면:\n").to_owned(),
+        KeyGot::NoKeys => tr("이 PC의 서버 줄이 열쇠 파일 요청을 허용하지 않아 서버에 이 금고의 열쇠 파일이 있는지 알 수 없습니다. 있다면 '서버에 설치·업데이트'를 누르세요. 금고 목록에 '열쇠: 서버에 있음'이 보이면 고요 금고를 다시 열거나 '찾기'로 이 파일을 다시 고르세요. '서버에서 가져온 금고' 화면이 이어서 안내합니다. 아니면:\n").to_owned(),
         KeyGot::Empty => tr("서버에 이 금고의 열쇠 파일이 없습니다(이 금고는 열쇠 파일을 PC에만 둡니다).\n").to_owned(),
         KeyGot::BadAnswer | KeyGot::WriteFailed | KeyGot::Failed(_) => {
             let why = match key {

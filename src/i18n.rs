@@ -1888,8 +1888,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Brought here: {}\n(server version {}, {} bytes, with the server's key file · not confirmed yet)\n\nNext:\n1. {}\n2. Then {} The 'Vault brought from the server' screen guides you from there.\n3. Open it with the password and a security key, then enter the key check code that Goyo Vault's 'Key management' shows on another PC.\n4. If the code matches, the key file is saved next to the vault as {}, and from then on it opens as usual.",
     ),
     (
-        "이 PC의 서버 줄이 열쇠 파일 요청을 허용하지 않아 서버에 이 금고의 열쇠 파일이 있는지 알 수 없습니다. 있다면 '강제 명령 줄…'의 줄을 서버에 넣고 '저장하고 시작'을 누르세요. 금고 목록에 '열쇠: 서버에 있음'이 보이면 고요 금고를 다시 열거나 '찾기'로 이 파일을 다시 고르세요. '서버에서 가져온 금고' 화면이 이어서 안내합니다. 아니면:\n",
-        "This PC's server line does not allow key file requests, so whether the server holds this vault's key file is unknown. If it does, put the line of 'Forced command line…' on the server and press 'Save and start'. Once the vault list shows 'key: on the server', open Goyo Vault again or choose this file again with 'Browse': the 'Vault brought from the server' screen guides you on. Otherwise:\n",
+        "이 PC의 서버 줄이 열쇠 파일 요청을 허용하지 않아 서버에 이 금고의 열쇠 파일이 있는지 알 수 없습니다. 있다면 '서버에 설치·업데이트'를 누르세요. 금고 목록에 '열쇠: 서버에 있음'이 보이면 고요 금고를 다시 열거나 '찾기'로 이 파일을 다시 고르세요. '서버에서 가져온 금고' 화면이 이어서 안내합니다. 아니면:\n",
+        "This PC's server line does not allow key file requests, so whether the server holds this vault's key file is unknown. If it does, press 'Install or update on server'. Once the vault list shows 'key: on the server', open Goyo Vault again or choose this file again with 'Browse': the 'Vault brought from the server' screen guides you on. Otherwise:\n",
     ),
     (
         "서버에 이 금고의 열쇠 파일이 없습니다(이 금고는 열쇠 파일을 PC에만 둡니다).\n",
@@ -1913,8 +1913,8 @@ pub const EN_SK: &[(&str, &str)] = &[
     ),
     // goyo-sync's window (bin/goyo-sync/keys_gui.rs).
     (
-        "열쇠: 서버가 허용 안 함 · '강제 명령 줄…'의 줄로 바꾸세요",
-        "key: not allowed by the server · use the 'Forced command line…' line",
+        "열쇠: 서버가 허용 안 함 · '서버에 설치·업데이트'를 다시 누르세요",
+        "key: not allowed by the server · press 'Install or update on server' again",
     ),
     (
         "열쇠: 서버에 있음",
@@ -2983,7 +2983,7 @@ If the server answers this way for a vault that used key-file sync, the server s
         "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.",
         "A key file changed on another PC (revision {e}) is on the server. Press [Get…] in 'Key management'.",
     ),
-    ("서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정의 '강제 명령 줄…'이 만든 줄로 바꾸면 goyo-sync가 2분 안에 다시 확인합니다.", "The server does not take key-file sync for this vault: this PC's line in the server's authorized_keys (the forced command) lacks --key-sync=<vault ID>. Replace it with the line goyo-sync's 'Forced command line…' makes, and goyo-sync checks again within two minutes."),
+    ("서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정 창의 '서버에 설치·업데이트'를 누르면 줄을 고치고 2분 안에 다시 확인합니다.", "The server does not take key-file sync for this vault: this PC's line in the server's authorized_keys (the forced command) lacks --key-sync=<vault ID>. Press 'Install or update on server' in goyo-sync's settings: it fixes the line and checks again within two minutes."),
     (
         "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.",
         "goyo-sync or the server did not accept this PC's key file (format or size). Meanwhile this PC's vault is not uploaded. Update goyo-sync and the server script to the same version. After the update, it is uploaded again when goyo-sync restarts or you press 'Sync now'.",
@@ -3091,8 +3091,88 @@ If the server answers this way for a vault that used key-file sync, the server s
         "Forced command line…",
     ),
     (
-        "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 켠 금고는 서버에 있는 이 PC의 줄에도 있어야 합니다.",
-        "Key-file sync is turned on in Goyo Vault's 'Key management'. A vault with it on must also be in this PC's line on the server.",
+        "열쇠 파일 동기화는 고요 금고의 '열쇠 관리'에서 켭니다. 금고를 넣거나 뺀 뒤에는 '서버에 설치·업데이트'를 다시 누르세요.",
+        "Key-file sync is turned on in Goyo Vault's 'Key management'. After adding or removing vaults, press 'Install or update on server' again.",
+    ),
+    (
+        "'서버에 설치·업데이트'가 이 일을 자동으로 합니다: 이 PC 전용 키를 만들고(없을 때), 서버의 authorized_keys에 이 PC의 줄을 넣거나 바꾸고, goyo-sync.conf에 저장합니다. 서버를 직접 관리할 때만 아래처럼 하세요.",
+        "'Install or update on server' does this for you: it makes this PC's dedicated key (if there is none), adds or replaces this PC's line in the server's authorized_keys, and saves it in goyo-sync.conf. Do it by hand as below only if you manage the server yourself.",
+    ),
+    // goyo-sync's one-button setup (bin/goyo-sync/keysetup.rs).
+    (
+        "새로 만듭니다 · {} (ed25519, 암호 없음: 백그라운드 도우미가 혼자 씁니다. 이 Windows 계정만 읽을 수 있게 합니다)",
+        "a new one · {} (ed25519, no passphrase: the background helper uses it unattended; only this Windows account may read it)",
+    ),
+    ("있는 키를 씁니다 · {}", "the existing key · {}"),
+    ("<{}의 공개 키>", "<public key of {}>"),
+    (
+        "목록에 ID를 아는 금고가 없어 --key-sync가 없는 줄입니다(동기화만, 열쇠 파일 동기화는 안 됨). 금고를 넣은 뒤 이 버튼을 다시 누르면 줄이 바뀝니다.",
+        "No listed vault has a known ID yet, so the line has no --key-sync (sync only, no key-file sync). Press this button again after adding vaults and the line is updated.",
+    ),
+    (
+        "--key-sync=에는 이 창 목록의 금고 {}개의 ID가 모두 들어가, 그 금고들은 열쇠 파일을 이 서버에 둘 수 있게 됩니다. 그래도 고요 금고의 '열쇠 관리'에서 열쇠 파일 동기화를 켜기 전에는 서버에 열쇠 파일이 생기지 않습니다(금고 앱이 보내지 않은 열쇠 파일을 서버가 만들 일은 없음).",
+        "--key-sync= names the IDs of all {} vaults in this window's list, so each of them may keep its key file on this server. Still, no key file reaches the server until key-file sync is turned on in Goyo Vault's 'Key management' (the server never stores a key file the vault app did not send).",
+    ),
+    (
+        "ID를 아직 모르는 금고 {}개(파일이 아직 없거나 동기화 형식이 아님)는 빠졌습니다. 동기화가 시작된 뒤 이 버튼을 다시 누르세요.",
+        "{} vaults whose ID is not known yet (no file yet, or not in a synced format) are left out. Press this button again once they sync.",
+    ),
+    (
+        "{} 서버에 동기화 스크립트를 설치하거나 업데이트하고, 이 PC의 동기화 전용 키를 서버에 등록합니다.\n\n1. 스크립트: {}에 보내 {} -I로 selftest하고, PASS일 때만 기존 스크립트와 바꿉니다.\n2. 전용 키: {}\n3. 서버의 ~/.ssh/authorized_keys에 이 PC의 줄을 넣습니다. 같은 키의 줄이 있으면 그 줄만 바꾸고 다른 줄은 그대로 둡니다. 바꾸기 전에 authorized_keys.goyo-backup으로 백업합니다.\n\n{}\n\n{}\n4. 전용 키로 연결을 확인한 뒤 goyo-sync.conf의 전용 SSH 키 파일로 저장합니다.\n\n설치와 등록에는 평소의 ssh 로그인(기본 키나 ssh-agent)을 쓰고, 전용 키는 쓰지 않습니다. 계속할까요?",
+        "This installs or updates the sync script on the server {} and registers this PC's dedicated sync key there.\n\n1. Script: sent to {}, checked with {} -I selftest, and swapped in only on PASS.\n2. Dedicated key: {}\n3. This PC's line goes into ~/.ssh/authorized_keys on the server. A line of the same key is replaced; every other line stays as it is. The file is first backed up to authorized_keys.goyo-backup.\n\n{}\n\n{}\n4. After a check with the dedicated key, it is saved as the dedicated SSH key file in goyo-sync.conf.\n\nThe install and the registration use your usual ssh login (default key or ssh-agent), not the dedicated key. Continue?",
+    ),
+    (
+        "서버 설치 완료 · 동기화 전용 키 설정됨 (열쇠 파일 동기화 가능: 금고 {}개)",
+        "Installed on the server · dedicated sync key set up (key-file sync possible: {} vaults)",
+    ),
+    ("'저장하고 시작'을 누르면 적용됩니다", "press 'Save and start' to apply"),
+    (
+        "'전용 SSH 키 파일'을 비우고 다시 누르면 새 키를 만듭니다.",
+        "Clear 'Dedicated SSH key file' and press again to make a new key.",
+    ),
+    (
+        "스크립트는 설치했지만 전용 키를 둘 폴더(%USERPROFILE%\\.ssh)를 찾지 못했습니다. 서버는 그대로입니다.",
+        "The script is installed, but there is no folder for the dedicated key (%USERPROFILE%\\.ssh). The server is unchanged.",
+    ),
+    (
+        "스크립트는 설치했지만 새 키 이름의 파일이 그새 생겨 덮어쓰지 않았습니다. 다시 누르세요.",
+        "The script is installed, but a file took the new key's name meanwhile; nothing was overwritten. Press again.",
+    ),
+    (
+        "스크립트는 설치했지만 ssh-keygen이 전용 키를 만들지 못했습니다. 서버는 그대로입니다.",
+        "The script is installed, but ssh-keygen could not make the dedicated key. The server is unchanged.",
+    ),
+    (
+        "스크립트는 설치했지만 ssh-keygen이 전용 키를 만들지 못했습니다({}). 서버는 그대로입니다.",
+        "The script is installed, but ssh-keygen could not make the dedicated key ({}). The server is unchanged.",
+    ),
+    (
+        "스크립트는 설치했지만 새 전용 키를 이 Windows 계정만 읽게 하지 못했습니다(icacls). 서버는 그대로입니다.",
+        "The script is installed, but the new dedicated key could not be limited to this Windows account (icacls). The server is unchanged.",
+    ),
+    (
+        "스크립트는 설치했지만 다른 계정도 전용 키 파일을 읽을 수 있어 ssh-keygen이 읽지 않았습니다. 안내대로 고친 뒤 다시 누르세요.",
+        "The script is installed, but other accounts can read the dedicated key file, so ssh-keygen refused it. Fix it as shown, then press again.",
+    ),
+    (
+        "스크립트는 설치했지만 전용 키 파일을 읽지 못했습니다(암호가 걸린 키는 쓸 수 없음).",
+        "The script is installed, but the dedicated key file could not be read (a key with a passphrase cannot be used).",
+    ),
+    (
+        "스크립트는 설치했지만 전용 키가 ed25519가 아니어서 등록하지 않았습니다.",
+        "The script is installed, but the dedicated key is not ed25519, so it was not registered.",
+    ),
+    (
+        "스크립트는 설치했지만 서버에 이 키가 강제 명령 없이(평소 로그인 키로) 있어 authorized_keys를 바꾸지 않았습니다.",
+        "The script is installed, but the server has this key without a forced command (as a usual login key), so authorized_keys was left alone.",
+    ),
+    (
+        "스크립트는 설치했지만 서버의 authorized_keys를 고치지 못했습니다. 서버 출력: {}",
+        "The script is installed, but the server's authorized_keys could not be changed. Server output: {}",
+    ),
+    (
+        "서버에 이 PC의 줄은 넣었지만 전용 키로 접속하지 못해 goyo-sync.conf는 그대로 두었습니다. '로그 보기'에서 이유를 확인하세요.",
+        "This PC's line is on the server, but the dedicated key could not connect, so goyo-sync.conf was left as it was. See why under 'View log'.",
     ),
     (
         "restrict,command=\"{}\" <이 PC 전용 키의 공개 키> goyo-sync",

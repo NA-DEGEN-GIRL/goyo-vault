@@ -27,6 +27,8 @@ mod gui;
 mod i18n;
 #[cfg(feature = "security-key")]
 mod keys_gui;
+#[cfg(feature = "security-key")]
+mod keysetup;
 mod msg;
 mod setup;
 mod sys;

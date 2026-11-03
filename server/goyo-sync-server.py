@@ -11,9 +11,17 @@ upload.
 
   python3 -I goyo-sync-server.py serve [--root DIR] [--key-sync=ID[,ID...]]
                                                       answer one request
+  python3 -I goyo-sync-server.py authorize [--home DIR]
+                                                      put the forced-command
+                                                      line on stdin into
+                                                      ~/.ssh/authorized_keys
   python3 -I goyo-sync-server.py selftest            test this copy; prints PASS
 
-Install, the forced-command key and uninstalling: docs/SYNC.md.
+Install, the forced-command key and uninstalling: docs/SYNC.md. goyo-sync's
+settings window runs `authorize` over the user's usual ssh login (never the
+forced-command key, which runs only `serve`): it adds this PC's line or
+replaces the lines of the same ed25519 key, after a copy to
+authorized_keys.goyo-backup, and leaves every other line as it is.
 
 Key-file sync (security-key builds, the default since 0.11.0; docs/SECURITY_KEY.md).
 Without --key-sync this script never stores or serves a key file: PUT
@@ -51,7 +59,7 @@ Storage, under <script dir>/data (--root DIR is for tests), 0700/0600:
   slot-0 .. slot-7                                    empty lock files, one per
                                                       running connection (POSIX)
 """
-import contextlib, errno, hashlib, hmac, itertools, os, re, signal, stat, struct, sys, time
+import binascii, contextlib, errno, hashlib, hmac, itertools, os, re, signal, stat, struct, sys, time
 import io, shutil, subprocess, tempfile, threading  # selftest only
 try:
     import fcntl
@@ -1321,6 +1329,175 @@ def serve(inp, out, store, err, deadline=no_deadline, slots=0):
     err.flush()
     send(out, status, version, blob)
     return 1 if status in (BAD_REQUEST, TOO_LARGE, SERVER_ERROR) else 0
+
+
+# The one-button setup of goyo-sync's settings window (docs/SYNC.md): over
+# the user's usual ssh login, `authorize` puts this PC's forced-command line
+# into ~/.ssh/authorized_keys. The line comes on stdin and must be exactly
+# the form goyo-sync builds; nothing of it reaches a shell. Only the lines of
+# its own key (the ed25519 key blob) change; every other line stays byte for
+# byte.
+AUTH_LINE = re.compile(
+    rb'restrict,command="(?P<python>[^" ]{1,64}) -I (?P<remote>[^" ]{1,256}) serve'
+    rb'(?: --key-sync=(?P<ids>[0-9a-f,]{32,2111}))?" '
+    rb'ssh-ed25519 (?P<blob>[A-Za-z0-9+/]{68}) goyo-sync(?: [A-Za-z0-9._-]{1,63})?')
+AUTH_PYTHON = re.compile(r'[A-Za-z0-9._/+][A-Za-z0-9._/+-]{0,63}')
+AUTH_REMOTE = re.compile(r'[A-Za-z0-9._/~+][A-Za-z0-9._/~+-]{0,255}')
+ED25519_HEAD = b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20'
+AUTH_INPUT = 4096              # bytes of stdin: the line and its newline
+AUTH_MAX = 1024 * 1024         # a larger authorized_keys is left alone
+AUTH_FILE = 'authorized_keys'
+AUTH_BACKUP = 'authorized_keys.goyo-backup'
+
+
+class AuthFail(Exception):
+    """authorize stops without a change; its text goes to stdout."""
+
+
+def auth_line(data):
+    """(line, blob) for stdin that is exactly one goyo-sync line and its
+    newline, or None. The settings are checked as goyo-sync.conf checks
+    them: the Python command and the script path are plain words (no
+    leading -, no . or .. segment, a file name at the end), the IDs 32
+    lower-case hex digits each, distinct, at most MAX_VAULTS; the blob is an
+    ed25519 public key."""
+    if len(data) > AUTH_INPUT or not data.endswith(b'\n') or data.count(b'\n') != 1:
+        return None
+    line = data[:-1]
+    m = AUTH_LINE.fullmatch(line)
+    if not m:
+        return None
+    python, remote = m.group('python').decode('ascii'), m.group('remote').decode('ascii')
+    name = remote.rsplit('/', 1)[-1]
+    if not AUTH_PYTHON.fullmatch(python) or not AUTH_REMOTE.fullmatch(remote):
+        return None
+    if any(seg in ('.', '..') for seg in remote.split('/')) or name in ('', '.', '..') or '~' in name:
+        return None
+    if m.group('ids') is not None:
+        ids = m.group('ids').decode('ascii').split(',')
+        if len(ids) > MAX_VAULTS or len(set(ids)) != len(ids) or not all(VAULT_NAME.fullmatch(i) for i in ids):
+            return None
+    try:
+        key = binascii.a2b_base64(m.group('blob'))
+    except binascii.Error:
+        return None
+    if len(key) != len(ED25519_HEAD) + 32 or not key.startswith(ED25519_HEAD):
+        return None
+    return line, m.group('blob')
+
+
+def auth_edit(old, line, blob):
+    """(new contents or None, 'ADDED' | 'REPLACED' | 'SAME') for an
+    authorized_keys holding old. The lines of this key are those with
+    `ssh-ed25519 <blob>`, comments aside. The first one becomes line (its CR
+    kept) and the later ones go, so no other line of the key can bypass the
+    forced command; with none, line is appended. A line of this key without
+    a forced command (perhaps a usual login key) is never touched:
+    AuthFail('UNRESTRICTED')."""
+    key = re.compile(rb'(?:^|[ \t])ssh-ed25519[ \t]+' + re.escape(blob) + rb'(?:[ \t]|$)')
+    lines = old.split(b'\n')
+    hits = []
+    for i, raw in enumerate(lines):
+        text = raw.rstrip(b'\r')
+        if text.lstrip().startswith(b'#'):
+            continue
+        m = key.search(text)
+        if m:
+            if b'command="' not in text[:m.start()]:
+                raise AuthFail('UNRESTRICTED')
+            hits.append(i)
+    if not hits:
+        lead = b'\n' if old and not old.endswith(b'\n') else b''
+        return old + lead + line + b'\n', 'ADDED'
+    first = hits[0]
+    if len(hits) == 1 and lines[first].rstrip(b'\r') == line:
+        return None, 'SAME'
+    lines[first] = line + (b'\r' if lines[first].endswith(b'\r') else b'')
+    for i in reversed(hits[1:]):
+        del lines[i]
+    return b'\n'.join(lines), 'REPLACED'
+
+
+def auth_write(folder, name, data):
+    """Replaces folder/name with data at once: a new 0600 temp file, synced,
+    renamed over it."""
+    path = os.path.join(folder, name)
+    tmp = '%s.goyo-tmp-%d' % (path, os.getpid())
+    remove(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        remove(tmp)
+        raise
+    fsync_dir(folder)
+
+
+def authorize(inp, out, home):
+    """Puts this PC's line from inp into home/.ssh/authorized_keys and
+    prints ADDED, REPLACED or SAME (exit 0), or UNRESTRICTED or FAIL <why>
+    (exit 1, nothing changed). ~/.ssh is made 0700 and a new file 0600 when
+    missing; a file that changes is first copied to
+    authorized_keys.goyo-backup. A link in place of the file is refused (a
+    rename would replace the link, not its target)."""
+    try:
+        parsed = auth_line(inp.read(AUTH_INPUT + 1))
+        if parsed is None:
+            raise AuthFail('FAIL bad line')
+        line, blob = parsed
+        folder = os.path.join(home, '.ssh')
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+        if not os.path.isdir(folder):
+            raise AuthFail('FAIL ~/.ssh is not a folder')
+        lock = None
+        if fcntl:
+            # Two PCs set up at once: one edit after the other.
+            lock = os.open(folder, os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            path = os.path.join(folder, AUTH_FILE)
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                info = None
+            if info is not None and not stat.S_ISREG(info.st_mode):
+                raise AuthFail('FAIL authorized_keys is not a plain file')
+            old = b''
+            if info is not None:
+                fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC)
+                with os.fdopen(fd, 'rb') as f:
+                    old = f.read(AUTH_MAX + 1)
+                if len(old) > AUTH_MAX:
+                    raise AuthFail('FAIL authorized_keys is too large')
+            new, word = auth_edit(old, line, blob)
+            if new is not None:
+                if info is not None:
+                    auth_write(folder, AUTH_BACKUP, old)
+                auth_write(folder, AUTH_FILE, new)
+        finally:
+            if lock is not None:
+                os.close(lock)
+    except AuthFail as e:
+        out.write('%s\n' % e)
+        out.flush()
+        return 1
+    except OSError as e:
+        out.write('FAIL %s errno %s\n' % (type(e).__name__, e.errno))
+        out.flush()
+        return 1
+    out.write('%s\n' % word)
+    out.flush()
+    return 0
 
 
 class SelftestFailure(Exception):
@@ -2711,6 +2888,117 @@ def probe_data_root():
         raise SelftestFailure('no working flock in the data root (%s)' % type(e).__name__)
 
 
+def selftest_authorize(base):
+    """authorize (the settings window's one-button setup) against a
+    temporary home: the line's checks, add, replace, same, the other lines
+    untouched, the backup, a usual login key never touched, a link
+    refused."""
+    blob = lambda n: binascii.b2a_base64(ED25519_HEAD + bytes([n]) * 32, newline=False)
+    a, b = 'a' * 32, '0123456789abcdef' * 2
+    good = b'restrict,command="python3 -I .local/share/goyo-sync/goyo-sync-server.py serve'
+    line = lambda ids, n=1, tail=b' goyo-sync DESKTOP-1': (
+        good + (b' --key-sync=' + ids.encode() if ids else b'') + b'" ssh-ed25519 ' + blob(n) + tail)
+    check(auth_line(line(a) + b'\n') == (line(a), blob(1)), 'authorize: a line with one ID')
+    check(auth_line(line(a + ',' + b) + b'\n') is not None, 'authorize: two IDs')
+    check(auth_line(line('') + b'\n') is not None, 'authorize: no --key-sync')
+    check(auth_line(line(a, tail=b' goyo-sync') + b'\n') is not None, 'authorize: the bare comment')
+    ids64 = ','.join('%032x' % n for n in range(MAX_VAULTS))
+    check(auth_line(line(ids64) + b'\n') is not None, 'authorize: 64 IDs')
+    bad = [
+        line(a),                                            # no newline
+        line(a) + b'\n\n', line(a) + b'\r\n', b'\n',
+        line(a) + b'\n' + line(a) + b'\n',                  # two lines
+        line(a.upper()) + b'\n', line(a[:31]) + b'\n',      # not 32 lower-case hex
+        line(a + ',' + a) + b'\n',                          # an ID twice
+        line(ids64 + ',' + b) + b'\n',                      # 65 IDs
+        line(a + ',') + b'\n', line(',' + a) + b'\n',
+        line(a, tail=b'') + b'\n', line(a, tail=b' other') + b'\n',
+        line(a, tail=b' goyo-sync a;b') + b'\n',
+        line(a).replace(b'restrict,', b'') + b'\n',
+        line(a).replace(b'ssh-ed25519', b'ssh-rsa') + b'\n',
+        line(a).replace(blob(1), blob(1)[:-1] + b'=') + b'\n',
+        line(a).replace(blob(1), binascii.b2a_base64(b'\x00\x00\x00\x07ssh-rsa' + bytes(40), newline=False)) + b'\n',
+        line(a).replace(b'python3', b'-python3') + b'\n',
+        line(a).replace(b'python3', b'py"thon') + b'\n',
+        line(a).replace(b'python3', b'python3 -c x;') + b'\n',
+        line(a).replace(b'.local/share', b'.local/../share') + b'\n',
+        line(a).replace(b'.local/share', b'./share') + b'\n',
+        line(a).replace(b'goyo-sync-server.py serve', b'goyo-sync-server.py/ serve') + b'\n',
+        line(a).replace(b'goyo-sync-server.py serve', b'~ serve') + b'\n',
+        line(a).replace(b' serve', b' serve; id') + b'\n',
+        line(a).replace(b'" ssh', b'",no-pty ssh') + b'\n',
+        b'x' * AUTH_INPUT + b'\n',
+    ]
+    for n, data in enumerate(bad):
+        check(auth_line(data) is None, 'authorize: refuses bad line %d' % n)
+
+    def run(home, data):
+        out = io.StringIO()
+        code = authorize(io.BytesIO(data), out, home)
+        return code, out.getvalue()
+
+    def read(path):
+        with open(path, 'rb') as f:
+            return f.read()
+
+    # A home without ~/.ssh: the folder (0700) and the file (0600) are made,
+    # and nothing is backed up.
+    home = os.path.join(base, 'home')
+    os.mkdir(home)
+    ssh = os.path.join(home, '.ssh')
+    keys, backup = os.path.join(ssh, AUTH_FILE), os.path.join(ssh, AUTH_BACKUP)
+    check(run(home, line(a) + b'\n') == (0, 'ADDED\n'), 'authorize: adds to a new file')
+    check(read(keys) == line(a) + b'\n' and not os.path.exists(backup), 'authorize: the new file')
+    if os.name == 'posix':
+        check(stat.S_IMODE(os.stat(ssh).st_mode) == 0o700, 'authorize: ~/.ssh is 0700')
+        check(stat.S_IMODE(os.stat(keys).st_mode) == 0o600, 'authorize: authorized_keys is 0600')
+    # The same line again changes nothing, not even the backup.
+    check(run(home, line(a) + b'\n') == (0, 'SAME\n') and not os.path.exists(backup), 'authorize: same')
+    # Other lines (CRLF, comments, no final newline) stay byte for byte; a
+    # new key is appended after a line break; the old file is the backup.
+    others = (b'# my keys\r\nssh-ed25519 ' + blob(7) + b' laptop\r\n'
+              b'command="backup" ssh-ed25519 ' + blob(8) + b' nas\n\n'
+              b'# ssh-ed25519 ' + blob(2) + b' an old note\nssh-rsa AAAAB3Nza me@pc')
+    with open(keys, 'wb') as f:
+        f.write(others)
+    check(run(home, line(b, 2) + b'\n') == (0, 'ADDED\n'), 'authorize: adds beside other lines')
+    check(read(keys) == others + b'\n' + line(b, 2) + b'\n', 'authorize: other lines kept, line appended')
+    check(read(backup) == others, 'authorize: the backup is the old file')
+    # New IDs replace that line only, in place.
+    check(run(home, line(a + ',' + b, 2) + b'\n') == (0, 'REPLACED\n'), 'authorize: replaces')
+    check(read(keys) == others + b'\n' + line(a + ',' + b, 2) + b'\n', 'authorize: only its line changed')
+    check(read(backup) == others + b'\n' + line(b, 2) + b'\n', 'authorize: backup before the replace')
+    # A forced line of the key in the middle with CRLF, and a second one
+    # later: the first is replaced (CR kept), the second goes.
+    mixed = (b'ssh-ed25519 ' + blob(7) + b' laptop\r\n'
+             b'restrict,command="old" ssh-ed25519 ' + blob(3) + b' goyo-sync\r\n'
+             b'ssh-rsa AAAAB3Nza me@pc\n'
+             b'command="older",no-pty ssh-ed25519 ' + blob(3) + b'\n')
+    with open(keys, 'wb') as f:
+        f.write(mixed)
+    check(run(home, line(a, 3) + b'\n') == (0, 'REPLACED\n'), 'authorize: replaces among others')
+    check(read(keys) == (b'ssh-ed25519 ' + blob(7) + b' laptop\r\n' + line(a, 3) + b'\r\n'
+                         b'ssh-rsa AAAAB3Nza me@pc\n'), 'authorize: the first replaced, the second gone')
+    # The key as a usual login (no forced command): nothing changes.
+    plain = b'ssh-ed25519 ' + blob(4) + b' me@pc\n'
+    with open(keys, 'wb') as f:
+        f.write(plain)
+    os.unlink(backup)
+    check(run(home, line(a, 4) + b'\n') == (1, 'UNRESTRICTED\n'), 'authorize: a usual login key')
+    check(read(keys) == plain and not os.path.exists(backup), 'authorize: an unrestricted key is untouched')
+    check(run(home, line(a, 4).replace(b'DESKTOP', b'x;') + b'\n') == (1, 'FAIL bad line\n'), 'authorize: bad line')
+    check(read(keys) == plain and sorted(os.listdir(ssh)) == [AUTH_FILE], 'authorize: no temp file left')
+    # A link in place of authorized_keys is never replaced.
+    if hasattr(os, 'symlink') and os.name == 'posix':
+        target = os.path.join(base, 'elsewhere')
+        with open(target, 'wb') as f:
+            f.write(plain)
+        os.unlink(keys)
+        os.symlink(target, keys)
+        check(run(home, line(a) + b'\n')[0] == 1 and os.path.islink(keys) and read(target) == plain,
+              'authorize: a link is refused')
+
+
 def selftest():
     """Every rule against temporary roots, and where flock exists one lock
     on the default data root; prints PASS, or FAIL: <check>."""
@@ -2718,6 +3006,7 @@ def selftest():
     try:
         selftest_root(os.path.join(base, 'data'), base)
         selftest_keys(base)
+        selftest_authorize(base)
         if fcntl:
             probe_data_root()
     except SelftestFailure as e:
@@ -2755,6 +3044,9 @@ def main(argv):
     os.umask(0o077)
     if argv == ['selftest']:
         return selftest()
+    if argv == ['authorize'] or (len(argv) == 3 and argv[:2] == ['authorize', '--home'] and argv[2]):
+        home = argv[2] if len(argv) == 3 else os.path.expanduser('~')
+        return authorize(sys.stdin.buffer, sys.stdout, home)
     args = serve_args(argv)
     if args is not None:
         # A stalled client cannot keep this process alive (no SIGALRM on Windows).
@@ -2767,7 +3059,8 @@ def main(argv):
             # The client went away. Point stdout at devnull so the exit flush is quiet.
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
             return 1
-    sys.stderr.write('usage: goyo-sync-server.py serve [--root DIR] [--key-sync=ID[,ID...]] | selftest\n')
+    sys.stderr.write('usage: goyo-sync-server.py serve [--root DIR] [--key-sync=ID[,ID...]]'
+                     ' | authorize [--home DIR] | selftest\n')
     return 2
 
 

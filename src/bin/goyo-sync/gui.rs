@@ -248,7 +248,12 @@ fn pick_failed() -> bool {
 enum Job {
     Check(Config),
     Trust(Config),
+    #[cfg(not(feature = "security-key"))]
     Install(Config),
+    /// The install, then the dedicated key and its line on the server
+    /// (keysetup.rs), with who may read a new key.
+    #[cfg(feature = "security-key")]
+    Setup(Config, crate::keysetup::Plan, Option<String>),
     List(Config),
     #[cfg(not(feature = "security-key"))]
     Fetch(Config, [u8; 16], PathBuf),
@@ -264,7 +269,10 @@ impl Job {
         match self {
             Job::Check(_) => Kind::Check,
             Job::Trust(_) => Kind::Trust,
+            #[cfg(not(feature = "security-key"))]
             Job::Install(_) => Kind::Install,
+            #[cfg(feature = "security-key")]
+            Job::Setup(..) => Kind::Install,
             Job::List(_) => Kind::List,
             #[cfg(not(feature = "security-key"))]
             Job::Fetch(..) => Kind::Fetch,
@@ -278,7 +286,13 @@ impl Job {
         match self {
             Job::Check(c) => Done::Checked(setup::check(runner, log, &c), c),
             Job::Trust(c) => Done::Trusted(setup::trust(runner, log, &c), c),
+            #[cfg(not(feature = "security-key"))]
             Job::Install(c) => Done::Installed(setup::install(runner, log, &c)),
+            #[cfg(feature = "security-key")]
+            Job::Setup(c, plan, account) => {
+                let set = crate::keysetup::run(runner, log, &c, &plan, account.as_deref());
+                Done::Setup(set, c, plan.ids.len())
+            }
             Job::List(c) => {
                 let listed = setup::list(runner, log, &c);
                 let keys = match &listed {
@@ -327,7 +341,11 @@ impl Kind {
 enum Done {
     Checked(Checked, Config),
     Trusted(Trusted, Config),
+    #[cfg(not(feature = "security-key"))]
     Installed(Installed),
+    /// The setup, its settings and how many vaults the line names.
+    #[cfg(feature = "security-key")]
+    Setup(crate::keysetup::Setup, Config, usize),
     /// The server's vaults, and what it holds as each one's key file.
     Listed(Result<Vec<ListEntry>, Checked>, Config, Vec<KeyMark>),
     Got(Got, PathBuf),
@@ -357,6 +375,17 @@ fn key_marks(
 fn key_marks(_: &mut dyn Runner, _: &Log, _: &Config, entries: &[ListEntry]) -> Vec<KeyMark> {
     vec![(); entries.len()]
 }
+/// What became of the setup's key in goyo-sync.conf.
+#[cfg(feature = "security-key")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stored {
+    Written,
+    /// The file already named it.
+    Same,
+    /// No valid file yet: the field holds it until '저장하고 시작'.
+    Unsaved,
+    Failed,
+}
 struct Busy {
     seq: u32,
     kind: Kind,
@@ -371,7 +400,11 @@ enum Ask {
     Vault,
     /// Open the dedicated SSH key.
     Key,
+    #[cfg(not(feature = "security-key"))]
     Install(Config),
+    /// The one question before the install and the key setup.
+    #[cfg(feature = "security-key")]
+    Setup(Config, crate::keysetup::Plan),
     Trust(Config, String),
     /// "이 PC로 가져오기": the folder and name for the server's copy
     /// (suggested: `vault.goyo` beside the exe when free).
@@ -407,7 +440,18 @@ enum Note {
     Trouble(Trouble),
     Key(KeyStep),
     TrustDeclined,
+    #[cfg(not(feature = "security-key"))]
     Installed,
+    /// The setup's line is on the server: how many vaults it names, and
+    /// whether goyo-sync.conf holds the key (else it waits for a save).
+    #[cfg(feature = "security-key")]
+    KeyReady {
+        vaults: usize,
+        saved: bool,
+    },
+    /// The setup stopped after the install.
+    #[cfg(feature = "security-key")]
+    KeyStop(crate::keysetup::Outcome),
     NotPass {
         line: String,
         cause: Cause,
@@ -1336,13 +1380,7 @@ impl App {
                 }
                 None
             }
-            INSTALL => match setup::server_config(&self.fields) {
-                Ok(c) => Some(Ask::Install(c)),
-                Err(bad) => {
-                    self.show_bad(bad, false);
-                    None
-                }
-            },
+            INSTALL => self.install_ask(),
             FETCH => {
                 match setup::server_config(&self.fields) {
                     Ok(c) => self.start(Job::List(c)),
@@ -1553,8 +1591,18 @@ impl App {
                 }
                 None
             }
+            #[cfg(not(feature = "security-key"))]
             (Ask::Install(c), Answer::Yes(true)) => {
                 self.start(Job::Install(c));
+                None
+            }
+            #[cfg(feature = "security-key")]
+            (Ask::Setup(c, plan), Answer::Yes(true)) => {
+                let account = crate::keysetup::account(
+                    std::env::var("USERDOMAIN").ok().as_deref(),
+                    std::env::var("USERNAME").ok().as_deref(),
+                );
+                self.start(Job::Setup(c, plan, account));
                 None
             }
             (Ask::Trust(c, _), Answer::Yes(true)) => {
@@ -1595,6 +1643,7 @@ impl App {
     /// Validates, writes goyo-sync.conf, applies the autostart switch and
     /// restarts the background helper on the worker thread.
     fn save(&mut self) {
+        self.take_disk_changes();
         let (text, _) = match setup::render(&self.fields) {
             Ok(rendered) => rendered,
             Err(bad) => return self.show_bad(bad, true),
@@ -1610,6 +1659,239 @@ impl App {
             self.autostart_saved = self.autostart;
         }
         self.start(Job::Restart);
+    }
+    /// goyo-sync.conf changed on disk since this window read or wrote it
+    /// (the one-button setup of another window, or a hand edit): every
+    /// value this window has not changed is taken from the file, so a save
+    /// never writes back an old value it did not change (above all an
+    /// `identity` that a window opened before the setup shows empty).
+    /// Values changed here win. True if a shown value changed.
+    fn take_disk_changes(&mut self) -> bool {
+        let Ok(Ok(c)) = config::read(&self.dir.join(CONFIG)).map(|t| config::parse(&t)) else {
+            return false;
+        };
+        let disk = Fields::from_config(&c);
+        if self.saved.as_ref() == Some(&disk) {
+            return false;
+        }
+        let base = self.saved.take().unwrap_or_default();
+        let before = self.fields.clone();
+        let f = &mut self.fields;
+        for (mine, old, theirs) in [
+            (&mut f.host, &base.host, &disk.host),
+            (&mut f.remote, &base.remote, &disk.remote),
+            (&mut f.python, &base.python, &disk.python),
+            (&mut f.identity, &base.identity, &disk.identity),
+            (&mut f.interval, &base.interval, &disk.interval),
+            (&mut f.timeout, &base.timeout, &disk.timeout),
+        ] {
+            if mine == old {
+                mine.clone_from(theirs);
+            }
+        }
+        if f.vaults == base.vaults {
+            f.vaults.clone_from(&disk.vaults);
+        }
+        self.saved = Some(disk);
+        if self.fields.vaults != before.vaults {
+            self.rows = self.fields.vaults.iter().map(|p| Row::new(p)).collect();
+            self.selected = None;
+        }
+        let changed = self.fields != before;
+        if changed {
+            self.build();
+        }
+        changed
+    }
+    /// [서버에 설치·업데이트] in the keyless build: the install alone.
+    #[cfg(not(feature = "security-key"))]
+    fn install_ask(&mut self) -> Option<Ask> {
+        match setup::server_config(&self.fields) {
+            Ok(c) => Some(Ask::Install(c)),
+            Err(bad) => {
+                self.show_bad(bad, false);
+                None
+            }
+        }
+    }
+    /// [서버에 설치·업데이트] in the security-key build (keysetup.rs): the
+    /// install, then this PC's dedicated key, the existing one when
+    /// '전용 SSH 키 파일' names a file, else a new one at a free name in
+    /// %USERPROFILE%\.ssh, and its line naming every listed vault whose
+    /// ID is known. One question first.
+    #[cfg(feature = "security-key")]
+    fn install_ask(&mut self) -> Option<Ask> {
+        use crate::keysetup::{Key, Outcome, Plan, comment, free_key};
+        let mut f = self.fields.clone();
+        if !Path::new(&f.identity).is_file() {
+            f.identity.clear();
+        }
+        let c = match setup::server_config(&f) {
+            Ok(c) => c,
+            Err(bad) => {
+                self.show_bad(bad, false);
+                return None;
+            }
+        };
+        let key = match &c.identity {
+            Some(path) => Key::Existing(path.clone()),
+            None => match self.ssh_dir().and_then(|d| free_key(&d)) {
+                Some(path) => Key::New(path),
+                None => {
+                    self.set_server_note(Note::KeyStop(Outcome::NoHome));
+                    return None;
+                }
+            },
+        };
+        // What the vault files and sync folders say now.
+        self.refresh_rows();
+        let (ids, unknown) = self.configured_ids();
+        let computer = std::env::var("COMPUTERNAME").ok();
+        Some(Ask::Setup(
+            c,
+            Plan {
+                key,
+                ids,
+                unknown,
+                comment: comment(computer.as_deref()),
+            },
+        ))
+    }
+    /// Where a new dedicated key goes: `%USERPROFILE%\.ssh`. Tests use
+    /// their own folder, never this account's.
+    #[cfg(all(feature = "security-key", not(test)))]
+    fn ssh_dir(&self) -> Option<PathBuf> {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .map(|p| p.join(".ssh"))
+    }
+    #[cfg(all(feature = "security-key", test))]
+    fn ssh_dir(&self) -> Option<PathBuf> {
+        Some(self.dir.join("profile").join(".ssh"))
+    }
+    /// The IDs the setup's line names: every listed vault's, from its
+    /// file's header or the ID the helper pinned for its folder, and how
+    /// many listed vaults have none yet.
+    #[cfg(feature = "security-key")]
+    fn configured_ids(&self) -> (Vec<[u8; 16]>, usize) {
+        let mut ids: Vec<[u8; 16]> = Vec::new();
+        let mut unknown = 0;
+        for row in &self.rows {
+            let id = crate::keys_gui::vault_header(&row.path)
+                .map(|(id, _)| id)
+                .or(row.key.id);
+            match id {
+                Some(id) if !ids.contains(&id) => ids.push(id),
+                Some(_) => {}
+                None => unknown += 1,
+            }
+        }
+        (ids, unknown)
+    }
+    /// An install's result on the server line.
+    fn installed(&mut self, installed: Installed) {
+        self.set_server_note(match installed {
+            #[cfg(not(feature = "security-key"))]
+            Installed::Pass => Note::Installed,
+            #[cfg(feature = "security-key")]
+            Installed::Pass => Note::Intro,
+            Installed::Refused(_) => Note::Unsafe,
+            Installed::NotPass { line, cause, noisy } => Note::NotPass { line, cause, noisy },
+            Installed::Failed(t) => Note::Trouble(t),
+            Installed::Cancelled => Note::Intro,
+        });
+    }
+    /// The setup's result: on success the key goes into goyo-sync.conf
+    /// (and a running helper restarts to use it); otherwise the line says
+    /// where it stopped, and goyo-sync.conf is not changed.
+    #[cfg(feature = "security-key")]
+    fn set_up(&mut self, set: crate::keysetup::Setup, c: &Config, vaults: usize) -> Option<Ask> {
+        use crate::keysetup::Outcome;
+        let Some(outcome) = set.outcome else {
+            self.installed(set.installed);
+            return None;
+        };
+        let path = set.key.map(|(p, _)| p).unwrap_or_default();
+        let identity = path.to_string_lossy().into_owned();
+        match outcome {
+            Outcome::Ready(_) => {
+                let stored = self.store_identity(&identity);
+                self.set_server_note(Note::KeyReady {
+                    vaults,
+                    saved: stored != Stored::Unsaved,
+                });
+                match stored {
+                    Stored::Written if self.system.running() => self.start(Job::Restart),
+                    Stored::Failed => self.set_run_note(Note::SaveFailed),
+                    _ => {}
+                }
+                None
+            }
+            Outcome::Unreadable { permissions: true } => {
+                self.set_server_note(Note::KeyStop(outcome));
+                Some(Ask::Tell(key_permissions_text(&identity)))
+            }
+            Outcome::Verify(Checked::Failed(t)) if t.cause == Cause::KeyPermissions => {
+                self.set_server_note(Note::Trouble(t));
+                Some(Ask::Tell(key_permissions_text(&identity)))
+            }
+            Outcome::Verify(Checked::Failed(_)) => {
+                self.set_server_note(Note::KeyStop(outcome));
+                None
+            }
+            Outcome::Verify(checked) => {
+                let mut keyed = c.clone();
+                keyed.identity = Some(path);
+                self.checked(checked, &keyed)
+            }
+            Outcome::Failed(t) => {
+                self.set_server_note(Note::Trouble(t));
+                None
+            }
+            Outcome::Refused(_) => {
+                self.set_server_note(Note::Unsafe);
+                None
+            }
+            Outcome::Cancelled => {
+                self.set_server_note(Note::Intro);
+                None
+            }
+            outcome => {
+                self.set_server_note(Note::KeyStop(outcome));
+                None
+            }
+        }
+    }
+    /// The setup's key into goyo-sync.conf as `identity`, and into the
+    /// window's field. Only that value is written (other changes in the
+    /// window stay unsaved), over what the file holds now.
+    #[cfg(feature = "security-key")]
+    fn store_identity(&mut self, identity: &str) -> Stored {
+        self.take_disk_changes();
+        self.fields.identity = identity.to_owned();
+        let h = self.handle(IDENTITY);
+        if h != 0 {
+            unsafe {
+                SetWindowTextW(h, wide(identity).as_ptr());
+            }
+        }
+        let Some(mut saved) = self.saved.clone() else {
+            return Stored::Unsaved;
+        };
+        if saved.identity == identity {
+            return Stored::Same;
+        }
+        saved.identity = identity.to_owned();
+        match setup::render(&saved) {
+            Ok((text, _))
+                if syncfile::replace_file(&self.dir.join(CONFIG), text.as_bytes()).is_ok() =>
+            {
+                self.saved = Some(saved);
+                Stored::Written
+            }
+            _ => Stored::Failed,
+        }
     }
     /// Runs `job` on a worker thread.
     fn start(&mut self, job: Job) {
@@ -1685,18 +1967,13 @@ impl App {
                     Some(Ask::Tell(fingerprint_text(&trusted, &c.host)))
                 }
             },
+            #[cfg(not(feature = "security-key"))]
             Done::Installed(installed) => {
-                self.set_server_note(match installed {
-                    Installed::Pass => Note::Installed,
-                    Installed::Refused(_) => Note::Unsafe,
-                    Installed::NotPass { line, cause, noisy } => {
-                        Note::NotPass { line, cause, noisy }
-                    }
-                    Installed::Failed(t) => Note::Trouble(t),
-                    Installed::Cancelled => Note::Intro,
-                });
+                self.installed(installed);
                 None
             }
+            #[cfg(feature = "security-key")]
+            Done::Setup(set, c, vaults) => self.set_up(set, &c, vaults),
             Done::Listed(Ok(entries), c, keys) => {
                 if entries.is_empty() {
                     self.set_server_note(Note::ServerEmpty);
@@ -2131,10 +2408,17 @@ impl App {
             Note::TrustDeclined => muted(
                 "호스트 키를 저장하지 않았습니다. 지문을 확인할 수 있을 때 다시 '연결 확인'을 누르세요.",
             ),
+            #[cfg(not(feature = "security-key"))]
             Note::Installed => (
                 tr("서버에 스크립트를 설치했습니다(selftest: PASS). 이제 '연결 확인'을 누르세요.").to_owned(),
                 TONE_TEXT,
             ),
+            #[cfg(feature = "security-key")]
+            Note::KeyReady { vaults, saved } => {
+                (crate::keys_gui::ready_text(*vaults, *saved), TONE_TEXT)
+            }
+            #[cfg(feature = "security-key")]
+            Note::KeyStop(outcome) => danger(crate::keys_gui::stop_text(outcome)),
             Note::NotPass { line, cause, noisy } => danger(if *noisy {
                 tr("설치는 됐지만 서버 셸이 PASS 외의 글을 출력합니다. 셸 시작 파일이 대화형 셸에서만 출력하게 고치세요.").to_owned()
             } else if *cause == Cause::PythonMissing {
@@ -2401,6 +2685,7 @@ fn key_permissions_text(identity: &str) -> String {
         &[&identity, &identity],
     )
 }
+#[cfg(not(feature = "security-key"))]
 fn install_question(c: &Config) -> String {
     fill(
         "{} 서버에 동기화 스크립트를 설치하거나 업데이트합니다.\n\n서버 경로: {} (/로 시작하지 않으면 홈 폴더 기준)\n확인: 보낸 스크립트를 먼저 {} -I로 selftest하고, PASS일 때만 기존 스크립트와 바꿉니다.\n\n설치에는 평소의 ssh 로그인(기본 키나 ssh-agent)을 쓰고, '전용 키 파일'은 쓰지 않습니다. 전용 키는 서버에서 동기화 명령만 실행하도록 묶여 있을 수 있기 때문입니다. 계속할까요?",
@@ -2612,7 +2897,12 @@ fn run_asks(h: Hwnd, mut next: Option<Ask>) {
                 }
                 Answer::Path(picked)
             }
+            #[cfg(not(feature = "security-key"))]
             Ask::Install(c) => Answer::Yes(ask_yes(h, &install_question(c))),
+            #[cfg(feature = "security-key")]
+            Ask::Setup(c, plan) => {
+                Answer::Yes(ask_yes(h, &crate::keys_gui::setup_question(c, plan)))
+            }
             Ask::Trust(_, name) => Answer::Yes(ask_yes(h, &trust_question(name))),
             Ask::Close => Answer::Yes(ask_yes(
                 h,
@@ -3449,7 +3739,10 @@ mod tests {
         assert!(text.contains(&line), "{text}");
         assert!(text.contains("vault.goyo (0707-0707)"), "{text}");
         assert!(text.contains("2분 안에"), "{text}");
-        assert!(text.starts_with("서버의 ~/.ssh/authorized_keys") && text.contains("\nrestrict,"));
+        // The button above does it all; the line is for a server kept by
+        // hand.
+        assert!(text.starts_with("'서버에 설치·업데이트'가 이 일을 자동으로 합니다"));
+        assert!(text.contains("\n\n서버의 ~/.ssh/authorized_keys") && text.contains("\nrestrict,"));
         // This PC's own vault file says so: not listed as the server's word.
         assert!(!text.contains("서버 쪽 정보"), "{text}");
         // Not yet in the header, but the app asked for key-file sync, or
@@ -3652,6 +3945,187 @@ mod tests {
         );
     }
 
+    /// An ed25519 public key blob for the scripted ssh-keygen.
+    #[cfg(feature = "security-key")]
+    const SETUP_BLOB: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+
+    /// [서버에 설치·업데이트] in the security-key build (keysetup.rs): one
+    /// question naming the new key, the line and every listed vault's ID;
+    /// "no" runs nothing. "yes": the install, a new key in the profile's
+    /// .ssh (never over a file there), icacls, its line through
+    /// `authorize`, its own check; then goyo-sync.conf holds it, the field
+    /// shows it and the running helper restarts. A second press keeps the
+    /// key and only updates the line. A save from a window that still shows
+    /// the old settings keeps the key and the change made in the window.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn one_button_setup_makes_registers_and_saves_the_key() {
+        use crate::keysetup::{KEY_NAME, pub_file};
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let mut header = b"GOYOVA02".to_vec();
+        header.extend_from_slice(&[0xA7; 16]);
+        header.resize(120, 0);
+        let w = Window::with("setup", |dir| {
+            std::fs::write(dir.join("vault.goyo"), &header).unwrap();
+            let (text, _) = setup::render(&Fields {
+                host: "my-server".into(),
+                vaults: vec![dir.join("vault.goyo"), dir.join("missing.goyo")],
+                ..Fields::default()
+            })
+            .unwrap();
+            std::fs::write(dir.join(crate::CONFIG), text).unwrap();
+            // The first name is taken: the key goes beside it.
+            std::fs::create_dir_all(dir.join("profile").join(".ssh")).unwrap();
+            std::fs::write(dir.join("profile").join(".ssh").join(KEY_NAME), b"other").unwrap();
+        });
+        let ssh = w.t.0.join("profile").join(".ssh");
+        let key = ssh.join(format!("{KEY_NAME}-2"));
+        let conf = w.t.0.join(crate::CONFIG);
+        w.fake.state.lock().unwrap().running = true;
+        // "No": nothing runs, nothing is made.
+        answer(false);
+        w.click(INSTALL);
+        let question = asked().pop().unwrap();
+        assert!(question.contains(&key.display().to_string()), "{question}");
+        assert!(
+            question.contains(&format!("serve --key-sync={}\"", "a7".repeat(16))),
+            "{question}"
+        );
+        assert!(question.contains("authorized_keys.goyo-backup"));
+        assert!(question.contains("금고 1개"), "{question}");
+        assert!(question.contains("ID를 아직 모르는 금고 1개"), "{question}");
+        assert!(w.script.ran().is_empty() && !setup::present(&key));
+        // "Yes".
+        let made = key.clone();
+        w.script.on_run(move |tool, args| {
+            if tool == setup::Tool::Keygen && args.iter().any(|a| a == "-t") {
+                std::fs::write(&made, b"private").unwrap();
+                std::fs::write(pub_file(&made), b"public").unwrap();
+            }
+        });
+        for reply in [
+            out(0, b"PASS\n", ""),
+            out(0, b"", ""),
+            out(0, b"", ""),
+            out(0, format!("ssh-ed25519 {SETUP_BLOB} x\n").as_bytes(), ""),
+            out(0, b"ADDED\n", ""),
+            hello_ok(),
+            list_ok(&[]),
+        ] {
+            w.script.push(reply);
+        }
+        answer(true);
+        w.click(INSTALL);
+        w.wait();
+        asked();
+        assert_eq!(std::fs::read(ssh.join(KEY_NAME)).unwrap(), b"other");
+        let ran = w.script.ran();
+        assert_eq!(ran.len(), 7);
+        let line = String::from_utf8(ran[4].stdin.clone()).unwrap();
+        assert!(line.starts_with("restrict,command=\""));
+        assert!(line.contains(&format!(
+            "--key-sync={}\" ssh-ed25519 {SETUP_BLOB} goyo-sync",
+            "a7".repeat(16)
+        )));
+        let identity = key.to_string_lossy().into_owned();
+        assert_eq!(
+            w.app(|a| a.server_note.clone()),
+            Note::KeyReady {
+                vaults: 1,
+                saved: true
+            }
+        );
+        assert_eq!(w.app(|a| a.fields.identity.clone()), identity);
+        assert_eq!(config::load(&conf).unwrap().identity, Some(key.clone()));
+        assert!(!w.app(|a| a.dirty()));
+        let restarted = calls(&w.fake);
+        assert!(
+            restarted.ends_with(&["stop".to_owned(), "start".to_owned()]),
+            "{restarted:?}"
+        );
+        assert!(!restarted.iter().any(|c| c.starts_with("autostart")));
+
+        // Again, with a vault fewer: the same key, a new line, no restart.
+        w.app(|a| {
+            a.rows.pop();
+            a.fields.vaults.pop();
+            a.build();
+        });
+        for reply in [
+            out(0, b"PASS\n", ""),
+            out(0, format!("ssh-ed25519 {SETUP_BLOB} x\n").as_bytes(), ""),
+            out(0, b"REPLACED\n", ""),
+            hello_ok(),
+            list_ok(&[]),
+        ] {
+            w.script.push(reply);
+        }
+        answer(true);
+        w.click(INSTALL);
+        assert!(asked()[0].contains("있는 키를 씁니다"));
+        w.wait();
+        let ran = w.script.ran();
+        assert_eq!(ran.len(), 12, "no ssh-keygen -t, no icacls");
+        assert_eq!(ran[8].args[0], "-y");
+        assert_eq!(
+            w.app(|a| a.server_note.clone()),
+            Note::KeyReady {
+                vaults: 1,
+                saved: true
+            }
+        );
+        assert!(calls(&w.fake).is_empty());
+
+        // A window that read goyo-sync.conf before the key was saved: it
+        // shows no key. Its save keeps the key on disk and the change made
+        // in the window.
+        w.app(|a| {
+            let mut old = a.saved.clone().unwrap();
+            old.identity.clear();
+            a.saved = Some(old.clone());
+            a.fields = old;
+            a.rows = a.fields.vaults.iter().map(|p| Row::new(p)).collect();
+            a.build();
+        });
+        assert_eq!(w.app(|a| a.fields.identity.clone()), "");
+        w.type_in(HOST, "other-server");
+        w.click(SAVE);
+        w.wait();
+        let saved = config::load(&conf).unwrap();
+        assert_eq!(saved.identity, Some(key.clone()));
+        assert_eq!(saved.host, "other-server");
+        assert_eq!(
+            saved.vaults,
+            [w.t.0.join("vault.goyo"), w.t.0.join("missing.goyo")]
+        );
+        assert_eq!(w.app(|a| a.fields.identity.clone()), identity);
+
+        // A key that stopped the setup: the line says where, goyo-sync.conf
+        // keeps what it had.
+        for reply in [
+            out(0, b"PASS\n", ""),
+            out(0, format!("ssh-ed25519 {SETUP_BLOB} x\n").as_bytes(), ""),
+            out(1, b"UNRESTRICTED\n", ""),
+        ] {
+            w.script.push(reply);
+        }
+        answer(true);
+        w.click(INSTALL);
+        w.wait();
+        assert_eq!(
+            w.app(|a| a.server_note.clone()),
+            Note::KeyStop(crate::keysetup::Outcome::Unrestricted)
+        );
+        assert_eq!(config::load(&conf).unwrap().identity, Some(key));
+        // Every stop has its words.
+        for note in every_note() {
+            if let Note::KeyStop(_) = note {
+                assert!(!w.app(|a| a.note_text(&note).0).is_empty(), "{note:?}");
+            }
+        }
+    }
+
     /// Install (asked first, sent without the dedicated key), the first
     /// connection (asked, one accept-new call, fingerprint shown), a
     /// changed key (explained, never asked), and "이 PC로 가져오기": the
@@ -3675,18 +4149,37 @@ mod tests {
         assert!(w.script.ran().is_empty());
         answer(true);
         w.script.push(out(0, b"PASS\n", ""));
+        // The security-key build goes on with that key: its public key,
+        // its line on the server, its own check (keysetup.rs).
+        #[cfg(feature = "security-key")]
+        for reply in [
+            out(0, format!("ssh-ed25519 {SETUP_BLOB} x\n").as_bytes(), ""),
+            out(0, b"ADDED\n", ""),
+            hello_ok(),
+            list_ok(&[]),
+        ] {
+            w.script.push(reply);
+        }
         w.click(INSTALL);
         w.wait();
+        #[cfg(not(feature = "security-key"))]
         assert_eq!(w.app(|a| a.server_note.clone()), Note::Installed);
-        let ran = w.script.ran();
-        assert_eq!(ran.last().unwrap().input, setup::SERVER_SCRIPT.len());
+        #[cfg(feature = "security-key")]
         assert_eq!(
-            ran.last().unwrap().args.last().unwrap(),
+            w.app(|a| a.server_note.clone()),
+            Note::KeyReady {
+                vaults: 0,
+                saved: false
+            }
+        );
+        let ran = w.script.ran();
+        assert_eq!(ran[0].input, setup::SERVER_SCRIPT.len());
+        assert_eq!(
+            ran[0].args.last().unwrap(),
             &setup::install_command(config::DEFAULT_REMOTE, config::DEFAULT_PYTHON).unwrap()
         );
         assert!(
-            !ran.last()
-                .unwrap()
+            !ran[0]
                 .args
                 .iter()
                 .any(|a| a == "-i" || a.contains("IdentitiesOnly"))
@@ -4374,6 +4867,7 @@ mod tests {
             Note::Intro,
             Note::CheckOk(64),
             Note::TrustDeclined,
+            #[cfg(not(feature = "security-key"))]
             Note::Installed,
             Note::NotPass {
                 line: "FAIL: concurrent PUT with the same expected version".into(),
@@ -4415,6 +4909,28 @@ mod tests {
             Note::PickFirst,
             Note::AutostartOff,
         ];
+        #[cfg(feature = "security-key")]
+        {
+            use crate::keysetup::Outcome;
+            for saved in [false, true] {
+                notes.push(Note::KeyReady { vaults: 8, saved });
+            }
+            for outcome in [
+                Outcome::NoHome,
+                Outcome::Taken,
+                Outcome::Keygen(String::new()),
+                Outcome::Keygen("x".repeat(200)),
+                Outcome::Acl,
+                Outcome::Unreadable { permissions: true },
+                Outcome::Unreadable { permissions: false },
+                Outcome::NotEd25519,
+                Outcome::Unrestricted,
+                Outcome::Script("x".repeat(200)),
+                Outcome::Verify(Checked::Failed(Trouble::of(SyncState::Auth))),
+            ] {
+                notes.push(Note::KeyStop(outcome));
+            }
+        }
         for kind in [
             Kind::Check,
             Kind::Trust,
@@ -4637,6 +5153,7 @@ mod tests {
         );
         #[allow(unused_mut)]
         let mut all = vec![
+            #[cfg(not(feature = "security-key"))]
             install_question(&c),
             trust_question("my-server"),
             fingerprint_text(&keys, "my-server"),
@@ -4680,6 +5197,20 @@ mod tests {
                 ));
             }
             all.push(tr(crate::keys_gui::UNSAFE_LINE).to_owned());
+            use crate::keysetup::{Key, Plan};
+            let key = PathBuf::from(r"C:\Users\<you>\.ssh\goyo-sync_ed25519");
+            for (key, ids, unknown) in [
+                (Key::New(key.clone()), vec![[0xA7; 16]; 8], 0),
+                (Key::Existing(key), vec![], 2),
+            ] {
+                let plan = Plan {
+                    key,
+                    ids,
+                    unknown,
+                    comment: "goyo-sync DESKTOP-AB12CD3".into(),
+                };
+                all.push(crate::keys_gui::setup_question(&c, &plan));
+            }
         }
         all
     }

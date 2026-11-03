@@ -5881,7 +5881,7 @@ pub const N_GONE: &str = "서버에 이 금고의 열쇠 파일이 없습니다(
 pub const N_READY: &str =
     "다른 PC에서 바꾼 열쇠 파일(수정 {e})이 서버에 있습니다. '열쇠 관리'에서 [받기…]를 누르세요.";
 /// What to fix, and that goyo-sync checks again (spec §2.29).
-pub const N_NOKEYSYNC: &str = "서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정의 '강제 명령 줄…'이 만든 줄로 바꾸면 goyo-sync가 2분 안에 다시 확인합니다.";
+pub const N_NOKEYSYNC: &str = "서버가 이 금고의 열쇠 파일 동기화를 받지 않습니다: 서버 authorized_keys의 이 PC 줄(강제 명령)에 --key-sync=<금고 ID>가 없습니다. goyo-sync 설정 창의 '서버에 설치·업데이트'를 누르면 줄을 고치고 2분 안에 다시 확인합니다.";
 pub const N_KEYUP_REFUSED: &str = "goyo-sync나 서버가 이 PC의 열쇠 파일을 받지 않았습니다(형식 또는 크기). 그동안 이 PC의 금고는 서버에 올라가지 않습니다. goyo-sync와 서버 스크립트를 같은 버전으로 업데이트하세요. 업데이트한 뒤 goyo-sync가 다시 시작되거나 '지금 동기화'를 누르면 다시 올립니다.";
 pub const N_HELPER: &str = "이 금고는 열쇠 파일 동기화를 쓰지만, 최근 10분 동안 열쇠 파일 동기화를 지원하는 goyo-sync의 응답이 없습니다. 그 goyo-sync를 실행하세요. 그 전에는 열쇠 파일이 오가지 않고, 끈 경우 서버의 열쇠 파일도 지워지지 않습니다.";
 /// S-KEYSYNC-OFF-ADMIN (spec §7.16 step 7), once, after the deletion line.
