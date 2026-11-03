@@ -1,0 +1,40 @@
+[package]
+name = "goyo-android"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "JNI bridge between the Goyo Vault Android app and the goyo_vault lib"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace: the root package never builds this crate, and its lock
+# file stays apart from the Windows release's.
+[workspace]
+
+[lib]
+name = "goyo_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The security-key build (the default features).
+goyo-vault = { path = "../.." }
+# The JNI bindings: the only crate this bridge adds to the tree.
+jni = { version = "=0.21.1", default-features = false }
+# Already in the lib's tree, at the lib's exact versions.
+sha2 = { version = "=0.10.9", default-features = false }
+zeroize = { version = "=1.8.2", features = ["alloc"] }
+
+[profile.release]
+# Unwind, not abort: every JNI entry catches a panic and turns it into a
+# GoyoException instead of killing the app with the vault open.
+panic = "unwind"
+lto = true
+codegen-units = 1
+strip = true
+overflow-checks = true
+opt-level = 3
+
+[profile.dev]
+# Argon2id over 256 MiB is far too slow unoptimized on a phone.
+opt-level = 3
