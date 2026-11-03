@@ -12685,11 +12685,11 @@ mod tests {
 
             // Two keys: S-SPARE (with S-PIN-DISTINCT once), yes, then No.
             let (vault, key) = create("two");
-            auth.plan(&[Some(k1); 3]);
+            auth.plan(&[Some(k1); 2]);
             let script = auth.clone();
             every_answer(&asked, move |text| {
                 if text.contains(tr(keys_ui::PIN_DISTINCT)) {
-                    script.plan(&[Some(k2); 3]);
+                    script.plan(&[Some(k2); 2]);
                     return true;
                 }
                 false
@@ -12718,7 +12718,7 @@ mod tests {
             // An exclude hit at key 2 (the same key again), then No and
             // S-NOSPARE's yes: one key, and S-ONEKEY in red.
             let (vault, key) = create("one");
-            auth.plan(&[Some(k1); 4]);
+            auth.plan(&[Some(k1); 3]);
             let at_second = std::rc::Rc::new(RefCell::new(String::new()));
             let record = at_second.clone();
             every_answer(&asked, move |text| {
@@ -12797,11 +12797,11 @@ mod tests {
             set(h, CURRENT_PASS, pass);
             set(h, PASS, newpass);
             set(h, CONFIRM, newpass);
-            auth.plan(&[Some(k1); 3]);
+            auth.plan(&[Some(k1); 2]);
             let script = auth.clone();
             every_answer(&asked, move |text| {
                 if text.contains(tr(keys_ui::PIN_DISTINCT)) {
-                    script.plan(&[Some(k2); 3]);
+                    script.plan(&[Some(k2); 2]);
                     return true;
                 }
                 text.starts_with(keys_ui::KEYSON_PLAN)
@@ -12844,7 +12844,7 @@ mod tests {
 
             // Add key 3, paired with the touched key 1 only.
             set(h, CURRENT_PASS, newpass);
-            auth.plan(&[Some(k1), Some(k3), Some(k3), Some(k3)]);
+            auth.plan(&[Some(k1), Some(k3), Some(k3)]);
             every_answer(&asked, |_| false);
             let told = std::rc::Rc::new(RefCell::new(Vec::new()));
             let record = told.clone();
@@ -13795,7 +13795,7 @@ mod tests {
             };
             AUTHENTICATOR.with(|a| *a.borrow_mut() = Some(Arc::new(owned)));
             let (vault, key) = create("quit");
-            auth.plan(&[Some(k1); 3]);
+            auth.plan(&[Some(k1); 2]);
             let ui = unsafe { GetCurrentThreadId() };
             let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
             let (gap, script) = (fake.clone(), auth.clone());
@@ -13913,7 +13913,7 @@ mod tests {
             // [키 추가] with key 1: S-ADD-PAIR's yes, a cancelled touch,
             // S-ADD-PAIR again, No: key 5 is written, paired with key 1.
             set(h, CURRENT_PASS, pass);
-            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), Some(k5), None]);
+            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), None]);
             let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
             let mut first = true;
             every_answer(&asked, move |text| {
@@ -14232,7 +14232,7 @@ mod tests {
             press(h, keys_ui::TOFU_OK);
             with_app(|a| a.command(CHANGE, 0)).unwrap();
             set(h, CURRENT_PASS, pass);
-            auth.plan(&[Some(devices[2]), Some(y), Some(y), Some(y)]);
+            auth.plan(&[Some(devices[2]), Some(y), Some(y)]);
             let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
             every_answer(&asked, |_| false);
             press(h, keys_ui::KEY_ADD);
@@ -14588,7 +14588,7 @@ mod tests {
                 record.borrow_mut().push(text.to_owned());
                 InputAnswer::Accept { checked: false }
             });
-            auth.plan(&[Some(k1), Some(k1), Some(k1)]);
+            auth.plan(&[Some(k1), Some(k1)]);
             press(h, keys_ui::KEY_ON);
             stop_answers();
             // No S-REAUTH-AGAIN dialog: only the change's longer lines after
@@ -14640,13 +14640,7 @@ mod tests {
                 record.borrow_mut().push(text.to_owned());
                 InputAnswer::Accept { checked: false }
             });
-            auth.plan(&[
-                Some(devices[0]),
-                Some(k5),
-                Some(k5),
-                Some(k5),
-                Some(devices[0]),
-            ]);
+            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), Some(devices[0])]);
             let seen = fake.seen().len();
             press(h, keys_ui::KEY_ADD);
             stop_answers();
@@ -14657,8 +14651,8 @@ mod tests {
                 status()
             );
             let calls = fake.seen();
-            assert_eq!(calls.len(), seen + 5, "{}", status());
-            assert_eq!(calls[seen + 4].credentials.len(), 1);
+            assert_eq!(calls.len(), seen + 4, "{}", status());
+            assert_eq!(calls[seen + 3].credentials.len(), 1);
             with_app(|a| {
                 let o = a.session.as_ref().unwrap().keys_overview();
                 assert_eq!(numbers(&o), [1, 2, 3, 4, 5], "{}", *a.status);
@@ -14727,7 +14721,7 @@ mod tests {
             // life, and S-REAUTH-AGAIN is cancelled.
             let k5 = fake.plug(Device::default());
             set(h, CURRENT_PASS, pass);
-            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), Some(k5), None]);
+            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), None]);
             let pairs = std::rc::Rc::new(Cell::new(0));
             let late = clock.clone();
             let counted = pairs.clone();
@@ -14765,7 +14759,7 @@ mod tests {
             // A lock while S-ADD-PAIR is open: the lock's line stays.
             let k6 = fake.plug(Device::default());
             set(h, CURRENT_PASS, pass);
-            auth.plan(&[Some(devices[0]), Some(k6), Some(k6), Some(k6)]);
+            auth.plan(&[Some(devices[0]), Some(k6), Some(k6)]);
             every_answer(&asked, |text| {
                 if text == keys_ui::ADD_PAIR {
                     with_app(|a| a.lock("synthetic lock", true));
@@ -14958,7 +14952,7 @@ mod tests {
             set(h, CURRENT_PASS, pass);
             every_answer(&asked, |_| false);
             every_input(|_, _, _| InputAnswer::Accept { checked: false });
-            auth.plan(&[Some(devices[0]), Some(k5), Some(k5), Some(k5)]);
+            auth.plan(&[Some(devices[0]), Some(k5), Some(k5)]);
             press(h, keys_ui::KEY_ADD);
             stop_answers();
             with_app(|a| {
@@ -14983,7 +14977,7 @@ mod tests {
                 }
             });
             every_answer(&asked, |_| false);
-            auth.plan(&[Some(devices[1]), Some(k5), Some(k6), Some(k6), Some(k6)]);
+            auth.plan(&[Some(devices[1]), Some(k5), Some(k6), Some(k6)]);
             let seen = fake.seen().len();
             press(h, keys_ui::KEY_ADD);
             stop_answers();
@@ -14994,7 +14988,7 @@ mod tests {
                 assert_eq!(texts[1], fill(keys_ui::MUSTTOUCH, &[&"5"]));
             }
             let calls = fake.seen();
-            assert_eq!(calls.len(), seen + 5, "{}", status());
+            assert_eq!(calls.len(), seen + 4, "{}", status());
             assert_eq!(calls[seen].credentials.len(), 4);
             assert_eq!(calls[seen + 1].credentials.len(), 1);
             with_app(|a| {

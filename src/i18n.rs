@@ -2024,8 +2024,8 @@ pub const EN_SK: &[(&str, &str)] = &[
         "Creates a vault that opens with the password and key file, without security keys.",
     ),
     (
-        "보안 키 {n} 등록: Windows 창이 세 번 열립니다(등록 1번, 확인 2번). 매번 키를 터치하고 PIN을 입력하세요. PIN이 없는 키는 첫 창에서 PIN을 정합니다. NFC 리더에 댈 키는 먼저 USB에서 뽑으세요.",
-        "Registering security key {n}: a Windows window opens three times (registration once, check twice). Touch the key and enter its PIN each time. A key without a PIN gets one in the first window. Unplug a key from USB before holding it to an NFC reader.",
+        "보안 키 {n} 등록: Windows 창이 두 번 열립니다(등록 1번, 확인 1번). 매번 키를 터치하고 PIN을 입력하세요. PIN이 없는 키는 첫 창에서 PIN을 정합니다. NFC 리더에 댈 키는 먼저 USB에서 뽑으세요.",
+        "Registering security key {n}: a Windows window opens twice (registration once, check once). Touch the key and enter its PIN each time. A key without a PIN gets one in the first window. Unplug a key from USB before holding it to an NFC reader.",
     ),
     (
         "키마다 다른 PIN을 쓰세요. 모든 키에 같은 PIN을 쓰면, 잃어버린 키와 그 PIN을 아는 사람이 다른 키를 잠깐 손에 넣는 것만으로 그 키를 복제할 수 있습니다.",

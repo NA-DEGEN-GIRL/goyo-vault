@@ -491,8 +491,6 @@ pub struct Registration {
     pub registered: u64,
     pub pin: bool,
     cred_id: Option<Vec<u8>>,
-    /// GA #1's output and UV.
-    first: Option<(Box<Zeroizing<[u8; 32]>>, bool)>,
 }
 impl Registration {
     /// Step 1: the seed, drawn before MakeCredential, and its request:
@@ -538,7 +536,6 @@ impl Registration {
             registered,
             pin,
             cred_id: None,
-            first: None,
         };
         Ok((registration, request))
     }
@@ -548,7 +545,7 @@ impl Registration {
         self.cred_id = Some(raw.cred_id.clone());
         Ok(())
     }
-    /// The request of step 3 or 4: the new credential alone, with its salt.
+    /// The request of step 3: the new credential alone, with its salt.
     pub fn check_request(&self, owner: isize) -> Result<AssertRequest> {
         let cred_id = self.cred_id.clone().ok_or(UNVERIFIABLE)?;
         AssertRequest::new(
@@ -557,21 +554,19 @@ impl Registration {
             self.pin,
         )
     }
-    /// The answer of step 3 (None back) or of step 4, which must repeat
-    /// step 3's output and UV: the new key.
+    /// The answer of step 3: the new key. One check, not two (the user's
+    /// decision, 0.11.0): hmac-secret is deterministic per credential
+    /// (CTAP2's CredRandom), real YubiKey 5 keys gave the same output at
+    /// every touch, over USB and NFC, and a second check cost every key a
+    /// third Windows window. A key that broke this would fail at the next
+    /// unlock, so register two or more and try each once.
     pub fn checked(
         &mut self,
         raw: RawAssertion,
         req: &AssertRequest,
     ) -> std::result::Result<Option<NewKey>, FidoError> {
         let touch = check_assertion(raw, req, true)?;
-        let Some((first, uv)) = self.first.take() else {
-            self.first = Some((touch.first, touch.uv));
-            return Ok(None);
-        };
-        if !ct_eq(first.as_slice(), touch.first.as_slice()) || uv != touch.uv {
-            return Err(FidoError::Nondeterministic);
-        }
+        let uv = touch.uv;
         Ok(Some(NewKey {
             cred_id: touch.cred_id,
             seed: self.seed,
@@ -582,7 +577,7 @@ impl Registration {
         }))
     }
 }
-/// The three calls of a registration one after the other, each with its
+/// The two calls of a registration one after the other, each with its
 /// own cancel token, for the tests (a debug build only). The app runs each
 /// as its own ceremony, always in PIN mode; `pin` false makes the no-PIN
 /// registration of a pre-release key file, which the tests of such files

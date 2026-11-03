@@ -36,7 +36,7 @@ To switch to a keyless build, first use **Turn off keys** in the security-key bu
 **A vault you already use.** In 'Key management', check **Also change the password (recommended)**, enter the current password, and press **Turn on security keys**. The data key changes too.
 
 - **Why change the password too:** the key files made before keys were on, and their backups (the 0.8 key file, a `GOYOKE03` from an earlier password change), open with the password alone. If you keep the password, whoever finds such a copy can keep guessing that password offline, and once they guess it only a registered key (and its PIN) is left. If you keep the password, delete those old copies.
-- **Registration:** each key opens three Windows windows (one registration, two checks). Touch the same key each time and enter its PIN. For a key without a PIN, Windows has you set one in the first window.
+- **Registration:** each key opens two Windows windows (one registration, one check). Touch the same key each time and enter its PIN. For a key without a PIN, Windows has you set one in the first window.
 - **NFC:** unplug a key you will hold to an NFC reader **before** the Windows window opens. If it is plugged into USB when the window opens, Windows uses that connection and the reader gets no answer. Over NFC too, type the PIN on screen first, then hold the key to the reader.
 - **Register 2 or more, together, on one PC.** Keys registered together **pair** with each other (below). With only one key, every unlock shows a red warning.
 - **Give every key its own PIN.** With one PIN on every key, whoever holds a lost key and its PIN can clone another key just by getting hold of it briefly.
@@ -140,7 +140,7 @@ That place's PC cannot unlock until a key gets there, whatever the design. The r
 
 At home (A) are PC_A and security keys 1 and 2; at the office (B) are PC_B and security keys 3 and 4; both PCs sync this vault.
 
-**Setup.** Register all four keys together on one PC (three Windows windows per key, 12 in all). Every key is paired with every other. Make a key backup, and carry the key file to the other PC by USB (that PC asks for this PC's key check code the first time it opens). Keep keys 1 and 2 at home, 3 and 4 at the office.
+**Setup.** Register all four keys together on one PC (two Windows windows per key, 8 in all). Every key is paired with every other. Make a key backup, and carry the key file to the other PC by USB (that PC asks for this PC's key check code the first time it opens). Keep keys 1 and 2 at home, 3 and 4 at the office.
 
 **Key 1 lost at home.**
 1. PC_A: **Remove a lost key** → security key 1 → the date → "Could someone else know the PIN or the password?" **Not sure** (the password change turns on; choose a new password) → the current password → **one touch of key 2**. PC_A is protected from this moment. No key is carried.

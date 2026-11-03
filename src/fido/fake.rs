@@ -649,20 +649,22 @@ mod tests {
                 },
                 FidoError::StoreFull,
             ),
-            (
-                Device {
-                    fault: Fault::Nondeterministic,
-                    ..Device::default()
-                },
-                FidoError::Nondeterministic,
-            ),
         ] {
             let fake = Fake::new(None);
             let i = fake.plug(device);
             fake.touch(Some(i));
             assert_eq!(register(&fake, &id, 1, 0, false, vec![]).err(), Some(error));
         }
-        // A plain registration step by step.
+        // One check, not two (0.11.0): a key that would not repeat its
+        // output is not caught at registration.
+        let fake = Fake::new(None);
+        let i = fake.plug(Device {
+            fault: Fault::Nondeterministic,
+            ..Device::default()
+        });
+        fake.touch(Some(i));
+        assert!(register(&fake, &id, 1, 0, false, vec![]).is_ok());
+        // A plain registration step by step: one MakeCredential, one check.
         let fake = Fake::new(None);
         let fresh = fake.plug(Device::default());
         fake.touch(Some(fresh));
@@ -673,10 +675,6 @@ mod tests {
         assert!(check_credential(&raw).is_ok());
         reg.made(&raw).unwrap();
         let check = reg.check_request(9).unwrap();
-        let raw = fake
-            .get_assertion(&check, &fake.new_cancel().unwrap())
-            .unwrap();
-        assert!(reg.checked(raw, &check).unwrap().is_none());
         let raw = fake
             .get_assertion(&check, &fake.new_cancel().unwrap())
             .unwrap();

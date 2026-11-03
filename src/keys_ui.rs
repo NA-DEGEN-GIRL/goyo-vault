@@ -146,7 +146,7 @@ pub const CREATE_NOTE: &str = "열 때마다 등록한 보안 키를 연결하�
 pub const SK_OFF_NOTE: &str = "보안 키 없이 비밀번호와 열쇠 파일로 여는 금고를 만듭니다.";
 /// S-REGISTER: always with the key's PIN, which Windows makes the user set
 /// on a key without one (real key, spec §2.28).
-pub const REGISTER: &str = "보안 키 {n} 등록: Windows 창이 세 번 열립니다(등록 1번, 확인 2번). 매번 키를 터치하고 PIN을 입력하세요. PIN이 없는 키는 첫 창에서 PIN을 정합니다. NFC 리더에 댈 키는 먼저 USB에서 뽑으세요.";
+pub const REGISTER: &str = "보안 키 {n} 등록: Windows 창이 두 번 열립니다(등록 1번, 확인 1번). 매번 키를 터치하고 PIN을 입력하세요. PIN이 없는 키는 첫 창에서 PIN을 정합니다. NFC 리더에 댈 키는 먼저 USB에서 뽑으세요.";
 /// S-PIN-DISTINCT, asked with the first S-SPARE.
 pub const PIN_DISTINCT: &str = "키마다 다른 PIN을 쓰세요. 모든 키에 같은 PIN을 쓰면, 잃어버린 키와 그 PIN을 아는 사람이 다른 키를 잠깐 손에 넣는 것만으로 그 키를 복제할 수 있습니다.";
 /// S-SPARE.

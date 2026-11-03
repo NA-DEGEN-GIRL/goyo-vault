@@ -602,10 +602,6 @@ ROWS = [
      '    if auth_data.len() < 37 || auth_data[..32] != rp_id_hash() || auth_data[32] & UP == 0 {',
      '    if auth_data.len() < 37 {',
      [FIDO_T + 'assertions_are_checked_field_by_field']),
-    ('a registration\'s GA #2 equals GA #1', 4, 'feature', 'lib', FIDO,
-     '        if !ct_eq(first.as_slice(), touch.first.as_slice()) || uv != touch.uv {',
-     '        if uv != touch.uv {',
-     [FAKE_T + 'credprotect_pin_and_flags_behave_as_ctap_and_windows']),
     # Stage 3's rules, caught here by a forger test of stage 4 and by a
     # test of the keyless build.
     ('P3 (b) against the anchor (S-ANCHOR-RELIST)', 3, 'both', 'lib', ANCHOR,
