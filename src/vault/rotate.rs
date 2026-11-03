@@ -1834,6 +1834,10 @@ mod tests {
     /// nothing changed, and only this one case says so. The vault file is
     /// V_probe under the old key, which the session and the next unlock
     /// keep using, with nothing to report.
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: a read-only file cannot be replaced there"
+    )]
     #[test]
     fn a_key_file_that_cannot_be_replaced_changes_nothing() {
         let pc = Pc::new();
@@ -2121,6 +2125,10 @@ mod tests {
     /// it): the change goes on with S4 and S5, the save that later works
     /// seals it, a second change in the same session starts from it, and the
     /// probe never completes again (spec §5.5 S3, I11).
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: an open handle blocks a replace there"
+    )]
     #[test]
     fn a_vault_file_saved_later_still_completes_the_change() {
         let pc = Pc::new();
@@ -2842,6 +2850,7 @@ mod tests {
     /// stick unplugged, the entry waits and key changes are held; a path on
     /// a network share is never read; and when the stick is gone for good,
     /// the user discards the entry after a Reauth (S23-2 #2).
+    #[cfg_attr(not(windows), ignore = "Windows UNC paths")]
     #[test]
     fn a_change_that_landed_in_a_key_file_elsewhere() {
         for unplugged in [false, true] {

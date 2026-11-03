@@ -1,4 +1,8 @@
-//! RustCrypto primitives. No OS cryptography, OS RNG, clock-seeded PRNG or network.
+//! RustCrypto primitives. No OS cryptography, clock-seeded PRNG or network.
+//! Randomness: on Windows (x64) the CPU's RDSEED only, no OS RNG; on Linux
+//! and Android (the Android app, aarch64) the kernel CSPRNG through the
+//! getrandom(2) system call, since ARM has no RDSEED that an app may use.
+//! Either source goes through the same SHA-512 conditioning (`random_into`).
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -183,29 +187,50 @@ pub fn random_into(out: &mut [u8]) -> Result<()> {
         return Ok(());
     }
     for chunk in out.chunks_mut(64) {
-        // Collect 1024 raw hardware bits per conditioned 512-bit block. This
-        // does not create entropy: CPU/microcode and the machine remain trusted.
+        // Collect 1024 raw bits per conditioned 512-bit block. This does not
+        // create entropy: CPU/microcode (or the kernel) and the machine
+        // remain trusted.
         let mut raw = Zeroizing::new([0u8; 128]);
-        let mut previous = None;
-        for part in raw.as_chunks_mut::<8>().0 {
-            let mut value = rdseed()?;
-            if value == 0 || value == u64::MAX || previous == Some(value) {
-                value.zeroize();
-                return Err("CPU 난수 검사가 실패했습니다. 작업을 중단했습니다.");
-            }
-            previous = Some(value);
-            part.copy_from_slice(&value.to_le_bytes());
-            value.zeroize();
-        }
+        raw_bits(&mut raw)?;
         let mut digest = Sha512::digest(raw.as_slice());
         chunk.copy_from_slice(&digest[..chunk.len()]);
         digest.as_mut_slice().zeroize();
-        previous.zeroize();
     }
     Ok(())
 }
+/// 1024 raw bits from RDSEED, each 64-bit draw checked for the stuck values
+/// of a broken source.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn raw_bits(raw: &mut [u8; 128]) -> Result<()> {
+    let mut previous = None;
+    for part in raw.as_chunks_mut::<8>().0 {
+        let mut value = rdseed()?;
+        if value == 0 || value == u64::MAX || previous == Some(value) {
+            value.zeroize();
+            return Err("CPU 난수 검사가 실패했습니다. 작업을 중단했습니다.");
+        }
+        previous = Some(value);
+        part.copy_from_slice(&value.to_le_bytes());
+        value.zeroize();
+    }
+    previous.zeroize();
+    Ok(())
+}
+/// 1024 bits from the kernel CSPRNG (getrandom(2), blocking until the pool
+/// was seeded); a failure fails the draw, never a weaker source. Its output
+/// is already a CSPRNG's, so there is no stuck-value check: the SHA-512
+/// conditioning is kept only so both platforms share one construction.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn raw_bits(raw: &mut [u8; 128]) -> Result<()> {
+    crate::posix::getrandom(raw).map_err(
+        |_| "커널 난수(getrandom)를 쓸 수 없습니다. 약한 난수로 대체하지 않고 작업을 중단했습니다.",
+    )
+}
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(
+    target_arch = "x86_64",
+    not(any(target_os = "linux", target_os = "android"))
+))]
 fn rdseed() -> Result<u64> {
     if !std::is_x86_feature_detected!("rdseed") {
         return Err("RDSEED를 지원하는 x64 CPU가 필요합니다. 약한 난수로 대체하지 않습니다.");
@@ -220,7 +245,7 @@ fn rdseed() -> Result<u64> {
     }
     Err("CPU 난수 공급을 사용할 수 없습니다. 잠시 후 다시 시도하세요.")
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_os = "linux", target_os = "android")))]
 fn rdseed() -> Result<u64> {
     Err("x64 CPU만 지원합니다.")
 }

@@ -82,7 +82,9 @@ pub enum FileError {
 }
 fn classify(e: &io::Error) -> FileError {
     match e.raw_os_error() {
-        Some(5 | 32) => FileError::Busy,
+        // ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: another handle.
+        // On Unix the same numbers are EIO and EPIPE, which are no lock.
+        Some(5 | 32) if cfg!(windows) => FileError::Busy,
         _ if e.kind() == io::ErrorKind::NotFound => FileError::Missing,
         _ => FileError::Io,
     }
@@ -104,7 +106,7 @@ fn reparse_point(m: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     m.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
 }
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn reparse_point(m: &fs::Metadata) -> bool {
     m.file_type().is_symlink()
 }
@@ -203,13 +205,23 @@ fn open_plain(path: &Path) -> Result<File, FileError> {
     }
     Ok(f)
 }
-#[cfg(not(windows))]
+/// On Unix: O_NOFOLLOW (a symlink fails the open) and O_NONBLOCK (a FIFO
+/// cannot hang it), then the handle's own fstat must say regular file.
+#[cfg(unix)]
 fn open_plain(path: &Path) -> Result<File, FileError> {
-    let m = fs::symlink_metadata(path).map_err(|e| classify(&e))?;
-    if !m.file_type().is_file() {
+    let f = crate::posix::open_nofollow(path).map_err(|e| match e.raw_os_error() {
+        Some(40) => FileError::Io, // ELOOP: a symlink
+        _ => classify(&e),
+    })?;
+    if !f
+        .metadata()
+        .map_err(|e| classify(&e))?
+        .file_type()
+        .is_file()
+    {
         return Err(FileError::Io);
     }
-    File::open(path).map_err(|e| classify(&e))
+    Ok(f)
 }
 
 static TEMPS: AtomicU64 = AtomicU64::new(0);
@@ -282,9 +294,13 @@ fn rename_over(temp: &Path, target: &Path) -> Result<(), u32> {
     }
     Ok(())
 }
-#[cfg(not(windows))]
+/// rename(2), atomic over an existing target; then the folder is flushed
+/// so the rename survives a power cut (MOVEFILE_WRITE_THROUGH on Windows).
+#[cfg(unix)]
 fn rename_over(temp: &Path, target: &Path) -> Result<(), u32> {
-    fs::rename(temp, target).map_err(|_| 0)
+    fs::rename(temp, target).map_err(|_| 0u32)?;
+    let _ = crate::posix::sync_parent(target);
+    Ok(())
 }
 /// Removes this side's leftover temp files from `dir` (`prefixes` is
 /// [`APP_TEMPS`] or [`HELPER_TEMPS`]) and returns how many. Call it only
@@ -885,6 +901,10 @@ mod tests {
         assert_eq!(parse_hex::<8>(&text), None);
         assert_eq!(parse_hex::<1>("g0"), None);
     }
+    #[cfg_attr(
+        not(windows),
+        ignore = "no creation time on Unix, and its mtime is coarse"
+    )]
     #[test]
     fn stamp_changes_on_every_replace() {
         let t = Temp::new();
@@ -1036,6 +1056,7 @@ mod tests {
         assert!(t.file("status.dir.goyotmp").is_dir());
         assert_eq!(remove_own_temps(&t.file("missing"), &APP_TEMPS), 0);
     }
+    #[cfg_attr(not(windows), ignore = "Windows paths")]
     #[test]
     fn folder_and_copy_names() {
         let v = Path::new(r"D:\GoyoVault\vault.goyo");

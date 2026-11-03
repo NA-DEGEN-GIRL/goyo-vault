@@ -102,8 +102,19 @@ pub const EN: &[(&str, &str)] = &[
         "Locked: the Windows session was locked or its connection changed.",
     ),
     ("Windows 종료로 잠갔습니다.", "Locked for Windows shutdown."),
-    ("Windows에서만 지원합니다.", "Only Windows is supported."),
     ("x64 CPU만 지원합니다.", "Only x64 CPUs are supported."),
+    (
+        "커널 난수(getrandom)를 쓸 수 없습니다. 약한 난수로 대체하지 않고 작업을 중단했습니다.",
+        "The kernel's random number source (getrandom) is unavailable. The operation stopped; no weaker source is used.",
+    ),
+    (
+        "열쇠 기록 폴더는 절대 경로여야 합니다.",
+        "The key record folder must be an absolute path.",
+    ),
+    (
+        "열쇠 기록 폴더는 한 번만 정할 수 있습니다.",
+        "The key record folder can be set only once.",
+    ),
     ("{} / {} 페이지", "Page {} / {}"),
     ("{}초 뒤 다시 가려집니다.", "Hidden again in {} s."),
     ("‹ 뒤로", "‹ Back"),
