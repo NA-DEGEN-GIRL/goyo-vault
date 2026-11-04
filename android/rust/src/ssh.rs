@@ -240,17 +240,31 @@ impl Transport for AndroidTransport {
         #[cfg(not(test))]
         let check_local = true;
         let started = Instant::now();
-        let outcome = rt.block_on(run(
-            addrs,
-            handler,
-            key,
-            &target,
-            request,
-            check_local,
-            &cancel,
-            started,
-            beat,
-        ));
+        // The read loop cuts a slow answer at the timeout itself; this
+        // bounds every other step too (a server that stalls the login).
+        let outcome = rt.block_on(async {
+            let all = run(
+                addrs,
+                handler,
+                key,
+                &target,
+                request,
+                check_local,
+                &cancel,
+                started,
+                beat,
+            );
+            match tokio::time::timeout(target.timeout + Duration::from_secs(1), all).await {
+                Ok(ran) => ran,
+                Err(_) => Ran::Out(Output {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    log: Vec::new(),
+                    code: None,
+                    killed: Some(Killed::Timeout),
+                }),
+            }
+        });
         rt.shutdown_timeout(Duration::from_millis(100));
         match outcome {
             Ran::Out(out) => Ok(out),
