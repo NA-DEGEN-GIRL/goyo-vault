@@ -16,12 +16,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -255,12 +261,43 @@ private fun Detail(index: Int) {
     }
 }
 
+/** The PC's kind presets (src/main.rs KIND_PRESETS); any other text is kept as typed. */
+private val KIND_PRESETS = listOf("비밀번호", "니모닉", "프라이빗키", "API 키")
+
+/** The kind: a drop-down of the PC's presets that also takes a typed kind. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun KindField(kind: TextFieldState) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            state = kind,
+            label = { Text("종류") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            lineLimits = TextFieldLineLimits.SingleLine,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            KIND_PRESETS.forEach { name ->
+                DropdownMenuItem(
+                    text = { Text(name) },
+                    onClick = {
+                        kind.setTextAndPlaceCursorAtEnd(name)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun Edit(index: Int) {
     val context = LocalContext.current
     BackHandler { AppState.screen = if (index < 0) Screen.List else Screen.Detail(index) }
     val title = rememberTextFieldState()
-    val kind = rememberTextFieldState()
+    // A new entry starts as 비밀번호, as on the PC.
+    val kind = rememberTextFieldState(if (index < 0) KIND_PRESETS[0] else "")
     val secret = rememberTextFieldState()
     val notes = rememberTextFieldState()
     // The OTP field starts empty: an entry's secret never comes to the
@@ -296,7 +333,7 @@ private fun Edit(index: Int) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(if (index < 0) "새 항목" else "항목 편집", style = MaterialTheme.typography.titleLarge)
         OutlinedTextField(state = title, label = { Text("이름") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(state = kind, label = { Text("종류") }, modifier = Modifier.fillMaxWidth())
+        KindField(kind)
         OutlinedSecureTextField(
             state = secret,
             label = { Text("비밀정보") },
