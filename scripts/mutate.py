@@ -131,8 +131,8 @@ WIN = 'src/win.rs'
 SERVER = 'server/goyo-sync-server.py'
 SELFTEST = BIN_T + 'server_selftest_passes'
 # Stage 6, the helper's key steps and the wire (goyo-sync bin tests).
-HELPER_KEYS = 'src/bin/goyo-sync/engine/keys.rs'
-ENGINE = 'src/bin/goyo-sync/engine.rs'
+HELPER_KEYS = 'src/syncengine/keys.rs'
+ENGINE = 'src/syncengine.rs'
 SYNCFILE_KEYS = 'src/syncfile/keys.rs'
 SYNCWIRE = 'src/syncwire.rs'
 KEYSYNC = 'src/vault/keysync.rs'
@@ -1767,7 +1767,7 @@ ROWS = [
      '        && key_ignored(&out.log, &identity) && false\n',
      ['setup::tests::an_ignored_dedicated_key_is_refused']),
     ("U only ssh's words about the dedicated key itself count", 10, 'both', 'sync',
-     'src/bin/goyo-sync/transport.rs',
+     'src/syncengine/transport.rs',
      '        file.is_none_or(|f| f == ours)',
      '        file.is_none_or(|_| true)',
      ['setup::tests::an_ignored_dedicated_key_is_refused']),

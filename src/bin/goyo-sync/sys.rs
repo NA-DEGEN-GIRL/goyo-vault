@@ -573,11 +573,11 @@ struct ByHandleInfo {
     index_high: u32,
     index_low: u32,
 }
-/// What the upload gate needs to know about an open file.
+/// What the ssh log's check needs to know about an open file (the upload
+/// gate has its own in the lib's syncengine).
 pub struct FileInfo {
     pub attributes: u32,
     pub links: u32,
-    pub size: u64,
     /// The volume serial number and the file index: which file this is,
     /// whatever name it has now.
     pub id: (u32, u64),
@@ -600,7 +600,6 @@ pub fn file_info(file: &File) -> io::Result<FileInfo> {
     Ok(FileInfo {
         attributes: info.attributes,
         links: info.links,
-        size: (u64::from(info.size_high) << 32) | u64::from(info.size_low),
         id: (
             info.volume,
             (u64::from(info.index_high) << 32) | u64::from(info.index_low),

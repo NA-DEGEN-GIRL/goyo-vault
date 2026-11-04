@@ -6,9 +6,9 @@
 //! it sends exactly `kreq`'s bytes to the op `kreq` names and writes what
 //! the server answered into `kview`, where the app decides. It never opens
 //! a key file, and it does not know where the live one is.
+use super::transport::Transport;
 use super::{Gate, Gated, Held, Pass, RETRY_HELD, Refusal, Vault, opened, passed};
-use crate::transport::Transport;
-use goyo_vault::{
+use crate::{
     syncfile::{
         self, FileError, INCOMING, INCOMING_MAGIC, KEY_REQUEST, KEY_REQUEST_HEADER, KEY_VIEW,
         KeyOp, KeyOutcome, KeyView, MAX_KEY_REQUEST, MAX_KEY_VIEW, MAX_PRUNE_REQUEST,
@@ -39,14 +39,15 @@ pub const BEHIND_HOURLY: u64 = 3600;
 /// log says so once.
 pub const VIEW_STUCK: u32 = 5;
 
-// How often a test's helper opened `kreq` or `kview` on this thread: the
-// listing in `Engine::due` must open neither (S6R1 #25).
-#[cfg(test)]
 thread_local! {
+    /// How often the helper opened `kreq` or `kview` on this thread, for
+    /// the tests: the listing in `Engine::due` must open neither (S6R1
+    /// #25). Counted in every build, since the tests that read it are the
+    /// goyo-sync bin's, which build this lib without cfg(test).
+    #[doc(hidden)]
     pub static KEY_OPENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 fn count_open() {
-    #[cfg(test)]
     KEY_OPENS.with(|n| n.set(n.get() + 1));
 }
 

@@ -81,6 +81,21 @@ pub(crate) fn open_nofollow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Opens `path` read-write, creating it (0600) when missing, without
+/// following a symlink at its last component and without blocking on a
+/// FIFO: goyo-sync's per-folder pass lock (`helper.lock`), whose handle is
+/// then checked to be a single-link regular file.
+pub(crate) fn open_lock_nofollow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(path)
+}
+
 /// Flushes the folder that holds `path`, so a rename into it survives a
 /// power cut (a rename is only folder metadata). Errors are returned for
 /// the caller to ignore or not; some file systems refuse fsync of a folder.
