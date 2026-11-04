@@ -438,9 +438,9 @@ impl Entry {
         {
             return Err("NUL 문자는 저장할 수 없습니다.");
         }
-        // Only the canonical blob: a file that holds another form is
-        // refused, so two copies never differ in form alone.
-        if self.has_otp() && !Otp::decode(&self.otp).is_ok_and(|o| *o.encode() == *self.otp) {
+        // Only the canonical blob: Otp::decode takes nothing but the exact
+        // bytes Otp::encode writes, so two copies never differ in form alone.
+        if self.has_otp() && Otp::decode(&self.otp).is_err() {
             return Err(OTP_UNREADABLE);
         }
         Ok(())
