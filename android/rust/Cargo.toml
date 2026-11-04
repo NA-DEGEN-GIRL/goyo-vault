@@ -21,6 +21,11 @@ path = "src/lib.rs"
 goyo-vault = { path = "../.." }
 # The JNI bindings: the only crate this bridge adds to the tree.
 jni = { version = "=0.21.1", default-features = false }
+# Sync (stage 3): the SSH client of the Android transport, with ring as
+# its crypto (no aws-lc, no RSA, no zlib), and the tokio runtime it runs
+# on. Only this crate depends on them: the Windows build never sees them.
+russh = { version = "=0.57.1", default-features = false, features = ["ring"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "net", "time", "macros"] }
 # Already in the lib's tree, at the lib's exact versions.
 sha2 = { version = "=0.10.9", default-features = false }
 zeroize = { version = "=1.8.2", features = ["alloc"] }

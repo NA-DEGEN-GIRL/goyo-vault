@@ -12,6 +12,16 @@
 //! output into zeroized memory and then overwrites the Java array with
 //! zeros; Kotlin zeroes its own copies too. Every entry point catches a
 //! panic and throws `app.goyovault.GoyoException` with a Korean text.
+#[cfg(test)]
+mod engine_tests;
+mod hostkey;
+mod jni_sync;
+mod line;
+mod notice;
+mod ssh;
+mod syncrun;
+mod tailnet;
+
 use goyo_vault::{
     crypto, fido,
     vault::{self, Entry, Prepared, Session, VaultClass},
@@ -83,6 +93,11 @@ fn with_session<T>(
 }
 const LOCKED: &str = "금고가 잠겼습니다. 다시 여세요.";
 const NOT_SUPPORTED_YET: &str = "이 상태의 금고는 아직 Android 앱에서 열 수 없습니다. PC의 고요 금고에서 먼저 연 뒤 다시 가져오세요.";
+/// A key file change from another device waits for its gate (a key code
+/// or a pick), which this app has no screen for yet: as on a PC that has
+/// not answered it, the vault stays unopened and the server's key file
+/// stays in the sync folder.
+const GATE_ON_PC: &str = "다른 기기에서 바꾼 열쇠 파일이 확인을 기다립니다. 이 앱에는 아직 그 확인 화면이 없으니 PC에서 먼저 처리하세요(고요 금고의 열쇠 관리). 그 뒤 두 파일을 다시 가져오세요.";
 
 /// A core refusal as text, its `{…}` slots filled when the core kept values.
 fn text(e: &'static str) -> String {
@@ -259,7 +274,7 @@ pub extern "system" fn Java_app_goyovault_Native_prepare<'l>(
             return Err(NOT_SUPPORTED_YET.to_owned());
         }
         if prepared.login_gate().is_some() {
-            return Err(NOT_SUPPORTED_YET.to_owned());
+            return Err(GATE_ON_PC.to_owned());
         }
         let request = prepared.unlock_request(0);
         insert(Slot::Pending(Box::new(Pending { prepared, request })))

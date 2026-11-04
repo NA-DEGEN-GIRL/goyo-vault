@@ -47,6 +47,8 @@ class MainActivity : ComponentActivity() {
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         yubikit = YubiKitManager(this)
         AppState.refreshTag(this)
+        Sync.loadLast(this)
+        Sync.schedule(this)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -86,6 +88,9 @@ class MainActivity : ComponentActivity() {
     private fun importFiles(vault: Uri, key: Uri) {
         AppState.work("가져오는 중…", {
             VaultFiles.import(this, vault, key)
+            // Another vault at the same path: its sync starts afresh, as
+            // deleting `vault.goyo.sync` on a PC resets it.
+            Native.syncReset(Sync.root(this))
             Native.vaultTag(VaultFiles.vault(this).path)
                 ?: run {
                     VaultFiles.remove(this)
@@ -99,6 +104,7 @@ class MainActivity : ComponentActivity() {
 
     fun removeImported() {
         lockNow(null)
+        Native.syncReset(Sync.root(this))
         VaultFiles.remove(this)
         AppState.refreshTag(this)
         AppState.message = "가져온 금고 파일과 열쇠 파일을 이 기기에서 지웠습니다."
@@ -166,6 +172,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     AppState.busy = null
                     AppState.opened(session)
+                    Sync.startLoop(this@MainActivity)
                 }
             } catch (e: GoyoException) {
                 AppState.busy = null

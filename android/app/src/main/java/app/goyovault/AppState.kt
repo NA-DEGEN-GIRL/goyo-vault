@@ -19,6 +19,8 @@ sealed interface Screen {
     data class Detail(val index: Int) : Screen
     /** index -1: a new entry. */
     data class Edit(val index: Int) : Screen
+    /** The sync settings (from Home, or from the open vault's list). */
+    data object Settings : Screen
 }
 
 /** One row of the entry list: never the secret or the notes. */
@@ -91,6 +93,7 @@ object AppState {
         idle?.cancel()
         idle = null
         Native.closeAll()
+        Sync.stopLoop()
         session = 0L
         rows = emptyList()
         status = 0

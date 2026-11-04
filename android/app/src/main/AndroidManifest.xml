@@ -2,9 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Stage 1 is offline: no INTERNET permission, and none merged in. -->
-    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <!-- Sync (stage 3) is the only network use: the SSH client in the Rust
+         bridge, to the user's server over Tailscale only. ACCESS_NETWORK_STATE
+         lets the app see that a VPN (Tailscale) is up and lets WorkManager
+         wait for a connected network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- YubiKey over NFC and over USB-C (host mode); neither is required. -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />

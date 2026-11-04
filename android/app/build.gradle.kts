@@ -17,8 +17,8 @@ android {
         applicationId = "app.goyovault"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-stage1"
+        versionCode = 3
+        versionName = "0.3.0-stage3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // The Rust bridge is built for 64-bit ARM phones only.
@@ -112,6 +112,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // The 15-minute background sync (moves encrypted files only).
+    implementation("androidx.work:work-runtime-ktx:2.10.5")
     // YubiKey over USB and NFC, and CTAP2 (FIDO2) for the hmac-secret assertion.
     // 3.1.0: 3.2.0 and later need compileSdk 37.
     implementation("com.yubico.yubikit:android:3.1.0")
