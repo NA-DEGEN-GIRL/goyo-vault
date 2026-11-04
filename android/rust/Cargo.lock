@@ -738,13 +738,14 @@ dependencies = [
 
 [[package]]
 name = "goyo-vault"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "argon2",
  "chacha20",
  "chacha20poly1305",
  "hmac",
  "poly1305",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "subtle",
  "zeroize",
@@ -899,7 +900,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rsa",
  "sec1",
- "sha1 0.10.7",
+ "sha1 0.10.6",
  "sha1 0.11.0",
  "sha2 0.10.9",
  "signature 2.2.0",
@@ -1534,7 +1535,7 @@ dependencies = [
  "russh-cryptovec",
  "russh-util",
  "sec1",
- "sha1 0.10.7",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "signature 2.2.0",
  "spki 0.7.3",
@@ -1690,9 +1691,9 @@ dependencies = [
 
 [[package]]
 name = "sha1"
-version = "0.10.7"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

@@ -1,5 +1,7 @@
 //! Versioned authenticated file formats; no plaintext files, no automatic key lookup.
 use crate::crypto::{self, AUTH_ERROR, Key, Result};
+use crate::otp::{self, Otp};
+use crate::syncfile;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::{
@@ -82,6 +84,25 @@ const DATA_MAGIC_V2: &[u8; 8] = b"GOYOVA02";
 const DATA_MAGIC_V3: &[u8; 8] = b"GOYOVA03";
 /// GOYOVA02's contents under a KF2 key file.
 const DATA_MAGIC_V4: &[u8; 8] = b"GOYOVA04";
+/// GOYOVA01 to 04 with an OTP secret field in every entry (0.12.0): a vault
+/// is written in these only while one of its entries has an OTP secret, so
+/// that 0.11.0 and older refuse it as a newer format instead of dropping
+/// the field (docs/FORMAT.md, "OTP 시크릿").
+const DATA_MAGIC_V5: &[u8; 8] = b"GOYOVA05";
+const DATA_MAGIC_V6: &[u8; 8] = b"GOYOVA06";
+const DATA_MAGIC_V7: &[u8; 8] = b"GOYOVA07";
+const DATA_MAGIC_V8: &[u8; 8] = b"GOYOVA08";
+/// Every vault format this build reads: GOYOVA01 to 08.
+const DATA_MAGICS: [&[u8; 8]; 8] = [
+    DATA_MAGIC_V1,
+    DATA_MAGIC_V2,
+    DATA_MAGIC_V3,
+    DATA_MAGIC_V4,
+    DATA_MAGIC_V5,
+    DATA_MAGIC_V6,
+    DATA_MAGIC_V7,
+    DATA_MAGIC_V8,
+];
 /// What a GOYOVA01/02 file adds to its plaintext: magic, vault ID, nonce
 /// and the tag.
 pub(crate) const LEGACY_OVERHEAD: usize = 64;
@@ -95,6 +116,8 @@ pub const MAX_TEXT: usize = 8192;
 /// would let an old copy bring its entry back, so there is no compaction.
 pub const MAX_TOMBSTONES: usize = 65_536;
 const NEWER_FORMAT: &str = "더 새로운 버전에서 만든 금고 형식입니다. 고요 금고를 업데이트하세요.";
+/// An entry's OTP field that is not the canonical blob.
+const OTP_UNREADABLE: &str = "OTP 시크릿을 읽을 수 없습니다.";
 const TOMBSTONE_LIMIT: &str = "삭제·수정 기록이 한도(65,536개)에 도달했습니다.";
 const TOO_LARGE: &str = "파일 크기 제한 초과";
 /// A file is missing and a temp file of it is there that no unlock took
@@ -296,13 +319,16 @@ impl Header {
     pub(crate) fn overhead(&self) -> usize {
         self.len() + 16
     }
-    fn magic(&self, format: Format) -> &'static [u8; 8] {
-        match (self, format) {
-            (Self::Legacy, Format::V1) => DATA_MAGIC_V1,
-            (Self::Legacy, Format::V2) => DATA_MAGIC_V2,
-            (Self::Keyed { .. }, Format::V1) => DATA_MAGIC_V3,
-            (Self::Keyed { .. }, Format::V2) => DATA_MAGIC_V4,
-        }
+    /// The magic of a file with this header in `format`; with `otp`, the
+    /// one whose entries carry the OTP field (four higher).
+    fn magic(&self, format: Format, otp: bool) -> &'static [u8; 8] {
+        let base = match (self, format) {
+            (Self::Legacy, Format::V1) => 0,
+            (Self::Legacy, Format::V2) => 1,
+            (Self::Keyed { .. }, Format::V1) => 2,
+            (Self::Keyed { .. }, Format::V2) => 3,
+        };
+        DATA_MAGICS[base + if otp { 4 } else { 0 }]
     }
     /// The header flags a session with a key file of `magic` writes.
     fn flags_of(magic: Magic) -> u8 {
@@ -318,6 +344,10 @@ impl Header {
     }
 }
 
+/// The text an entry holds, borrowed: the four fields in file order and
+/// the OTP blob (empty for none). Comparing or counting it copies no
+/// secret; an entry without OTP compares as before 0.12.0.
+pub(crate) type Content<'a> = ([&'a str; 4], &'a [u8]);
 /// Cloning is fine: every copy of the text is zeroized when dropped.
 #[derive(Clone)]
 pub struct Entry {
@@ -330,9 +360,22 @@ pub struct Entry {
     pub kind: Zeroizing<String>,
     pub secret: Zeroizing<String>,
     pub notes: Zeroizing<String>,
+    /// The OTP secret as `Otp::encode` writes it, empty for none. Only
+    /// `new_with_otp` and the file set it, always in that canonical form.
+    otp: Zeroizing<Vec<u8>>,
 }
 impl Entry {
     pub fn new(title: String, kind: String, secret: String, notes: String) -> Result<Self> {
+        Self::new_with_otp(title, kind, secret, notes, None)
+    }
+    /// An entry with an OTP secret (or none).
+    pub fn new_with_otp(
+        title: String,
+        kind: String,
+        secret: String,
+        notes: String,
+        otp: Option<&Otp>,
+    ) -> Result<Self> {
         let e = Self {
             id: NO_ID,
             parent: NO_ID,
@@ -340,9 +383,21 @@ impl Entry {
             kind: Zeroizing::new(kind),
             secret: Zeroizing::new(secret),
             notes: Zeroizing::new(notes),
+            otp: otp.map_or_else(|| Zeroizing::new(Vec::new()), Otp::encode),
         };
         e.validate()?;
         Ok(e)
+    }
+    /// Whether the entry has an OTP secret.
+    pub fn has_otp(&self) -> bool {
+        !self.otp.is_empty()
+    }
+    /// The entry's OTP secret, None without one.
+    pub fn otp(&self) -> Option<Otp> {
+        if self.otp.is_empty() {
+            return None;
+        }
+        Otp::decode(&self.otp).ok()
     }
     pub fn id(&self) -> EntryId {
         self.id
@@ -358,9 +413,14 @@ impl Entry {
     pub(crate) fn fields(&self) -> [&str; 4] {
         [&self.title, &self.kind, &self.secret, &self.notes].map(|s| s.as_str())
     }
-    /// Equal text in all four fields; IDs do not count.
+    /// The four fields and the OTP blob, borrowed.
+    pub(crate) fn content(&self) -> Content<'_> {
+        (self.fields(), &self.otp)
+    }
+    /// Equal text in all four fields and the same OTP secret; IDs do not
+    /// count.
     pub(crate) fn same_content(&self, other: &Entry) -> bool {
-        self.fields() == other.fields()
+        self.content() == other.content()
     }
     fn validate(&self) -> Result<()> {
         if self.title.trim().is_empty() || self.secret.is_empty() {
@@ -378,6 +438,11 @@ impl Entry {
             .any(|s| s.contains('\0'))
         {
             return Err("NUL 문자는 저장할 수 없습니다.");
+        }
+        // Only the canonical blob: Otp::decode takes nothing but the exact
+        // bytes Otp::encode writes, so two copies never differ in form alone.
+        if self.has_otp() && Otp::decode(&self.otp).is_err() {
+            return Err(OTP_UNREADABLE);
         }
         Ok(())
     }
@@ -405,26 +470,24 @@ fn vault_id(path: &Path) -> Option<[u8; 16]> {
     data_header(&head)
 }
 /// The vault ID of vault file bytes of a format this build reads (GOYOVA01
-/// to 04: the ID is at offset 8 in each).
+/// to 08: the ID is at offset 8 in each).
 fn data_header(data: &[u8]) -> Option<[u8; 16]> {
     let magic = data.get(..8)?;
-    let known = [DATA_MAGIC_V1, DATA_MAGIC_V2, DATA_MAGIC_V3, DATA_MAGIC_V4];
-    if !known.iter().any(|m| m.as_slice() == magic) {
+    if !DATA_MAGICS.iter().any(|m| m.as_slice() == magic) {
         return None;
     }
     data.get(8..24)?.try_into().ok()
 }
-/// Whether `data` starts with GOYOVA05 or later: a newer build wrote it. The
-/// magic is public, so saying so before any decryption reveals nothing.
+/// Whether `data` starts with GOYOVA09 or later: a newer build wrote it.
+/// The magic is public, so saying so before any decryption reveals nothing.
+/// (0.11.0 and older say this of GOYOVA05 and up, the OTP formats.)
 pub(crate) fn newer_format(data: &[u8]) -> bool {
-    match data.get(..8) {
-        Some([b'G', b'O', b'Y', b'O', b'V', b'A', a, b])
-            if a.is_ascii_digit() && b.is_ascii_digit() =>
-        {
-            (a - b'0') * 10 + (b - b'0') >= 5
-        }
-        _ => false,
-    }
+    syncfile::newer_vault_format(data)
+}
+/// Whether vault file bytes are in one of the OTP formats (GOYOVA05 to 08),
+/// whose entries carry the OTP field.
+fn otp_layout(data: &[u8]) -> bool {
+    DATA_MAGICS[4..].iter().any(|m| data.starts_with(&m[..]))
 }
 /// The header of vault file bytes, before any key (spec §4.3). A GOYOVA03/04
 /// header outside the grammar (shorter than its smallest file, an epoch of 0
@@ -435,12 +498,10 @@ pub(crate) fn read_header(data: &[u8]) -> Result<(Format, Header)> {
     if newer_format(data) {
         return Err(NEWER_FORMAT);
     }
-    let (format, keyed) = match data.get(..8) {
-        Some(m) if m == DATA_MAGIC_V1 => (Format::V1, false),
-        Some(m) if m == DATA_MAGIC_V2 => (Format::V2, false),
-        Some(m) if m == DATA_MAGIC_V3 => (Format::V1, true),
-        Some(m) if m == DATA_MAGIC_V4 => (Format::V2, true),
-        _ => return Err(AUTH_ERROR),
+    // GOYOVA05 to 08 are GOYOVA01 to 04 with the OTP field.
+    let (format, keyed) = match DATA_MAGICS.iter().position(|m| data.starts_with(&m[..])) {
+        Some(i) => (if i % 2 == 0 { Format::V1 } else { Format::V2 }, i % 4 >= 2),
+        None => return Err(AUTH_ERROR),
     };
     // The overhead, the counters of an empty plaintext and its entry count.
     let smallest = |overhead: usize| match format {
@@ -2631,22 +2692,28 @@ pub(crate) struct DataRef<'a> {
 /// tombstones; the file adds its header's overhead (LEGACY_OVERHEAD or
 /// KEYED_OVERHEAD). Entries must be validated.
 pub(crate) fn plain_size(format: Format, entries: &[Entry], tombstones: usize) -> usize {
-    let text: usize = entries
+    let mut text: usize = entries
         .iter()
         .map(|e| e.fields().iter().map(|s| s.len()).sum::<usize>())
         .sum();
+    // The OTP formats: each entry's len:u32 and blob.
+    if entries.iter().any(Entry::has_otp) {
+        text += entries.iter().map(|e| 4 + e.otp.len()).sum::<usize>();
+    }
     match format {
         Format::V1 => 12 + 16 * entries.len() + text,
         Format::V2 => 28 + 48 * entries.len() + text + 4 + 16 * tombstones,
     }
 }
 /// First 16 bytes of HMAC-SHA256 under the data key over `label`, `prefix`
-/// and the four fields. Keyed, so an ID reveals nothing about the text.
+/// and the four fields, then the OTP blob as len:u32 · bytes when there is
+/// one (so an entry without OTP keeps the ID 0.11.0 derives). Keyed, so an
+/// ID reveals nothing about the text.
 pub(crate) fn derived_id(
     key: &[u8; 32],
     label: &[u8],
     prefix: &[u8],
-    fields: [&str; 4],
+    (fields, otp): Content,
 ) -> EntryId {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(label);
@@ -2654,6 +2721,10 @@ pub(crate) fn derived_id(
     for field in fields {
         mac.update(&(field.len() as u32).to_le_bytes());
         mac.update(field.as_bytes());
+    }
+    if !otp.is_empty() {
+        mac.update(&(otp.len() as u32).to_le_bytes());
+        mac.update(otp);
     }
     let mut hash = mac.finalize().into_bytes();
     let mut id: EntryId = hash[..16].try_into().unwrap();
@@ -2670,16 +2741,16 @@ pub(crate) fn derived_id(
 fn v1_ids(vault: &[u8; 16], key: &[u8; 32], entries: &mut [Entry]) {
     let ids: Vec<EntryId> = {
         // Keys borrow the text: counting copies no secret.
-        let mut earlier: BTreeMap<[&str; 4], u32> = BTreeMap::new();
+        let mut earlier: BTreeMap<Content, u32> = BTreeMap::new();
         entries
             .iter()
             .map(|e| {
-                let k = earlier.entry(e.fields()).or_insert(0);
+                let k = earlier.entry(e.content()).or_insert(0);
                 let mut prefix = [0u8; 20];
                 prefix[..16].copy_from_slice(vault);
                 prefix[16..].copy_from_slice(&k.to_le_bytes());
                 *k += 1;
-                derived_id(key, b"goyo v1 entry\0", &prefix, e.fields())
+                derived_id(key, b"goyo v1 entry\0", &prefix, e.content())
             })
             .collect()
     };
@@ -2737,6 +2808,9 @@ fn encode_data(
         return Err(VAULT_FULL);
     }
     let v2 = format == Format::V2;
+    // The OTP formats only while an entry has an OTP secret: a vault
+    // without one stays byte-compatible with 0.11.0.
+    let otp = d.entries.iter().any(Entry::has_otp);
     let mut plain = Zeroizing::new(Vec::with_capacity(size));
     plain.extend_from_slice(&d.last.to_le_bytes());
     if v2 {
@@ -2753,6 +2827,10 @@ fn encode_data(
             plain.extend_from_slice(&(s.len() as u32).to_le_bytes());
             plain.extend_from_slice(s.as_bytes());
         }
+        if otp {
+            plain.extend_from_slice(&(e.otp.len() as u32).to_le_bytes());
+            plain.extend_from_slice(&e.otp);
+        }
     }
     if v2 {
         plain.extend_from_slice(&(d.tombstones.len() as u32).to_le_bytes());
@@ -2762,7 +2840,7 @@ fn encode_data(
     }
     let nonce = crypto::random::<24>()?;
     let mut out = Vec::with_capacity(size + header.overhead());
-    out.extend_from_slice(header.magic(format));
+    out.extend_from_slice(header.magic(format, otp));
     out.extend_from_slice(id);
     if let Header::Keyed {
         key_id,
@@ -2794,6 +2872,7 @@ fn decode_data(
         return Err(AUTH_ERROR);
     }
     let v2 = format == Format::V2;
+    let otp = otp_layout(data);
     // The whole header up to the nonce is the AAD.
     let aad = header.len();
     let plain = crypto::open(
@@ -2823,6 +2902,11 @@ fn decode_data(
             kind: r.text(64)?,
             secret: r.text(MAX_TEXT)?,
             notes: r.text(MAX_TEXT)?,
+            otp: if otp {
+                r.blob(otp::MAX_BLOB)?
+            } else {
+                Zeroizing::new(Vec::new())
+            },
         };
         if v2 {
             e.validate().map_err(|_| AUTH_ERROR)?;
@@ -2876,6 +2960,14 @@ impl<'a> Reader<'a> {
     }
     fn id(&mut self) -> Result<EntryId> {
         Ok(self.take(16)?.try_into().unwrap())
+    }
+    /// len:u32 · bytes, at most `limit` bytes.
+    fn blob(&mut self, limit: usize) -> Result<Zeroizing<Vec<u8>>> {
+        let n = self.num()?;
+        if n > limit {
+            return Err(AUTH_ERROR);
+        }
+        Ok(Zeroizing::new(self.take(n)?.to_vec()))
     }
     fn text(&mut self, limit: usize) -> Result<Zeroizing<String>> {
         let n = self.num()?;
@@ -3393,6 +3485,58 @@ mod workflow_tests {
     }
     fn ids(entries: &[Entry]) -> Vec<EntryId> {
         entries.iter().map(Entry::id).collect()
+    }
+    /// A session saves the OTP format while an entry has an OTP secret and
+    /// goes back to the 0.11.0 format once none has; turning sync on keeps
+    /// the secret; a reopened file gives the same secret back.
+    #[test]
+    fn an_otp_secret_is_saved_and_given_back() {
+        let t = Temp::new();
+        let path = t.file("otp.goyo");
+        let (id, key) = ([0x11; 16], [0x22; 32]);
+        let mut s = bare(path.clone(), id, key);
+        s.put(None, entry("plain")).unwrap();
+        let magic = || fs::read(&path).unwrap()[..8].to_vec();
+        assert_eq!(magic(), DATA_MAGIC_V1);
+        let otp =
+            Otp::parse("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&issuer=Bank&period=60")
+                .unwrap()
+                .unwrap();
+        let with = |e: &Entry, otp: Option<&Otp>| {
+            Entry::new_with_otp(
+                e.title.to_string(),
+                e.kind.to_string(),
+                e.secret.to_string(),
+                e.notes.to_string(),
+                otp,
+            )
+            .unwrap()
+        };
+        let edited = with(&s.entries[0], Some(&otp));
+        let old_id = s.entries[0].id;
+        s.put(Some(0), edited).unwrap();
+        assert_eq!(magic(), DATA_MAGIC_V5);
+        assert!(!fs::read(&path).unwrap().windows(4).any(|w| w == b"Bank"));
+        // Saving the same text again changes nothing.
+        let generation = s.generation;
+        s.put(Some(0), with(&s.entries[0], Some(&otp))).unwrap();
+        assert_eq!(s.generation, generation);
+        let again = bare(path.clone(), id, key);
+        assert_eq!(again.entries[0].otp(), Some(otp.clone()));
+        drop(again);
+        s.enable_sync().unwrap();
+        assert_eq!(magic(), DATA_MAGIC_V6);
+        let reopened = bare(path.clone(), id, key);
+        assert_eq!(reopened.format, Format::V2);
+        assert_eq!(reopened.entries[0].otp(), Some(otp.clone()));
+        assert_ne!(reopened.entries[0].id, old_id);
+        drop(reopened);
+        // Removing it is an edit, and the file is 0.11.0's GOYOVA02 again.
+        let tombstones = s.tombstones.len();
+        s.put(Some(0), with(&s.entries[0], None)).unwrap();
+        assert_eq!(magic(), DATA_MAGIC_V2);
+        assert_eq!(s.tombstones.len(), tombstones + 1);
+        assert!(bare(path.clone(), id, key).entries[0].otp().is_none());
     }
     #[test]
     fn lifecycle_backup_restore_password_and_failed_save() {
@@ -4057,7 +4201,7 @@ mod workflow_tests {
         // vault_tag reads the four formats (the ID is at offset 8 in each)
         // and nothing newer.
         let mut newer = v2_file.clone();
-        newer[..8].copy_from_slice(b"GOYOVA05");
+        newer[..8].copy_from_slice(b"GOYOVA09");
         fs::write(t.file("newer.goyo"), &newer).unwrap();
         assert_eq!(vault_tag(&t.file("copy.goyo")), Some(s.tag()));
         assert_eq!(vault_tag(&t.file("newer.goyo")), None);
@@ -4932,7 +5076,7 @@ mod workflow_tests {
         ] {
             refused(&bad, VAULT_DAMAGED, VAULT_DAMAGED);
         }
-        refused(&damaged(0, b"GOYOVA05"), NEWER_FORMAT, NEWER_FORMAT);
+        refused(&damaged(0, b"GOYOVA09"), NEWER_FORMAT, NEWER_FORMAT);
         refused(
             &kf2_vault([0x45; 16], &dk1, state, 0, Format::V2, &[]),
             OTHER_VAULT,
@@ -5712,7 +5856,7 @@ mod tests {
             Some(AUTH_ERROR)
         );
         // A newer format is named before any decryption, whatever the key.
-        for magic in [b"GOYOVA05", b"GOYOVA10", b"GOYOVA99"] {
+        for magic in [b"GOYOVA09", b"GOYOVA10", b"GOYOVA99"] {
             let mut newer = data.clone();
             newer[..8].copy_from_slice(magic);
             assert_eq!(
@@ -5958,7 +6102,7 @@ mod tests {
                 let refused = decode_data(&id, &key, &id_key, &other).err();
                 assert_eq!(refused, Some(AUTH_ERROR));
             }
-            let newer = decode_data(&id, &key, &id_key, &with(0, b"GOYOVA05")).err();
+            let newer = decode_data(&id, &key, &id_key, &with(0, b"GOYOVA09")).err();
             assert_eq!(newer, Some(NEWER_FORMAT));
             // Relabelled to 0.8's magic: the AEAD covers the magic.
             let legacy = if format == Format::V1 {
@@ -5989,6 +6133,171 @@ mod tests {
                 Some(EPOCH_LIMIT)
             );
         }
+    }
+    /// The 0.11.0 rule for a newer vault format: GOYOVA05 and up.
+    fn newer_in_0_11(data: &[u8]) -> bool {
+        match data.get(..8) {
+            Some([b'G', b'O', b'Y', b'O', b'V', b'A', a, b])
+                if a.is_ascii_digit() && b.is_ascii_digit() =>
+            {
+                (a - b'0') * 10 + (b - b'0') >= 5
+            }
+            _ => false,
+        }
+    }
+    fn otp_entry(title: &str, secret: &str, otp: &str) -> Entry {
+        let otp = Otp::parse(otp).unwrap().unwrap();
+        Entry::new_with_otp(
+            title.into(),
+            String::new(),
+            secret.into(),
+            String::new(),
+            Some(&otp),
+        )
+        .unwrap()
+    }
+    /// An entry's OTP secret puts the vault in GOYOVA05 to 08: GOYOVA01 to
+    /// 04 with a len:u32 · blob after each entry's memo, 0 for an entry
+    /// without one. A vault without any OTP secret keeps the 0.11.0
+    /// formats; 0.11.0 refuses the OTP formats as newer, before any key, so
+    /// it can never drop the field (docs/FORMAT.md).
+    #[test]
+    fn otp_secrets_take_their_own_formats() {
+        let (id, key, id_key) = ([1; 16], [2; 32], [3; 32]);
+        let keyed = Header::Keyed {
+            key_id: [5; 16],
+            state: KeyState {
+                epoch: 7,
+                tag: [4; 16],
+            },
+            flags: 0,
+        };
+        let uri = "otpauth://totp/ACME:jo?secret=JBSWY3DPEHPK3PXP&issuer=ACME&digits=8";
+        let mut es = vec![entry("mail", "words"), otp_entry("bank", "pin", uri)];
+        es[0].set_ids([5; 16], NO_ID);
+        es[1].set_ids([6; 16], [9; 16]);
+        let want = Otp::parse(uri).unwrap();
+        for (header, overhead) in [(Header::Legacy, LEGACY_OVERHEAD), (keyed, KEYED_OVERHEAD)] {
+            for format in [Format::V1, Format::V2] {
+                let tombstones: &[EntryId] = if format == Format::V2 {
+                    &[[9; 16]]
+                } else {
+                    &[]
+                };
+                let d = |entries| DataRef {
+                    last: 3,
+                    generation: 4,
+                    seen: 2,
+                    entries,
+                    tombstones,
+                };
+                let old = encode_data(&id, &key, &header, format, d(&es[..1])).unwrap();
+                let new = encode_data(&id, &key, &header, format, d(&es)).unwrap();
+                assert_eq!(&old[..8], header.magic(format, false));
+                assert_eq!(&new[..8], header.magic(format, true));
+                assert_eq!((new[7] - old[7], &new[..7]), (4, &old[..7]));
+                assert!(!newer_in_0_11(&old) && newer_in_0_11(&new));
+                assert!(!newer_format(&new) && otp_layout(&new) && !otp_layout(&old));
+                // The size rule holds with the field: 4 bytes an entry and
+                // the blob; without OTP it is 0.11.0's.
+                let blob = want.as_ref().unwrap().encode();
+                let mut bare = es.clone();
+                bare[1] = entry("bank", "pin");
+                assert_eq!(
+                    plain_size(format, &es, tombstones.len()),
+                    plain_size(format, &bare, tombstones.len()) + 2 * 4 + blob.len()
+                );
+                assert_eq!(
+                    new.len(),
+                    plain_size(format, &es, tombstones.len()) + overhead
+                );
+                assert_eq!(
+                    old.len(),
+                    plain_size(format, &es[..1], tombstones.len()) + overhead
+                );
+                assert_eq!(read_header(&new).unwrap(), (format, header));
+                assert_eq!(data_header(&new), Some(id));
+                let (f, h, c) = decode_data(&id, &key, &id_key, &new).unwrap();
+                assert_eq!((f, h), (format, header));
+                assert!(!c.entries[0].has_otp() && c.entries[0].otp().is_none());
+                assert_eq!(c.entries[1].otp(), want);
+                assert_eq!(*c.entries[1].otp.clone(), *blob);
+                if format == Format::V2 {
+                    assert_eq!(ids(&c.entries), ids(&es));
+                    assert!(c.entries.iter().zip(&es).all(|(a, b)| a.same_content(b)));
+                }
+                // Inside the AEAD, the blob must be the canonical one, at
+                // most MAX_BLOB, and fully there.
+                let aad = header.len();
+                let nonce: [u8; 24] = new[aad - 24..aad].try_into().unwrap();
+                let plain = crypto::open(&key, &nonce, &new[..aad], &new[aad..]).unwrap();
+                let at = plain
+                    .windows(blob.len())
+                    .position(|w| w == &blob[..])
+                    .unwrap();
+                let sealed = |plain: &[u8]| {
+                    let c = crypto::seal(&key, &nonce, &new[..aad], plain).unwrap();
+                    [&new[..aad], &c[..]].concat()
+                };
+                assert!(decode_data(&id, &key, &id_key, &sealed(&plain)).is_ok());
+                for (i, value) in [(1, 9), (0, 0), (2, 0)] {
+                    let mut bad = plain.to_vec();
+                    bad[at + i] = value;
+                    assert!(
+                        decode_data(&id, &key, &id_key, &sealed(&bad)).is_err(),
+                        "{i}"
+                    );
+                }
+                let mut long = plain.to_vec();
+                long[at - 4..at].copy_from_slice(&(otp::MAX_BLOB as u32 + 1).to_le_bytes());
+                assert!(decode_data(&id, &key, &id_key, &sealed(&long)).is_err());
+                // The same file without the field: its last entry runs into
+                // the next bytes and fails.
+                let mut cut = plain.to_vec();
+                cut.drain(at - 4..at + blob.len());
+                assert!(decode_data(&id, &key, &id_key, &sealed(&cut)).is_err());
+                // The relabelled magic fails the AEAD either way.
+                let mut relabelled = new.clone();
+                relabelled[7] -= 4;
+                assert_eq!(
+                    decode_data(&id, &key, &id_key, &relabelled).err(),
+                    Some(AUTH_ERROR)
+                );
+            }
+        }
+        // An OTP field that is not canonical is no entry.
+        let mut e = es[1].clone();
+        e.otp.push(0);
+        assert_eq!(e.validate().err(), Some(OTP_UNREADABLE));
+        e.otp = Zeroizing::new(vec![1, 6, 30]);
+        assert_eq!(e.validate().err(), Some(OTP_UNREADABLE));
+    }
+    /// An OTP secret counts as the entry's text: v1 IDs and the check code
+    /// change with it, and stay 0.11.0's without one.
+    #[test]
+    fn otp_secrets_take_part_in_ids_and_the_check_code() {
+        let a = entry("same", "secret");
+        let b = otp_entry("same", "secret", "JBSWY3DPEHPK3PXP");
+        let c = otp_entry("same", "secret", "JBSWY3DPEHPK3PXQ");
+        assert!(!a.same_content(&b) && !b.same_content(&c));
+        assert!(b.same_content(&b.clone()));
+        let mut es = vec![a.clone(), b.clone(), c.clone(), a.clone()];
+        v1_ids(&[1; 16], &[2; 32], &mut es);
+        let set: BTreeSet<EntryId> = ids(&es).into_iter().collect();
+        assert_eq!(set.len(), 4);
+        // The first entry without OTP keeps the ID 0.11.0 derives.
+        let mut plain = vec![a.clone(), a.clone()];
+        v1_ids(&[1; 16], &[2; 32], &mut plain);
+        assert_eq!((es[0].id, es[3].id), (plain[0].id, plain[1].id));
+        let code = |entries: &[Entry]| crate::merge::check_code(&[2; 32], entries, &[], None);
+        let mut x = b.clone();
+        x.set_ids([7; 16], NO_ID);
+        let mut y = c.clone();
+        y.set_ids([7; 16], NO_ID);
+        let mut z = a.clone();
+        z.set_ids([7; 16], NO_ID);
+        assert_ne!(code(&[x.clone()]), code(&[y]));
+        assert_ne!(code(&[x]), code(&[z]));
     }
     /// V2 entries whose plaintext is exactly `size` bytes.
     pub(super) fn filling(size: usize) -> Vec<Entry> {

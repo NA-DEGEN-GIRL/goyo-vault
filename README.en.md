@@ -13,6 +13,7 @@
 - **The vault app is fully offline:** `goyo-vault.exe` has no network code and starts no other programs. Optionally, the separate tool `goyo-sync.exe` that comes with it syncs **only the encrypted vault file** with your own SSH server; the key file and password are never sent. `goyo-sync.exe` does nothing until you open it and set it up, and the vault app cannot start it. There is no account and no auto-update.
 - **Opening a vault takes** the vault file (`.goyo`), a separate key file (`.goyokey`) and your password. Only the two files and the password take part in decryption, so **to someone holding both files, the password is the only barrier**. Keep the key file somewhere else.
 - **Secrets stay hidden by default:** show for 15 seconds, copy only after you allow it, and the clipboard is wiped 15 seconds after a copy.
+- **Per-entry OTP (optional):** save the secret key a site shows for authenticator apps (or its `otpauth://` URI) with an entry, and the app shows the current 6-digit code with its countdown and copies it. **Show QR** moves it to a phone authenticator app (hidden again after 60 seconds). The secret is encrypted with the entry.
 - **Auto-lock** of an open vault, by default after 60 seconds idle or 30 seconds in another app; on the vault screen you can change it to 5 minutes, 30 minutes or off. Locking the screen, sleep and Windows shutdown always lock it.
 - **Screen-capture protection:** the window is excluded from the capture paths Windows supports (ordinary screenshots and screen recordings).
 - **A single executable, no installer.** Dark and light themes, Korean and English interface.
@@ -75,6 +76,8 @@ In the source folder, get the new version with `git pull`, rebuild the ZIPs with
 
 The phone OTP feature was removed in 0.10.0. A vault made earlier with the OTP on (every vault made before 0.5.0 is one) still opens; no OTP code is asked any more, only the key file and the password (and the security key, for a vault that uses them). The OTP never took part in decryption, it was only checked by this app after opening, so its removal does not change how the files are protected. The first time such a vault is opened, each PC shows once: "The OTP feature has been removed. You can delete the 'Goyo Vault' entry in your phone's OTP app. The OTP secret inside the key file is erased at the next key change (such as a password change)." If you use such a vault on several PCs, update every PC to 0.10.0 before changing keys (a password change, say): 0.9.0 and earlier may refuse a new key file whose OTP mark is gone, or ask for an OTP code they can no longer check. A vault made **without an OTP** in 0.5.0 or later (every vault made now) does not open in 0.4.x or earlier.
 
+From 0.12.0, **a vault with at least one entry that has an OTP secret, and its backups, open only in 0.12.0 or later.** 0.11.0 and earlier refuse such a vault with "This vault was saved by a newer version", and their sync stops meanwhile without removing any OTP secret. Once every OTP secret is removed, the vault is saved in the earlier format again. If several PCs sync, update **every PC's Goyo Vault and goyo-sync and the server script** (goyo-sync's settings window, 'Install or update on server') to 0.12.0 before adding an OTP secret.
+
 From 0.8.0, **a vault with sync turned on, and its backups, open only in 0.8.0 or later.** A vault without sync keeps its format and still opens in 0.7.x and older.
 
 From 0.9.0, **a vault whose key was changed (its password changed, or another PC's new key file received), and its later backups, open only in 0.9.0 or later.** A vault whose key was never changed keeps the 0.8 format and still opens in 0.8. For a synced vault, first update the server script and every PC to 0.9.0, then change the key.
@@ -113,6 +116,7 @@ Press **+ New entry**, fill in name, type, secret and note, then press **Save en
 - Type the kind yourself or use the **password · seed phrase · private key · API key** buttons.
 - Multi-line keys such as PEM files are kept exactly.
 - **Names are always visible in the list,** so never put a secret in the name.
+- **OTP secret (optional):** paste the secret key a site shows in its two-step verification setup (often behind "Can't scan the QR code?"; it looks like `JBSW Y3DP …`). You can also paste a whole `otpauth://totp/…` URI, which fills in the **Issuer** and **Account** fields (you can edit them). Spaces and lowercase do not matter. The field is masked like a password, with an eye button to check it. Clear it and save to remove the OTP secret.
 - For safety, the input method editor (IME) is off in the secret and note fields; Korean text has to be pasted there. You can copy a value in another app, but with the default auto-lock (1 minute) **come back within 30 seconds** to paste it; staying away longer locks the vault and clears unsaved edits.
 
 ### 4. View and copy
@@ -125,6 +129,11 @@ Pick an entry in the list to see it on the right.
 - **Copy:** turn on **Allow copy**, then press **Copy**. The permission turns itself off after 30 seconds or after one copy.
 - A copied value is **wiped from the clipboard after 15 seconds** and is kept out of Win+V clipboard history and cloud clipboard sync.
 - Remaining times are shown on screen.
+- **OTP:** an entry with an OTP secret (marked `OTP` in the list) shows the current code under the note, with the seconds until it changes. The code lives only briefly, so it is not hidden.
+  - **Copy** copies the code; like every copy it is wiped from the clipboard after 15 seconds and kept out of clipboard history.
+  - **Copy secret** works only after **Allow copy**, like the secret. The OTP secret itself shows only during **Show 15 s**.
+  - **Show QR** puts a QR code in the secret's place for a phone authenticator app (Google Authenticator, Microsoft Authenticator and others) to scan. It goes after 60 seconds, when you pick another entry or screen, switch to another app, or lock. The QR code holds the secret, so open it only with nobody and no camera looking.
+  - This OTP is for each site's two-step verification. It plays no part in opening Goyo Vault. Keeping a password and its OTP secret in the same vault means both are exposed together if the vault is opened.
 
 ### 5. Lock and open again
 

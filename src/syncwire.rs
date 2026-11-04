@@ -138,10 +138,10 @@ pub enum WireError {
     Sha,
     /// A blob where none is allowed, or a malformed LIST.
     Blob,
-    /// Not a GOYOVA02 (96 B to 8 MiB) or GOYOVA04 (140 B to 8 MiB) file of
-    /// this vault.
+    /// Not a GOYOVA02 or 06 (96 B to 8 MiB) or GOYOVA04 or 08 (140 B to
+    /// 8 MiB) file of this vault.
     Vault,
-    /// GOYOVA05 or later: a newer Goyo Vault wrote it.
+    /// GOYOVA09 or later: a newer Goyo Vault wrote it.
     NewerFormat,
     /// The HELLO echo differs: the ssh pipe is not binary-transparent.
     Echo,
@@ -182,8 +182,9 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
 fn sha_matches(blob: &[u8], sha: &[u8; 32]) -> bool {
     sha256(blob) == *sha || (blob.is_empty() && *sha == [0; 32])
 }
-/// A vault file the server may store or serve: GOYOVA02 (96 B to 8 MiB) or
-/// GOYOVA04 (140 B to 8 MiB) with this vault's ID. GOYOVA01/03 are never
+/// A vault file the server may store or serve: GOYOVA02 or 06 (96 B to
+/// 8 MiB) or GOYOVA04 or 08 (140 B to 8 MiB) with this vault's ID.
+/// GOYOVA01/03/05/07 are never
 /// synced, and a key file (GOYOK…) never passes.
 pub fn check_vault_blob(blob: &[u8], id: &[u8; 16]) -> Result<(), WireError> {
     if newer_vault_format(blob) {
@@ -870,7 +871,10 @@ mod tests {
             (as_magic(b"GOYOKS01", 489), WireError::Vault),
             (as_magic(b"GOYOVA01", 300), WireError::Vault),
             (as_magic(b"GOYOVA03", 300), WireError::Vault),
-            (as_magic(b"GOYOVA05", 300), WireError::NewerFormat),
+            (as_magic(b"GOYOVA05", 300), WireError::Vault),
+            (as_magic(b"GOYOVA07", 300), WireError::Vault),
+            (as_magic(b"GOYOVA08", 139), WireError::Vault),
+            (as_magic(b"GOYOVA09", 300), WireError::NewerFormat),
         ];
         for (blob, want) in cases {
             for (op, status) in [
@@ -1092,7 +1096,10 @@ mod tests {
             (vault(&[0x40; 16], 300), WireError::Vault),
             (vault(&ID, 95), WireError::Vault),
             (vault(&ID, MAX_FILE + 1), WireError::Vault),
-            (as_magic(b"GOYOVA05", 300), WireError::NewerFormat),
+            (as_magic(b"GOYOVA05", 300), WireError::Vault),
+            (as_magic(b"GOYOVA07", 300), WireError::Vault),
+            (as_magic(b"GOYOVA08", 139), WireError::Vault),
+            (as_magic(b"GOYOVA09", 300), WireError::NewerFormat),
             (Vec::new(), WireError::Vault),
         ];
         for (blob, want) in cases {

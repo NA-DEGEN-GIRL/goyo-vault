@@ -62,6 +62,8 @@ pub const GRID_FONTS: usize = 6;
 // Owner-drawn button variants, stored in the button's GWLP_USERDATA.
 pub const PRIMARY: isize = 1;
 pub const SECONDARY: isize = 2;
+/// A list row's item data for an entry with an OTP secret (draw_row).
+pub const ROW_OTP: isize = 1;
 pub const GHOST: isize = 3;
 pub const DANGER_GHOST: isize = 4;
 pub const TAB: isize = 5;
@@ -473,6 +475,22 @@ unsafe fn draw_row(t: &Theme, d: &DrawItem) {
         let mut r = row;
         r.left += t.px(12);
         r.right -= t.px(8);
+        // An entry with an OTP secret: a small "OTP" chip at the right.
+        if d.data == ROW_OTP as usize {
+            let small = t.small();
+            let w = text_width(d.dc, "OTP", small) + t.px(12);
+            let h = t.px(20);
+            let top = r.top + (r.bottom - r.top - h) / 2;
+            let chip = Rect {
+                left: r.right - w,
+                top,
+                right: r.right,
+                bottom: top + h,
+            };
+            round(d.dc, &chip, h / 2, None, Some(p.border));
+            text(d.dc, "OTP", &chip, small, p.muted, DT_CENTER | LINE);
+            r.right = chip.left - t.px(6);
+        }
         text(
             d.dc,
             &title,

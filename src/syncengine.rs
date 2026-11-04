@@ -52,9 +52,18 @@ pub const MAX_LOG: u64 = 256 * 1024;
 /// An upload the server refused only for now (see [`Held`]) is tried again
 /// after this long, and at once when the app writes another one.
 pub const RETRY_HELD: u64 = 10 * 60;
-/// The vault format under a KF2 key file. A server script older than 0.9.0
-/// refuses it as a bad blob.
-const KEYED_VAULT: &[u8; 8] = b"GOYOVA04";
+/// The one synced format every server script takes. A script older than
+/// 0.9.0 refuses GOYOVA04 (the format under a KF2 key file) as a bad blob,
+/// and one older than 0.12.0 GOYOVA06 and 08 (the OTP formats) too.
+const PLAIN_VAULT: &[u8; 8] = b"GOYOVA02";
+/// The oldest server script that takes `blob`'s format.
+fn script_for(blob: &[u8]) -> &'static str {
+    if blob.starts_with(b"GOYOVA04") {
+        "0.9.0"
+    } else {
+        "0.12.0"
+    }
+}
 
 /// Seconds and nanoseconds since the Unix epoch; tests inject their own.
 pub type Clock = Box<dyn Fn() -> Duration>;
@@ -1097,7 +1106,7 @@ impl<T: Transport> Pass<'_, T> {
                 #[cfg(feature = "security-key")]
                 {
                     let vault = &gated.bytes[WRAP_HEADER..];
-                    let keyed = vault.starts_with(KEYED_VAULT);
+                    let keyed = syncfile::keyed_vault(vault);
                     self.v.out_flags = vault.get(64).filter(|_| keyed).copied().unwrap_or(0);
                 }
                 let retry = std::mem::take(&mut self.v.upgrade_retry);
@@ -1105,11 +1114,16 @@ impl<T: Transport> Pass<'_, T> {
                     None
                 } else if Some(gated.sha) == self.v.state.rejected {
                     // The gate of a helper older than 0.9.0 refused every
-                    // GOYOVA04 file: one that passes this gate is tried once
-                    // in each run of this helper (spec §7.6). Another
+                    // GOYOVA04 file, and one older than 0.12.0 every
+                    // GOYOVA06/08 file: one that passes this gate is tried
+                    // once in each run of this helper (spec §7.6). Another
                     // refusal is kept for the rest of the run.
-                    if retry && gated.bytes[WRAP_HEADER..].starts_with(KEYED_VAULT) {
-                        self.note("retrying a GOYOVA04 upload an older helper refused");
+                    let vault = &gated.bytes[WRAP_HEADER..];
+                    if retry && !vault.starts_with(PLAIN_VAULT) {
+                        self.note(&format!(
+                            "retrying a {} upload an older helper refused",
+                            String::from_utf8_lossy(vault.get(..8).unwrap_or_default())
+                        ));
                         self.v.state.rejected = None;
                         return Some(gated);
                     }
@@ -1266,11 +1280,13 @@ impl<T: Transport> Pass<'_, T> {
                 return self.put(gated, 0, false);
             }
             // Refusals that a server update or a new key file clears.
-            Status::BadBlob if blob.starts_with(KEYED_VAULT) => {
-                self.note(
-                    "server refused GOYOVA04: its goyo-sync script is older than 0.9.0; \
+            Status::BadBlob if !blob.starts_with(PLAIN_VAULT) => {
+                self.note(&format!(
+                    "server refused {}: its goyo-sync script is older than {}; \
                      use 'Install or update on server'",
-                );
+                    String::from_utf8_lossy(blob.get(..8).unwrap_or_default()),
+                    script_for(blob)
+                ));
                 self.hold(gated.sha, SyncState::OldServer);
             }
             Status::KeyBehind => {
@@ -1383,7 +1399,7 @@ impl<T: Transport> Pass<'_, T> {
                 }
                 self.heard();
             }
-            Status::BadBlob if blob.starts_with(KEYED_VAULT) => {
+            Status::BadBlob if !blob.starts_with(PLAIN_VAULT) => {
                 self.set(SyncState::OldServer);
                 self.heard();
             }

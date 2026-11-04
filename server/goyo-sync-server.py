@@ -5,7 +5,8 @@ One run per SSH connection, like git-upload-pack: one request frame on stdin,
 one response frame on stdout, then exit. No daemon, no port, no shell, no eval
 and nothing outside the Python 3.8+ standard library. It never sees a
 password or plaintext. The vault channel stores only GOYOVA02 and GOYOVA04
-files (the synced vault formats, the second under a 0.9 key file) whose
+files (the synced vault formats, the second under a 0.9 key file) and their
+OTP forms GOYOVA06 and GOYOVA08 (0.12.0: an entry holds an OTP secret) whose
 header names the requested vault, so a key file (GOYOK...) is never a vault
 upload.
 
@@ -37,7 +38,7 @@ serving an older one. Turning key-file sync off appends a cut record, which
 ends the generation and removes its key files. Every key operation on a
 vault runs under an exclusive lock on data/<id>/lock (flock: the data root
 must support it). Once a vault has k/, every connection, with or without
-the flag, refuses a vault upload (KEY_BEHIND) unless it is GOYOVA04 and,
+the flag, refuses a vault upload (KEY_BEHIND) unless it is GOYOVA04/08 and,
 while the latest record is a key file, carries that key file's epoch,
 current key ID and state tag. Vaults without k/ get no lock and no floor.
 The admin may remove data/<id>/k/ only while no PC syncs that vault.
@@ -79,9 +80,12 @@ RESPONSE = struct.Struct('<8sBQI32s')     # magic, status, version, blob_len, bl
 REQUEST_MAGIC, RESPONSE_MAGIC = b'GOYOSRQ1', b'GOYOSRS1'
 # The synced vault formats and the smallest file of each: GOYOVA02 is a 48-byte
 # header, a 32-byte empty plaintext and the tag; GOYOVA04, the same contents
-# under a 0.9 key file, has a 92-byte header. Everything else is refused:
-# GOYOVA01/03 (sync off), newer formats and every key file.
-VAULT_MAGICS = {b'GOYOVA02': 96, b'GOYOVA04': 140}
+# under a 0.9 key file, has a 92-byte header; GOYOVA06 and GOYOVA08 are the
+# two with an OTP field in each entry, with the same headers. Everything else
+# is refused: GOYOVA01/03/05/07 (sync off), newer formats and every key file.
+VAULT_MAGICS = {b'GOYOVA02': 96, b'GOYOVA04': 140, b'GOYOVA06': 96, b'GOYOVA08': 140}
+# The formats whose header holds a key file's epoch, key ID and state tag.
+KEYED_MAGICS = (b'GOYOVA04', b'GOYOVA08')
 HELLO, GET, PUT, LIST, FETCH = 1, 2, 3, 4, 5
 # The key ops: served only for a vault the connection's --key-sync names.
 PUTKEY, GETKEY, CUTKEY, PRUNE = 6, 7, 8, 9
@@ -292,8 +296,8 @@ def mismatch(versions_dir):
 
 
 def version_epoch(path):
-    """The key-file epoch in a stored version's header: 0 for GOYOVA02, None
-    for anything that is not a plain file starting like GOYOVA02/04."""
+    """The key-file epoch in a stored version's header: 0 for GOYOVA02/06,
+    None for anything that is not a plain file starting like a synced vault."""
     fd = os.open(path, os.O_RDONLY | O_BINARY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -301,9 +305,9 @@ def version_epoch(path):
         head = os.read(fd, 48)
     finally:
         os.close(fd)
-    if head[:8] == b'GOYOVA02':
+    if head[:8] in (b'GOYOVA02', b'GOYOVA06'):
         return 0
-    return struct.unpack('<Q', head[40:48])[0] if head[:8] == b'GOYOVA04' and len(head) == 48 else None
+    return struct.unpack('<Q', head[40:48])[0] if head[:8] in KEYED_MAGICS and len(head) == 48 else None
 
 
 # ---- the grammar of GOYOKS01 (gate 3; spec v3 sections 4.1, 4.6, 7.13) ----
@@ -681,7 +685,7 @@ class Store:
         # The last of three gates: only a vault file of this very vault, never
         # a key file (GOYOK...), a format that is not synced or another vault's.
         if len(blob) < VAULT_MAGICS.get(blob[:8], MAX_BLOB + 1) or blob[8:24] != vid:
-            raise Refused(BAD_BLOB, 'not a GOYOVA02/04 file of this vault')
+            raise Refused(BAD_BLOB, 'not a GOYOVA02/04/06/08 file of this vault')
         vault, versions_dir = self.paths(vid)
         new = not os.path.lexists(vault)
         if new and expected != 0:
@@ -1070,18 +1074,18 @@ class Store:
 
     def floor(self, vid, blob):
         """The vault floor, under the vault lock (KEY_BEHIND): below a key
-        record a vault upload must be GOYOVA04 with that key file's epoch,
+        record a vault upload must be GOYOVA04/08 with that key file's epoch,
         current key ID and state tag; below a cut (a damaged top included)
-        any GOYOVA04; a k/ with no record is no floor."""
+        any GOYOVA04/08; a k/ with no record is no floor."""
         top = self.read_state(vid, *self.key_folder(vid)[1:], previous=False).top
         if top is None:
             return
         if top.kind == KEY_RECORD:
             payload = top.served[RECORD.size:]
-            ok = (blob[:8] == b'GOYOVA04' and blob[40:48] == struct.pack('<Q', top.floor)
+            ok = (blob[:8] in KEYED_MAGICS and blob[40:48] == struct.pack('<Q', top.floor)
                   and blob[24:40] == top.syntax.key_id and blob[48:64] == state_tag(payload[:top.syntax.w]))
         else:
-            ok = blob[:8] == b'GOYOVA04'
+            ok = blob[:8] in KEYED_MAGICS
         if not ok:
             raise Refused(KEY_BEHIND, 'vault file does not match the stored key file')
 
@@ -1701,6 +1705,15 @@ def selftest_root(root, base):
           and fetch(a, head + 1) == (OK, head + 1, smallest, 0), 'GOYOVA04 is served')
     check(put(n, 0, keyed(n, 1)) == (OK, 1, b'', 0), 'GOYOVA04 seeds a new vault')
     shutil.rmtree(store.paths(n)[0])
+    # The OTP forms (0.12.0): GOYOVA06 like GOYOVA02 from 96 bytes, GOYOVA08
+    # like GOYOVA04 from 140.
+    otp_plain, otp_keyed = blob(n, 10, 96, b'GOYOVA06'), blob(n, 11, 140, b'GOYOVA08')
+    check(put(n, 0, otp_plain) == (OK, 1, b'', 0) and get(n) == (OK, 1, otp_plain, 0),
+          'GOYOVA06 of 96 bytes seeds a new vault and is served')
+    check(put(n, 1, otp_keyed) == (OK, 2, b'', 0) and get(n) == (OK, 2, otp_keyed, 0)
+          and fetch(n, 1) == (OK, 1, otp_plain, 0),
+          'GOYOVA08 of 140 bytes is stored and served')
+    shutil.rmtree(store.paths(n)[0])
 
     # An entry at a version name that is no version (a short or empty file,
     # a folder, a link, a FIFO) never becomes the head, so reads go on, and
@@ -1816,7 +1829,10 @@ def selftest_root(root, base):
             (head_a, a, kf2[0], 'GOYOKE03 key file'), (head_a, a, kf2[1], 'GOYOKH01 key file'),
             (head_a, a, kf2[2], 'GOYOKS01 key file'), (0, n, kf2[3][:8] + n + kf2[3][24:], 'GOYOKS01 for a new vault'),
             (head_a, a, b'GOYOVA01' + b1[8:], 'GOYOVA01'), (head_a, a, b'GOYOVA03' + b1[8:], 'GOYOVA03'),
-            (head_a, a, b'GOYOVA05' + b1[8:], 'GOYOVA05'), (head_a, a, keyed(a, 9, 139), 'GOYOVA04 of 139 bytes'),
+            (head_a, a, b'GOYOVA05' + b1[8:], 'GOYOVA05'), (head_a, a, b'GOYOVA07' + b1[8:], 'GOYOVA07'),
+            (head_a, a, b'GOYOVA09' + b1[8:], 'GOYOVA09'), (head_a, a, blob(a, 9, 139, b'GOYOVA08'), 'GOYOVA08 of 139 bytes'),
+            (head_a, a, blob(a, 9, 95, b'GOYOVA06'), 'GOYOVA06 of 95 bytes'),
+            (head_a, a, keyed(a, 9, 139), 'GOYOVA04 of 139 bytes'),
             (head_a, a, keyed(c, 9), 'GOYOVA04 of another vault'),
             (head_a, a, blob(c, 9), 'another vault id'), (0, n, blob(a, 9), 'another vault id, new vault'),
             (head_a, a, blob(a, 9, 95), '95 bytes'), (head_a, a, b'', 'no blob')):
@@ -2281,11 +2297,11 @@ def selftest_keys(base):
         """The key record of data in generation gen."""
         return record_header(KEY_RECORD, gen, struct.unpack('<Q', data[24:32])[0]) + data
 
-    def sealed(vid, key_file, seed, epoch=None, key_id=None, state=None):
-        """A GOYOVA04 file written under key_file's state, or with one field
-        of its header changed."""
+    def sealed(vid, key_file, seed, epoch=None, key_id=None, state=None, magic=b'GOYOVA04'):
+        """A GOYOVA04 file (or GOYOVA08) written under key_file's state, or
+        with one field of its header changed."""
         epoch = struct.unpack('<Q', key_file[24:32])[0] if epoch is None else epoch
-        head = (b'GOYOVA04' + vid + (key_file[96:112] if key_id is None else key_id) + struct.pack('<Q', epoch)
+        head = (magic + vid + (key_file[96:112] if key_id is None else key_id) + struct.pack('<Q', epoch)
                 + (state_tag(key_file[:key_file.w]) if state is None else state) + b'\x03\x00\x00\x00')
         return head + filler(b'vault %d' % seed, 140 - len(head))
 
@@ -2613,11 +2629,13 @@ def selftest_keys(base):
     for data, what in ((sealed(a, f5, 2, key_id=other[96:112]), 'another key ID'),
                        (sealed(a, f5, 3, state=state_tag(other[:other.w])), 'another state tag'),
                        (sealed(a, f5, 4, epoch=6), 'a higher epoch'), (sealed(a, f5, 5, epoch=4), 'a lower epoch'),
-                       (plain(a, 6), 'GOYOVA02')):
+                       (sealed(a, f5, 12, epoch=6, magic=b'GOYOVA08'), 'GOYOVA08 at a higher epoch'),
+                       (plain(a, 6), 'GOYOVA02'), (b'GOYOVA06' + plain(a, 13)[8:], 'GOYOVA06')):
         before = tree(v)
         check(noted(store, request(PUT, a, 1, data), (KEY_BEHIND, 0, b'', 0), 'does not match the stored key file')
               and tree(v) == before, 'KEY_BEHIND: ' + what)
-    check(put(store, a, 1, sealed(a, f5, 7)) == (OK, 2, b'', 0), 'the matching state lands again')
+    check(put(store, a, 1, sealed(a, f5, 7, magic=b'GOYOVA08')) == (OK, 2, b'', 0),
+          'the matching state lands again, in GOYOVA08 (OTP) too')
     # Exactness: vault PUTs that wait for the lock while a PUTKEY commits
     # see the new key state.
     f6 = ks(a, 6, 2)
@@ -2635,6 +2653,9 @@ def selftest_keys(base):
           'the floor is exact: a waiting vault PUT sees the key record committed before it')
     check(cutkey(store, a, 2)[:2] == (OK, 3) and put(store, a, 3, anywhere(a, 10, 999)) == (OK, 4, b'', 0)
           and put(store, a, 4, plain(a, 11)) == (KEY_BEHIND, 0, b'', 0), 'after a cut: any GOYOVA04, no GOYOVA02')
+    check(put(store, a, 4, b'GOYOVA06' + plain(a, 12)[8:]) == (KEY_BEHIND, 0, b'', 0)
+          and put(store, a, 4, sealed(a, ks(a, 2, 1013), 13, epoch=999, magic=b'GOYOVA08')) == (OK, 5, b'', 0),
+          'after a cut: any GOYOVA08, no GOYOVA06')
 
     # Row 8: CUTKEY.
     store = fresh(a)

@@ -1,4 +1,4 @@
-Goyo Vault 0.11.0
+Goyo Vault 0.12.0
 
 1. Extract the whole ZIP to a folder only you use that is not synced
    (for example C:\Users\<you>\GoyoVault). Avoid the inside of the ZIP, temporary
@@ -10,9 +10,10 @@ Goyo Vault 0.11.0
    Switch the language with '한국어 | English' in the top-right corner.
 3. Choose a long password of 4-6 unrelated words. Leave out words from common
    password lists such as dragon or sunshine.
-4. The phone OTP feature has been removed. A vault made earlier with the OTP on
-   opens with the password (and the key file) alone. You can delete the
-   'Goyo Vault' entry in your phone's OTP app.
+4. The phone OTP for opening the vault has been removed. A vault made earlier with
+   the OTP on opens with the password (and the key file) alone. You can delete the
+   'Goyo Vault' entry in your phone's OTP app. (An entry can now keep a website's
+   OTP secret and show its code and QR; see "Save an entry" in README.en.md.)
 5. First try it with fake values: save an entry -> back up vault -> back up key -> restore.
 
 Requirements: Windows 11 x64, a CPU with RDSEED.

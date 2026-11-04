@@ -669,7 +669,7 @@ struct Arrival {
 }
 /// What a server copy is to this session (spec v3 §7.1).
 enum Verdict {
-    /// GOYOVA05 or later: sync stops for this session.
+    /// GOYOVA09 or later: sync stops for this session.
     Newer,
     /// No valid wrapper, or a GOYOVA03/04 header outside the grammar:
     /// ignored. Its version means nothing, so no repair is pushed over it.
@@ -2060,6 +2060,89 @@ mod tests {
         assert_eq!(sa.check_code(), sb.check_code());
     }
 
+    /// An OTP secret goes through the server like any edit: A's upload is
+    /// GOYOVA06, B merges it and the secret comes out the same; B's edit of
+    /// it meanwhile is a conflict with both versions kept; once no entry
+    /// has one, the upload is GOYOVA02 again, which 0.11.0 reads.
+    #[test]
+    fn an_otp_secret_syncs_like_any_edit() {
+        crypto::set_kdf_profile(crypto::KdfProfile::Test);
+        let t = Temp::new();
+        let mut server = Server::default();
+        let (a, mut sa, b, mut sb) = pair(&t, &mut server, 2);
+        let otp = |s: &str| crate::otp::Otp::parse(s).unwrap().unwrap();
+        let with = |title: &str, secret: &str, o: Option<&crate::otp::Otp>| {
+            Entry::new_with_otp(title.into(), "kind".into(), secret.into(), String::new(), o)
+                .unwrap()
+        };
+        let first = otp("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&issuer=Bank");
+        let i = find(&sa, "entry 0");
+        sa.put(Some(i), with("entry 0", "secret", Some(&first)))
+            .unwrap();
+        let (_, blob) = a.outgoing().unwrap();
+        assert_eq!(&blob[..8], b"GOYOVA06");
+        server.pass(&a);
+        assert_eq!(sa.poll_sync(), event(None, true));
+        server.pass(&b);
+        let ev = sb.poll_sync().unwrap();
+        assert_eq!(
+            ev.notice,
+            Some(SyncNotice::Merged {
+                added: 1,
+                removed: 1
+            })
+        );
+        let j = find(&sb, "entry 0");
+        assert_eq!(sb.entries[j].otp(), Some(first.clone()));
+        assert_eq!(sb.check_code(), sa.check_code());
+        assert_eq!(&fs::read(b.vault()).unwrap()[..8], b"GOYOVA06");
+        // Both change the OTP secret: two versions, one conflict each side.
+        let second = otp("JBSWY3DPEHPK3PXQ");
+        let third = otp("otpauth://totp/x?secret=JBSWY3DPEHPK3PXR&digits=8");
+        let i = find(&sa, "entry 0");
+        sa.put(Some(i), with("entry 0", "secret", Some(&second)))
+            .unwrap();
+        sb.put(Some(j), with("entry 0", "secret", Some(&third)))
+            .unwrap();
+        server.pass(&a);
+        server.pass(&b);
+        let ev = sb.poll_sync().unwrap();
+        assert_eq!(ev.notice, Some(SyncNotice::Conflicts(1)));
+        server.pass(&b);
+        assert_eq!(sb.poll_sync(), event(None, true));
+        server.pass(&a);
+        assert_eq!(
+            sa.poll_sync().unwrap().notice,
+            Some(SyncNotice::Conflicts(1))
+        );
+        let held = |s: &Session| -> Vec<Option<crate::otp::Otp>> {
+            let mut v: Vec<_> = s
+                .entries
+                .iter()
+                .filter(|e| e.has_otp())
+                .map(Entry::otp)
+                .collect();
+            v.sort_by_key(|o| o.as_ref().map(|o| o.secret_base32().to_string()));
+            v
+        };
+        assert_eq!(held(&sa), [Some(second.clone()), Some(third.clone())]);
+        assert_eq!(held(&sa), held(&sb));
+        assert_eq!(sa.check_code(), sb.check_code());
+        // A removes both OTP secrets: GOYOVA02 again, and B follows.
+        while let Some(i) = sa.entries.iter().position(Entry::has_otp) {
+            let e = with(&sa.entries[i].title.clone(), "secret", None);
+            sa.put(Some(i), e).unwrap();
+        }
+        let (_, blob) = a.outgoing().unwrap();
+        assert_eq!(&blob[..8], b"GOYOVA02");
+        server.pass(&a);
+        let _ = sa.poll_sync();
+        server.pass(&b);
+        let _ = sb.poll_sync().unwrap();
+        assert!(sb.entries.iter().all(|e| !e.has_otp()));
+        assert_eq!(&fs::read(b.vault()).unwrap()[..8], b"GOYOVA02");
+        assert_eq!(sa.check_code(), sb.check_code());
+    }
     #[test]
     fn merges_over_a_limit_wait_for_room() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
@@ -2254,7 +2337,7 @@ mod tests {
         // A newer format stops sync for the session: no upload, even after
         // an edit, while the vault still opens and saves.
         let mut newer = good.clone();
-        newer[..8].copy_from_slice(b"GOYOVA05");
+        newer[..8].copy_from_slice(b"GOYOVA09");
         a.incoming(8, &newer);
         let mut s = a.unlock();
         assert_eq!(s.take_unlock_notice(), Some(SyncNotice::NewerFormat));
@@ -2524,7 +2607,7 @@ mod tests {
         assert_eq!(titles(&sa), kept);
         // A newer format halts sync for the session.
         let mut newer = server.versions[1].clone();
-        newer[..8].copy_from_slice(b"GOYOVA05");
+        newer[..8].copy_from_slice(b"GOYOVA09");
         a.incoming(7, &newer);
         let ev = sa.poll_sync().unwrap();
         assert_eq!(ev.notice, Some(SyncNotice::NewerFormat));
@@ -2718,7 +2801,7 @@ mod tests {
             let mut forged = open(&sa, &server.versions[0]);
             for e in &mut forged.entries {
                 if drop_moved {
-                    let id2 = derived_id(sa.keys.id_key(), b"goyo dup\0", &e.id, e.fields());
+                    let id2 = derived_id(sa.keys.id_key(), b"goyo dup\0", &e.id, e.content());
                     forged.tombstones.push(id2);
                 }
                 *e.secret = "a".into(); // sorts before "secret"
@@ -3216,7 +3299,7 @@ mod tests {
                     "newer format",
                     {
                         let mut b = copy(&current, Header::Legacy, Format::V2, false);
-                        b[..8].copy_from_slice(b"GOYOVA05");
+                        b[..8].copy_from_slice(b"GOYOVA09");
                         b
                     },
                     Want::Ignored(SyncNotice::NewerFormat),

@@ -1793,6 +1793,77 @@ pub const EN: &[(&str, &str)] = &[
     ),
     ("확인", "OK"),
     ("받기", "Accept"),
+    // An entry's OTP secret: the editor, the view and the QR panel (0.12.0).
+    ("시크릿 복사", "Copy secret"),
+    ("QR 보기", "Show QR"),
+    ("QR 숨기기", "Hide QR"),
+    (
+        "OTP 시크릿 (선택) · 키 또는 otpauth 주소",
+        "OTP secret (optional) · key or otpauth URI",
+    ),
+    ("발급자 (선택)", "Issuer (optional)"),
+    ("계정 (선택)", "Account (optional)"),
+    (
+        "이 항목에는 OTP 시크릿이 없습니다.",
+        "This entry has no OTP secret.",
+    ),
+    (
+        "OTP 코드를 복사했습니다 · 15초 안에 붙여넣으세요.",
+        "OTP code copied · paste it within 15 seconds.",
+    ),
+    (
+        "OTP 시크릿을 복사했습니다 · 15초 안에 붙여넣으세요. 복사 허용은 다시 꺼졌습니다.",
+        "OTP secret copied · paste it within 15 seconds. Allow copy is off again.",
+    ),
+    (
+        "otpauth 주소에서 발급자와 계정 이름을 채웠습니다.",
+        "Filled in the issuer and account from the otpauth URI.",
+    ),
+    ("{}초 뒤 바뀜", "Changes in {}s"),
+    ("시크릿 {}", "Secret {}"),
+    ("시크릿 ••••••••", "Secret ••••••••"),
+    (
+        "QR 코드 · 휴대폰 인증 앱으로 스캔하세요",
+        "QR code · scan it with your phone's authenticator app",
+    ),
+    ("{}초 뒤 숨김", "Hides in {}s"),
+    (
+        "QR 코드가 이 창에 담기에 너무 큽니다. [시크릿 복사]로 인증 앱에 직접 넣으세요.",
+        "The QR code is too large for this window. Use [Copy secret] to enter it in the authenticator app.",
+    ),
+    (
+        "OTP 시크릿은 Base32 문자(A-Z, 2-7)이거나 otpauth://totp/ 주소여야 합니다.",
+        "The OTP secret must be Base32 (A-Z, 2-7) or an otpauth://totp/ URI.",
+    ),
+    (
+        "otpauth 주소를 읽을 수 없습니다. 사이트가 보여 준 주소나 시크릿 키를 그대로 붙여넣으세요.",
+        "Cannot read the otpauth URI. Paste the URI or secret key exactly as the site shows it.",
+    ),
+    (
+        "시간 기반 OTP(otpauth://totp/)만 지원합니다.",
+        "Only time-based OTP (otpauth://totp/) is supported.",
+    ),
+    (
+        "OTP 설정이 지원 범위 밖입니다(알고리즘 SHA1/SHA256/SHA512, 6~8자리, 주기 1~3600초).",
+        "The OTP settings are out of range (algorithm SHA1/SHA256/SHA512, 6 to 8 digits, period 1 to 3600 seconds).",
+    ),
+    (
+        "OTP 시크릿이나 발급자·계정 이름이 너무 깁니다.",
+        "The OTP secret or the issuer or account name is too long.",
+    ),
+    (
+        "발급자·계정 이름에는 ':'나 제어 문자를 쓸 수 없습니다.",
+        "Issuer and account names cannot contain ':' or control characters.",
+    ),
+    (
+        "발급자·계정 이름만 있고 OTP 시크릿이 없습니다. 시크릿을 넣거나 두 칸을 비우세요.",
+        "There is an issuer or account name but no OTP secret. Enter the secret or clear both fields.",
+    ),
+    ("QR 데이터가 너무 깁니다.", "The QR data is too long."),
+    (
+        "OTP 시크릿을 읽을 수 없습니다.",
+        "Cannot read the OTP secret.",
+    ),
 ];
 /// The English of the security-key build's own texts (spec §9.3): only that
 /// build compiles them, so the default exe holds none of them.

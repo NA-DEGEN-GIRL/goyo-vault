@@ -13,7 +13,9 @@ use goyo_vault::fido::{
     AssertRequest, Authenticator, CancelToken, FidoError, Touch, check_assertion,
 };
 use goyo_vault::{
-    crypto, syncfile,
+    clock, crypto,
+    otp::{self, Otp},
+    qr, syncfile,
     vault::{
         self, AdoptClass, Entry, Format, GAP_KEPT, GatePass, KeyInfo, KeyNotice, LEFTOVER_TEMP,
         Prepared, Provision, Recovery, Session, Source, SyncBadge, SyncNotice, VaultClass,
@@ -45,8 +47,9 @@ thread_local! {
     /// The window was hidden until pending events are handled.
     static HIDDEN_FOR_EVENTS: Cell<bool> = const { Cell::new(false) };
     static WINDOW_GONE: Cell<bool> = const { Cell::new(false) };
-    /// Set by edit_proc before it posts PASTE_CLEARED (bit 1) or INPUT_ERROR
-    /// (bit 2), so the same messages posted by another program do nothing.
+    /// Set by edit_proc before it posts PASTE_CLEARED (bit 1), INPUT_ERROR
+    /// (bit 2) or OTP_PASTED (bit 4), so the same messages posted by another
+    /// program do nothing.
     static PASTE_NOTICE: Cell<u8> = const { Cell::new(0) };
     /// Set by App::submit when an unlock found a v1 vault next to a sync
     /// folder; window_proc then asks whether to turn sync on (offer_sync).
@@ -72,6 +75,9 @@ static LIST_PROC: OnceLock<Proc> = OnceLock::new();
 const DRAIN_EVENTS: u32 = 0x8001;
 const INPUT_ERROR: u32 = 0x8002;
 const PASTE_CLEARED: u32 = 0x8003;
+/// An otpauth URI was pasted into OTP_FIELD: its names fill the two fields
+/// next to it.
+const OTP_PASTED: u32 = 0x8004;
 const CREATE: i32 = 101;
 const OPEN: i32 = 102;
 const RESTORE: i32 = 103;
@@ -90,6 +96,24 @@ const TITLE: i32 = 211;
 const KIND: i32 = 212;
 const SECRET: i32 = 213;
 const NOTES: i32 = 214;
+/// The entry editor's OTP secret (masked, with an eye) and its names.
+const OTP_FIELD: i32 = 222;
+const OTP_ISSUER: i32 = 223;
+const OTP_ACCOUNT: i32 = 224;
+/// The entry view's OTP row: copy the code, copy the secret, the QR panel.
+const OTP_COPY: i32 = 225;
+const OTP_SECRET_COPY: i32 = 226;
+const OTP_QR: i32 = 227;
+/// The QR panel hides by itself after this long.
+const QR_SHOWN: Duration = Duration::from_secs(60);
+/// The OTP row's buttons: [복사] here, then [시크릿 복사] and [QR 보기].
+const OTP_ROW: (i32, i32) = (536, 556);
+/// What the timer repaints of the OTP row: its names line with the
+/// countdown, and the code (the buttons are child windows).
+const OTP_TICKING: (i32, i32, i32, i32) = (CARD_X, 526, CARD_W, 68);
+/// The QR panel's square, under its caption, above the OTP row.
+const QR_AREA: (i32, i32, i32, i32) = (CARD_X, 224, CARD_W, 288);
+const NO_OTP: &str = "이 항목에는 OTP 시크릿이 없습니다.";
 const NEW: i32 = 110;
 const EDIT: i32 = 111;
 const DELETE: i32 = 112;
@@ -111,6 +135,7 @@ const BACK: i32 = 126;
 const PEEK_PASS: i32 = 127;
 const PEEK_CONFIRM: i32 = 128;
 const PEEK_CURRENT: i32 = 129;
+const PEEK_OTP: i32 = 228;
 /// With the shortest auto-lock, an open vault locks once another app has had
 /// focus this long. Shorter trips (pasting a copied value, a screenshot
 /// tool's overlay) only hide what was shown; capture exclusion already keeps
@@ -171,10 +196,11 @@ const PENDING_FORGET: i32 = 190;
 /// unused at the earliest: a flow's questions take longer to answer than
 /// the shortest auto-lock (spec §9.2a).
 const FLOW_IDLE: Duration = Duration::from_secs(600);
-const PEEK_FIELDS: [(i32, i32); 3] = [
+const PEEK_FIELDS: [(i32, i32); 4] = [
     (PEEK_PASS, PASS),
     (PEEK_CONFIRM, CONFIRM),
     (PEEK_CURRENT, CURRENT_PASS),
+    (PEEK_OTP, OTP_FIELD),
 ];
 const PRESET: i32 = 130;
 const PRESET_LAST: i32 = PRESET + KIND_PRESETS.len() as i32 - 1;
@@ -292,7 +318,11 @@ struct App {
     inactive: bool,
     /// Which PEEK_FIELDS are shown with the eye button. Kept here, not in the
     /// button's window data, which other programs can overwrite.
-    shown: [bool; 3],
+    shown: [bool; PEEK_FIELDS.len()],
+    /// The entry whose OTP QR code the detail card shows, and until when
+    /// (see qr_shown). Gone on lock, on leaving the entry or the screen,
+    /// when another app comes in front, and after QR_SHOWN.
+    qr: Option<(vault::EntryId, Instant)>,
     /// Tone of the status line on the next build (one-shot).
     status_tone: isize,
     /// Index into AUTO_LOCKS, kept in goyo-vault.autolock.
@@ -684,7 +714,8 @@ impl App {
             from_welcome: false,
             away_since: None,
             inactive: false,
-            shown: [false; 3],
+            shown: [false; PEEK_FIELDS.len()],
+            qr: None,
             status_tone: TONE_MUTED,
             auto_lock: load_auto_lock(),
             sync_ticks: 0,
@@ -846,7 +877,7 @@ impl App {
             // Apply private input handling before providing any initial value.
             // Password scope is a hint to OS text services, not an isolation boundary.
             let scope_ok = SetInputScope(edit, 31) == 0;
-            let ime_ok = if matches!(id, SECRET | NOTES) {
+            let ime_ok = if matches!(id, SECRET | NOTES | OTP_FIELD) {
                 ImmAssociateContextEx(edit, 0, 0);
                 let context = ImmGetContext(edit);
                 if context != 0 {
@@ -870,8 +901,10 @@ impl App {
                     1024
                 } else if id == TITLE {
                     256
-                } else if id == KIND {
+                } else if matches!(id, KIND | OTP_ISSUER | OTP_ACCOUNT) {
                     64
+                } else if id == OTP_FIELD {
+                    otp::MAX_INPUT
                 } else {
                     8192
                 },
@@ -1143,7 +1176,7 @@ impl App {
         }
         self.controls.clear();
         self.frames.clear();
-        self.shown = [false; 3];
+        self.shown = [false; PEEK_FIELDS.len()];
     }
     fn status(&mut self, text: &str) {
         self.set_status(text, TONE_MUTED);
@@ -1248,9 +1281,11 @@ impl App {
         Ok(())
     }
     /// Every screen change goes through here (see serial).
+    /// Every screen change, a lock's included, takes the QR panel away.
     fn show(&mut self, screen: Screen) {
         self.screen = screen;
         self.serial += 1;
+        self.qr = None;
     }
     /// Login when a vault exists at the current path (or only its temp file,
     /// which the unlock takes back), otherwise Welcome.
@@ -1423,10 +1458,21 @@ impl App {
         i18n::set_english(english);
         save_language(english);
         self.status_tone = unsafe { GetWindowLongPtrW(self.handle(STATUS), -21) };
-        let typed: Vec<i32> = [PASS, CONFIRM, CURRENT_PASS, TITLE, KIND, SECRET, NOTES]
-            .into_iter()
-            .filter(|&id| self.handle(id) != 0)
-            .collect();
+        let typed: Vec<i32> = [
+            PASS,
+            CONFIRM,
+            CURRENT_PASS,
+            TITLE,
+            KIND,
+            SECRET,
+            NOTES,
+            OTP_FIELD,
+            OTP_ISSUER,
+            OTP_ACCOUNT,
+        ]
+        .into_iter()
+        .filter(|&id| self.handle(id) != 0)
+        .collect();
         self.rebuild_keeping(&typed);
         let button = if english { LANG_EN } else { LANG_KO };
         unsafe {
@@ -1633,7 +1679,11 @@ impl App {
             for entry in &session.entries {
                 let label = secret_wide(&entry.title);
                 unsafe {
-                    SendMessageW(list, 0x180, 0, label.as_ptr() as isize);
+                    let i = SendMessageW(list, 0x180, 0, label.as_ptr() as isize);
+                    // LB_SETITEMDATA: the row's OTP mark (theme::draw_row).
+                    if i >= 0 && entry.has_otp() {
+                        SendMessageW(list, 0x19a, i as usize, theme::ROW_OTP);
+                    }
                 }
             }
             if let Some(i) = self.selected.filter(|i| *i < session.entries.len()) {
@@ -1653,6 +1703,22 @@ impl App {
         }
         self.button(PREVIOUS, "‹", 728, 322, 40, 36, theme::GHOST);
         self.button(NEXT, "›", 772, 322, 40, 36, theme::GHOST);
+        // The OTP row, for an entry with an OTP secret (see draw_otp).
+        let (x, y) = (OTP_ROW.0, OTP_ROW.1);
+        self.button(OTP_COPY, "복사", x, y, 64, 34, theme::SECONDARY);
+        self.button(
+            OTP_SECRET_COPY,
+            "시크릿 복사",
+            x + 72,
+            y,
+            104,
+            34,
+            theme::SECONDARY,
+        );
+        self.button(OTP_QR, "QR 보기", x + 184, y, 92, 34, theme::SECONDARY);
+        unsafe {
+            EnableWindow(self.handle(OTP_SECRET_COPY), 0);
+        }
         self.button(BACKUP, "금고 백업", 40, 642, 112, 34, theme::SECONDARY);
         self.button(KEYBACKUP, "열쇠 백업", 160, 642, 104, 34, theme::SECONDARY);
         self.button(CHANGE, "열쇠 관리", 272, 642, 148, 34, theme::SECONDARY);
@@ -1725,9 +1791,33 @@ impl App {
             self.button(PRESET + i as i32, name, x, 222, 92, 32, theme::CHIP);
         }
         self.label("비밀정보 · 여러 줄 가능", 40, 272, 400);
-        self.input(SECRET, &values[2], (40, 294, 796, 130), false, true, 0);
-        self.label("메모", 40, 440, 400);
-        self.input(NOTES, &values[3], (40, 462, 796, 100), false, true, 0);
+        self.input(SECRET, &values[2], (40, 294, 796, 100), false, true, 0);
+        self.label("메모", 40, 404, 400);
+        self.input(NOTES, &values[3], (40, 426, 796, 64), false, true, 0);
+        // The OTP secret, masked like a password, and its names. Pasting a
+        // whole otpauth URI fills the names (see otp_pasted).
+        let otp = self
+            .editing
+            .and_then(|i| self.session.as_ref()?.entries.get(i))
+            .and_then(Entry::otp);
+        let (text, issuer, account) = match &otp {
+            Some(o) => (o.editor_text(), o.issuer.clone(), o.account.clone()),
+            None => Default::default(),
+        };
+        self.password_field(
+            OTP_FIELD,
+            "OTP 시크릿 (선택) · 키 또는 otpauth 주소",
+            40,
+            500,
+            420,
+        );
+        if !self.input_failed {
+            unsafe {
+                SetWindowTextW(self.handle(OTP_FIELD), secret_wide(&text).as_ptr());
+            }
+        }
+        self.field(OTP_ISSUER, "발급자 (선택)", &issuer, 476, 500, 172, false);
+        self.field(OTP_ACCOUNT, "계정 (선택)", &account, 664, 500, 172, false);
         let note = format!(
             "{}\r\n{}",
             tr(
@@ -1735,7 +1825,7 @@ impl App {
             ),
             tr(AUTO_LOCKS[self.auto_lock].3)
         );
-        self.note(&note, 40, 574, 796, 58);
+        self.note(&note, 40, 572, 796, 60);
         self.button(CANCEL, "취소", 588, 640, 100, 40, theme::SECONDARY);
         self.button(SAVE, "암호화하여 저장", 696, 640, 140, 40, theme::PRIMARY);
         unsafe {
@@ -2068,6 +2158,10 @@ impl App {
             && entry
                 .and_then(|e| self.shown(e).ok())
                 .is_some_and(|p| p.len() > 1);
+        // The QR panel takes the secret's place, buttons and all.
+        let qr = self.qr_shown();
+        let secret = entry.is_some() && !qr;
+        let otp = entry.is_some_and(Entry::has_otp);
         unsafe {
             let reveal = if revealed {
                 "가리기"
@@ -2075,15 +2169,20 @@ impl App {
                 "15초 보기"
             };
             SetWindowTextW(self.handle(REVEAL), wide(tr(reveal)).as_ptr());
+            let shown = if qr { "QR 숨기기" } else { "QR 보기" };
+            SetWindowTextW(self.handle(OTP_QR), wide(tr(shown)).as_ptr());
             let focus = GetFocus();
             for (id, show) in [
                 (EDIT, entry.is_some()),
                 (DELETE, entry.is_some()),
-                (REVEAL, entry.is_some()),
-                (TOGGLE, entry.is_some()),
-                (COPY, entry.is_some()),
-                (PREVIOUS, paging),
-                (NEXT, paging),
+                (REVEAL, secret),
+                (TOGGLE, secret),
+                (COPY, secret),
+                (PREVIOUS, paging && !qr),
+                (NEXT, paging && !qr),
+                (OTP_COPY, otp),
+                (OTP_SECRET_COPY, otp),
+                (OTP_QR, otp),
             ] {
                 let h = self.handle(id);
                 if !show && h == focus {
@@ -2130,7 +2229,8 @@ impl App {
         }
         self.away_since.get_or_insert_with(Instant::now);
         self.reset_copy();
-        if self.reveal_until.take().is_some() {
+        let qr = self.qr.take().is_some();
+        if self.reveal_until.take().is_some() || qr {
             self.sync_detail();
             unsafe {
                 InvalidateRect(self.hwnd, null(), 0);
@@ -2231,6 +2331,7 @@ impl App {
         self.adopt_source = None;
         cancel_input();
         self.reveal_until = None;
+        self.qr = None;
         self.copy_until = None;
         self.expire_clipboard();
     }
@@ -2797,6 +2898,7 @@ impl App {
             let i = unsafe { SendMessageW(self.handle(LIST), 0x188, 0, 0) };
             self.selected = if i >= 0 { Some(i as usize) } else { None };
             self.reveal_until = None;
+            self.qr = None;
             self.page = 0;
             self.reset_copy();
             self.sync_detail();
@@ -2891,7 +2993,7 @@ impl App {
             THEME_DARK | THEME_LIGHT => self.set_theme(id == THEME_DARK),
             LANG_KO | LANG_EN => self.set_language(id == LANG_EN),
             AUTO_LOCK..=AUTO_LOCK_LAST => self.set_auto_lock((id - AUTO_LOCK) as usize),
-            PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT => self.peek(id)?,
+            PEEK_PASS | PEEK_CONFIRM | PEEK_CURRENT | PEEK_OTP => self.peek(id)?,
             PRESET..=PRESET_LAST => unsafe {
                 let kind = self.handle(KIND);
                 let name = KIND_PRESETS[(id - PRESET) as usize];
@@ -2908,11 +3010,17 @@ impl App {
                 let mut kind = self.read(KIND)?;
                 let mut secret = self.read(SECRET)?;
                 let mut notes = self.read(NOTES)?;
-                let e = Entry::new(
+                let otp = Otp::from_editor(
+                    &self.read(OTP_FIELD)?,
+                    &self.read(OTP_ISSUER)?,
+                    &self.read(OTP_ACCOUNT)?,
+                )?;
+                let e = Entry::new_with_otp(
                     std::mem::take(&mut *title),
                     std::mem::take(&mut *kind),
                     std::mem::take(&mut *secret),
                     std::mem::take(&mut *notes),
+                    otp.as_ref(),
                 )?;
                 let s = self.session.as_mut().ok_or("금고가 잠겼습니다.")?;
                 // `editing` is still the entry's index: merges wait while
@@ -2953,10 +3061,49 @@ impl App {
                     return Err("먼저 복사 허용을 켜주세요.");
                 }
                 let e = self.entry().ok_or("복사할 항목을 선택하세요.")?;
-                let seq = copy_secret(self.hwnd, &e.secret)?;
+                let seq = copy_value(self.hwnd, &e.secret)?;
                 self.clipboard = Some((seq, Instant::now() + Duration::from_secs(15)));
                 self.reset_copy();
                 self.status("복사 완료 · 15초 안에 붙여넣으세요. 복사 허용은 다시 꺼졌습니다.");
+            }
+            OTP_COPY => {
+                let e = self.entry().ok_or("복사할 항목을 선택하세요.")?;
+                let otp = e.otp().ok_or(NO_OTP)?;
+                let code = otp.code(clock::now()?);
+                let seq = copy_value(self.hwnd, &code)?;
+                self.clipboard = Some((seq, Instant::now() + Duration::from_secs(15)));
+                self.status("OTP 코드를 복사했습니다 · 15초 안에 붙여넣으세요.");
+            }
+            OTP_SECRET_COPY => {
+                if self.copy_until.is_none_or(|t| Instant::now() >= t) {
+                    self.reset_copy();
+                    return Err("먼저 복사 허용을 켜주세요.");
+                }
+                let e = self.entry().ok_or("복사할 항목을 선택하세요.")?;
+                let otp = e.otp().ok_or(NO_OTP)?;
+                let seq = copy_value(self.hwnd, &otp.secret_base32())?;
+                self.clipboard = Some((seq, Instant::now() + Duration::from_secs(15)));
+                self.reset_copy();
+                self.status(
+                    "OTP 시크릿을 복사했습니다 · 15초 안에 붙여넣으세요. 복사 허용은 다시 꺼졌습니다.",
+                );
+            }
+            OTP_QR => {
+                if self.qr_shown() {
+                    self.hide_qr();
+                } else {
+                    let e = self.entry().ok_or("항목을 선택하세요.")?;
+                    if !e.has_otp() {
+                        return Err(NO_OTP);
+                    }
+                    self.qr = Some((e.id(), Instant::now() + QR_SHOWN));
+                    self.reveal_until = None;
+                    self.page = 0;
+                    self.sync_detail();
+                    unsafe {
+                        InvalidateRect(self.hwnd, null(), 0);
+                    }
+                }
             }
             REVEAL => {
                 if self.selected.is_none() {
@@ -3068,11 +3215,24 @@ impl App {
                     | COPY
                     | PREVIOUS
                     | NEXT
+                    | OTP_COPY
+                    | OTP_SECRET_COPY
+                    | OTP_QR
                     | AUTO_LOCK..=AUTO_LOCK_LAST
             ),
             Screen::Edit => matches!(
                 id,
-                TITLE | KIND | SECRET | NOTES | SAVE | CANCEL | PRESET..=PRESET_LAST
+                TITLE
+                    | KIND
+                    | SECRET
+                    | NOTES
+                    | OTP_FIELD
+                    | OTP_ISSUER
+                    | OTP_ACCOUNT
+                    | PEEK_OTP
+                    | SAVE
+                    | CANCEL
+                    | PRESET..=PRESET_LAST
             ),
             Screen::Password => matches!(
                 id,
@@ -3109,6 +3269,51 @@ impl App {
         self.copy_until = None;
         self.set_toggle(false);
     }
+    /// Whether the detail card shows the QR panel: on the vault list, for
+    /// the entry it was opened for, which still has an OTP secret, and
+    /// before its time is up.
+    fn qr_shown(&self) -> bool {
+        self.screen == Screen::Vault
+            && self.qr.is_some_and(|(id, until)| {
+                Instant::now() < until && self.entry().is_some_and(|e| e.id() == id && e.has_otp())
+            })
+    }
+    /// The QR panel's QR_SHOWN are up at `now`: it goes (see timer).
+    fn expire_qr(&mut self, now: Instant) {
+        if self.qr.is_some_and(|(_, t)| now >= t) {
+            self.hide_qr();
+        }
+    }
+    /// Takes the QR panel away, with the secret's buttons back.
+    fn hide_qr(&mut self) {
+        if self.qr.take().is_some() {
+            self.sync_detail();
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
+    }
+    /// A pasted otpauth URI: its issuer and account fill the two fields
+    /// next to the secret, over what they held (the paste is the user's).
+    fn otp_pasted(&mut self) {
+        if self.screen != Screen::Edit {
+            return;
+        }
+        let Ok(text) = self.read(OTP_FIELD) else {
+            return;
+        };
+        match Otp::parse(&text) {
+            Ok(Some(o)) => {
+                unsafe {
+                    SetWindowTextW(self.handle(OTP_ISSUER), secret_wide(&o.issuer).as_ptr());
+                    SetWindowTextW(self.handle(OTP_ACCOUNT), secret_wide(&o.account).as_ptr());
+                }
+                self.status("otpauth 주소에서 발급자와 계정 이름을 채웠습니다.");
+            }
+            Ok(None) => {}
+            Err(e) => self.error(e),
+        }
+    }
     fn set_toggle(&self, on: bool) {
         unsafe {
             let toggle = self.handle(TOGGLE);
@@ -3118,6 +3323,7 @@ impl App {
                 InvalidateRect(toggle, null(), 0);
             }
             EnableWindow(self.handle(COPY), on as i32);
+            EnableWindow(self.handle(OTP_SECRET_COPY), on as i32);
             if self.screen == Screen::Vault {
                 let (x, y, w, h) = HINT;
                 InvalidateRect(self.hwnd, &self.r(x, y, w, h), 0);
@@ -3164,6 +3370,17 @@ impl App {
             self.sync_detail();
             unsafe {
                 InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
+        self.expire_qr(now);
+        // The OTP code and its countdown, and the QR panel's.
+        if self.screen == Screen::Vault && self.entry().is_some_and(Entry::has_otp) {
+            let (x, y, w, h) = OTP_TICKING;
+            unsafe {
+                InvalidateRect(self.hwnd, &self.r(x, y, w, h), 0);
+                if self.qr.is_some() {
+                    InvalidateRect(self.hwnd, &self.r(CARD_X, 196, CARD_W, 24), 0);
+                }
             }
         }
         if self.session.is_some() || self.provision.is_some() || self.auth_dirty {
@@ -3283,6 +3500,7 @@ impl App {
         if event.list_changed {
             self.selected = kept.and_then(|id| s.entry_index(&id).or_else(|| s.successor(&id)));
             self.reveal_until = None;
+            self.qr = None;
             self.page = 0;
             self.reset_copy();
         }
@@ -3608,6 +3826,14 @@ impl App {
             theme::round(dc, &chip, self.px(12), Some(p.surface), None);
             theme::text(dc, kind, &chip, small, p.muted, DT_CENTER | LINE);
             theme::fill(dc, &self.r(CARD_X, 184, CARD_W, 1), p.border);
+            let otp = e.otp();
+            if let Some(o) = &otp {
+                self.draw_otp(dc, o, small, title);
+                if self.qr_shown() {
+                    self.draw_qr(dc, e, o, small, body);
+                    return;
+                }
+            }
             theme::text(
                 dc,
                 tr("비밀정보"),
@@ -3654,7 +3880,8 @@ impl App {
                 p.muted,
                 LINE,
             );
-            let notes = self.r(CARD_X, 468, CARD_W, 132);
+            // Two lines above the OTP row, for an entry with one.
+            let notes = self.r(CARD_X, 468, CARD_W, if otp.is_some() { 44 } else { 132 });
             if e.notes.is_empty() {
                 theme::text(dc, tr("메모 없음"), &notes, body, p.faint, wrap);
             } else if revealed {
@@ -3663,6 +3890,129 @@ impl App {
             } else {
                 let hidden = tr("가려짐 · 보기를 누르면 비밀정보와 함께 표시됩니다.");
                 theme::text(dc, hidden, &notes, small, p.muted, wrap);
+            }
+        }
+    }
+    /// The OTP row under the memo: the names, the code of the moment with
+    /// its countdown (shown: it lives only for its period), and the secret,
+    /// masked but during the 15-second view.
+    unsafe fn draw_otp(&self, dc: isize, o: &Otp, small: isize, title: isize) {
+        let p = theme::palette();
+        unsafe {
+            theme::fill(dc, &self.r(CARD_X, 522, CARD_W, 1), p.border);
+            let names = match (o.issuer.is_empty(), o.account.is_empty()) {
+                (false, false) => format!("OTP · {} ({})", *o.issuer, *o.account),
+                (false, true) => format!("OTP · {}", *o.issuer),
+                (true, false) => format!("OTP · {}", *o.account),
+                (true, true) => "OTP".to_owned(),
+            };
+            let names = Zeroizing::new(names);
+            theme::text(
+                dc,
+                &names,
+                &self.r(CARD_X, 530, CARD_W - 140, 20),
+                small,
+                p.muted,
+                LINE,
+            );
+            match clock::now() {
+                Ok(now) => {
+                    let code = otp_grouped(&o.code(now));
+                    let r = self.r(CARD_X, 554, OTP_ROW.0 - CARD_X - 8, 38);
+                    theme::text(dc, &code, &r, title, p.text, LINE);
+                    let left = fill("{}초 뒤 바뀜", &[&o.remaining(now)]);
+                    let r = self.r(CARD_X + CARD_W - 136, 530, 136, 20);
+                    theme::text(dc, &left, &r, small, p.muted, DT_RIGHT | LINE);
+                }
+                Err(e) => {
+                    let r = self.r(CARD_X, 554, OTP_ROW.0 - CARD_X - 8, 38);
+                    theme::text(dc, tr(e), &r, small, p.danger, LINE);
+                }
+            }
+            let r = self.r(CARD_X, 598, CARD_W, 20);
+            if self.reveal_until.is_some() {
+                let shown = Zeroizing::new(fill("시크릿 {}", &[&*o.secret_grouped()]));
+                theme::text(dc, &shown, &r, small, p.text, LINE);
+            } else {
+                theme::text(dc, tr("시크릿 ••••••••"), &r, small, p.faint, LINE);
+            }
+        }
+    }
+    /// The QR panel in the secret's place: the entry's otpauth URI as black
+    /// modules on white with a four-module quiet zone, each module a whole
+    /// number of pixels, as large as the area allows.
+    unsafe fn draw_qr(&self, dc: isize, e: &Entry, o: &Otp, small: isize, body: isize) {
+        let p = theme::palette();
+        unsafe {
+            theme::text(
+                dc,
+                tr("QR 코드 · 휴대폰 인증 앱으로 스캔하세요"),
+                &self.r(CARD_X, 198, CARD_W - 120, 20),
+                small,
+                p.muted,
+                LINE,
+            );
+            if let Some((_, until)) = self.qr {
+                let left = until
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .div_ceil(1000);
+                let r = self.r(CARD_X + CARD_W - 120, 198, 120, 20);
+                theme::text(
+                    dc,
+                    &fill("{}초 뒤 숨김", &[&left]),
+                    &r,
+                    small,
+                    p.muted,
+                    DT_RIGHT | LINE,
+                );
+            }
+            let (x, y, w, h) = QR_AREA;
+            let wrap = DT_WORDBREAK | DT_NOPREFIX;
+            let uri = o.uri(&e.title);
+            let code = match qr::encode(uri.as_bytes()) {
+                Ok(code) => code,
+                Err(err) => {
+                    theme::text(dc, tr(err), &self.r(x, y, w, 60), body, p.danger, wrap);
+                    return;
+                }
+            };
+            let Some(layout) = qr_layout(code.size, self.px(w), self.px(h)) else {
+                let r = self.r(x, y, w, 60);
+                theme::text(dc, tr(QR_TOO_LARGE), &r, body, p.danger, wrap);
+                return;
+            };
+            let left = self.px(x) + layout.offset.0;
+            let top = self.px(y) + layout.offset.1;
+            let m = layout.module;
+            let side = m * (code.size as i32 + 8);
+            let all = Rect {
+                left,
+                top,
+                right: left + side,
+                bottom: top + side,
+            };
+            theme::fill(dc, &all, 0x00FF_FFFF);
+            // Each row's runs of dark modules as one rectangle.
+            for row in 0..code.size {
+                let mut col = 0;
+                while col < code.size {
+                    if !code.dark(col, row) {
+                        col += 1;
+                        continue;
+                    }
+                    let start = col;
+                    while col < code.size && code.dark(col, row) {
+                        col += 1;
+                    }
+                    let r = Rect {
+                        left: left + (start as i32 + 4) * m,
+                        top: top + (row as i32 + 4) * m,
+                        right: left + (col as i32 + 4) * m,
+                        bottom: top + (row as i32 + 5) * m,
+                    };
+                    theme::fill(dc, &r, 0);
+                }
             }
         }
     }
@@ -3975,6 +4325,7 @@ fn modal_command(h: Hwnd, id: i32) -> crypto::Result<()> {
         a.paths()?;
         a.reset_copy();
         a.reveal_until = None;
+        a.qr = None;
         unsafe {
             InvalidateRect(h, null(), 1);
         }
@@ -5402,8 +5753,14 @@ fn paste_into_edit(h: Hwnd) -> crypto::Result<()> {
         // A pasted password or secret should not outlive the paste on the
         // clipboard. Anything copied since then belongs to the user.
         let id = GetWindowLongPtrW(h, -12) as i32;
-        if matches!(id, SECRET | PASS | CONFIRM | CURRENT_PASS | INPUT_EDIT)
-            && clear_pasted(h, sequence)
+        if id == OTP_FIELD && is_otp_uri(&data) {
+            PASTE_NOTICE.with(|n| n.set(n.get() | 4));
+            PostMessageW(GetParent(h), OTP_PASTED, 0, 0);
+        }
+        if matches!(
+            id,
+            SECRET | OTP_FIELD | PASS | CONFIRM | CURRENT_PASS | INPUT_EDIT
+        ) && clear_pasted(h, sequence)
         {
             PASTE_NOTICE.with(|n| n.set(n.get() | 1));
             PostMessageW(GetParent(h), PASTE_CLEARED, 0, 0);
@@ -5412,6 +5769,68 @@ fn paste_into_edit(h: Hwnd) -> crypto::Result<()> {
     Ok(())
 }
 
+/// A code in two groups for reading it out: "123 456", "1234 5678",
+/// "123 4567".
+fn otp_grouped(code: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(code.len() + 1));
+    let half = code.len() / 2;
+    for (i, c) in code.chars().enumerate() {
+        if i == half && half > 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+const QR_TOO_LARGE: &str =
+    "QR 코드가 이 창에 담기에 너무 큽니다. [시크릿 복사]로 인증 앱에 직접 넣으세요.";
+/// Where a QR symbol of `size` modules goes in an area of `w` × `h` pixels.
+#[derive(Debug, PartialEq)]
+struct QrLayout {
+    /// Pixels a module, the same across and down.
+    module: i32,
+    /// The top left of the quiet zone in the area.
+    offset: (i32, i32),
+}
+/// The largest whole number of pixels a module that fits the symbol and its
+/// four-module quiet zone on each side, centred; None below 2 pixels a
+/// module, which a phone camera cannot read from a screen.
+fn qr_layout(size: usize, w: i32, h: i32) -> Option<QrLayout> {
+    let total = size as i32 + 8;
+    let module = w.min(h) / total;
+    if module < 2 {
+        return None;
+    }
+    let side = module * total;
+    Some(QrLayout {
+        module,
+        offset: ((w - side) / 2, (h - side) / 2),
+    })
+}
+/// Puts a secret on the clipboard, kept out of its history (see
+/// win::copy_secret), and returns the clipboard's sequence number.
+#[cfg(not(test))]
+fn copy_value(h: Hwnd, text: &str) -> crypto::Result<u32> {
+    copy_secret(h, text)
+}
+/// The tests' clipboard: what the app copied last, so no test reads or
+/// changes the user's own clipboard.
+#[cfg(test)]
+fn copy_value(_: Hwnd, text: &str) -> crypto::Result<u32> {
+    COPIED.with(|c| *c.borrow_mut() = Some(Zeroizing::new(text.to_owned())));
+    Ok(1)
+}
+#[cfg(test)]
+thread_local! {
+    static COPIED: RefCell<Option<Zeroizing<String>>> = const { RefCell::new(None) };
+}
+/// Whether pasted UTF-16 text starts like an otpauth URI.
+fn is_otp_uri(data: &[u16]) -> bool {
+    let head: String = char::decode_utf16(data.iter().copied().take(16))
+        .map(|c| c.unwrap_or('\u{fffd}'))
+        .collect();
+    otp::is_uri(&head)
+}
 /// Clears and returns a notice bit set by edit_proc (see PASTE_NOTICE).
 fn take_notice(bit: u8) -> bool {
     PASTE_NOTICE.with(|n| {
@@ -5471,6 +5890,7 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
                 | DRAIN_EVENTS
                 | INPUT_ERROR
                 | PASTE_CLEARED
+                | OTP_PASTED
         )
     {
         return 0;
@@ -5655,6 +6075,12 @@ unsafe extern "system" fn window_proc(h: Hwnd, m: u32, w: usize, l: isize) -> is
             PASTE_CLEARED => {
                 if take_notice(1) {
                     app.status("붙여넣은 값을 클립보드에서 지웠습니다. 다른 앱이 남긴 기록(Win+V 등)은 지우지 못합니다.");
+                }
+                true
+            }
+            OTP_PASTED => {
+                if take_notice(4) {
+                    app.otp_pasted();
                 }
                 true
             }
@@ -6890,6 +7316,37 @@ mod tests {
             app.build();
             visit(&mut app, "vault-copy");
             app.copy_until = None;
+            // An entry with an OTP secret: its row, its secret shown, its QR.
+            let otp = Otp::parse(SYNTHETIC_OTP).unwrap();
+            let entry = Entry::new_with_otp(
+                "Synthetic bank with a long name".into(),
+                "비밀번호".into(),
+                "synthetic secret".into(),
+                "synthetic memo".into(),
+                otp.as_ref(),
+            )
+            .unwrap();
+            let s = app.session.as_mut().unwrap();
+            s.put(None, entry).unwrap();
+            let otp_id = s.entries[1].id();
+            app.selected = Some(1);
+            app.build();
+            visit(&mut app, "vault-otp");
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.build();
+            visit(&mut app, "vault-otp-shown");
+            app.reveal_until = None;
+            app.qr = Some((otp_id, Instant::now() + QR_SHOWN));
+            app.build();
+            visit(&mut app, "vault-otp-qr");
+            app.qr = None;
+            app.editing = Some(1);
+            app.screen = Screen::Edit;
+            app.build();
+            visit(&mut app, "edit-otp");
+            app.editing = None;
+            app.screen = Screen::Vault;
+            app.selected = Some(0);
             // A vault that syncs: the helper's folder and status, sync turned
             // on and its first upload handed back, so the pill shows a real
             // "동기화됨" before the file name; then every other word.
@@ -7499,8 +7956,10 @@ mod tests {
     }
     /// The source files whose Korean literals english_is_complete checks,
     /// by their path under src/ (spec §9.3).
-    const SCANNED: [(&str, &str); 15] = [
+    const SCANNED: [(&str, &str); 17] = [
         ("main.rs", include_str!("main.rs")),
+        ("otp.rs", include_str!("otp.rs")),
+        ("qr.rs", include_str!("qr.rs")),
         ("win.rs", include_str!("win.rs")),
         ("theme.rs", include_str!("theme.rs")),
         ("vault.rs", include_str!("vault.rs")),
@@ -8613,6 +9072,290 @@ mod tests {
                 cell.borrow_mut().take();
             });
         }
+    }
+    /// A synthetic otpauth URI with long names, for the screens.
+    const SYNTHETIC_OTP: &str = "otpauth://totp/Synthetic%20Bank:someone%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Synthetic%20Bank";
+    fn style_visible(h: Hwnd) -> bool {
+        unsafe { GetWindowLongPtrW(h, -16) & 0x1000_0000 != 0 }
+    }
+    /// An entry with an OTP secret: the code and its countdown are painted
+    /// (never put into a control); [복사] copies the code with the usual
+    /// expiry; [시크릿 복사] needs 복사 허용 like the password; the secret
+    /// shows only in the 15-second view; [QR 보기] paints the URI as a QR
+    /// code (black on white, a quiet zone, whole pixels a module) in the
+    /// secret's place, which goes after 60 s, on another entry, another
+    /// screen, another app in front and on lock. The editor's OTP field is
+    /// masked, unreadable from outside and without IME; a pasted URI fills
+    /// the names; saving adds, changes and removes the secret.
+    #[test]
+    fn an_otp_entry_shows_its_code_and_qr() {
+        #[link(name = "gdi32")]
+        unsafe extern "system" {
+            fn GetPixel(dc: isize, x: i32, y: i32) -> u32;
+        }
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let dir = test_dir("otp-view");
+        let mut session = synthetic_session(&dir, "synthetic otp password");
+        let o = Otp::parse(SYNTHETIC_OTP).unwrap().unwrap();
+        let entry = Entry::new_with_otp(
+            "Bank".into(),
+            "비밀번호".into(),
+            "synthetic password".into(),
+            String::new(),
+            Some(&o),
+        )
+        .unwrap();
+        session.put(None, entry).unwrap();
+        let plain = Entry::new("Plain".into(), String::new(), "x".into(), String::new()).unwrap();
+        session.put(None, plain).unwrap();
+        COPIED.with(|c| c.borrow_mut().take());
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.session = Some(session);
+            app.screen = Screen::Vault;
+            app.build();
+            // The list marks the entry (LB_GETITEMDATA).
+            let list = app.handle(LIST);
+            assert_eq!(SendMessageW(list, 0x199, 0, 0), theme::ROW_OTP);
+            assert_eq!(SendMessageW(list, 0x199, 1, 0), 0);
+            let pick = |app: &mut App, i: usize| {
+                SendMessageW(app.handle(LIST), 0x186, i, 0);
+                app.command(LIST, 1).unwrap();
+            };
+            pick(&mut app, 1);
+            assert!(!style_visible(app.handle(OTP_COPY)) && !style_visible(app.handle(OTP_QR)));
+            assert!(!painted(&app).iter().any(|t| t.starts_with("OTP")));
+            pick(&mut app, 0);
+            for id in [OTP_COPY, OTP_SECRET_COPY, OTP_QR, REVEAL, TOGGLE, COPY] {
+                assert!(style_visible(app.handle(id)), "{id}");
+            }
+            // The code of now (or of the next period, should one begin
+            // meanwhile), the names and the countdown; the secret masked.
+            let now = clock::now().unwrap();
+            let codes: Vec<String> = [now, now + 30]
+                .iter()
+                .map(|t| otp_grouped(&o.code(*t)).to_string())
+                .collect();
+            let texts = painted(&app);
+            assert!(texts.iter().any(|t| codes.contains(t)), "{texts:?}");
+            assert!(texts.contains(&"OTP · Synthetic Bank (someone@example.com)".to_owned()));
+            assert!(texts.iter().any(|t| t.ends_with("초 뒤 바뀜")));
+            assert!(texts.contains(&"시크릿 ••••••••".to_owned()));
+            assert!(!texts.iter().any(|t| t.contains("JBSW")));
+            for c in &app.children {
+                let text = caption(*c);
+                assert!(!text.contains("JBSW") && !codes.iter().any(|code| text.contains(code)));
+            }
+            // The 15-second view shows the secret too.
+            app.command(REVEAL, 0).unwrap();
+            let secret = format!("시크릿 {}", *o.secret_grouped());
+            assert!(painted(&app).contains(&secret));
+            app.command(REVEAL, 0).unwrap();
+            assert!(!painted(&app).contains(&secret));
+            // [복사]: the code, cleared after 15 s like a copied password.
+            app.command(OTP_COPY, 0).unwrap();
+            let copied = COPIED.with(|c| c.borrow_mut().take()).unwrap();
+            assert!(codes.iter().any(|c| c.replace(' ', "") == *copied));
+            let (_, until) = app.clipboard.unwrap();
+            let soon = Instant::now() + Duration::from_secs(15);
+            assert!(until <= soon && until + Duration::from_secs(5) > soon);
+            app.clipboard = Some((1, Instant::now() - Duration::from_secs(1)));
+            app.timer();
+            assert!(app.clipboard.is_none());
+            // [시크릿 복사] only while 복사 허용 is on, and it turns it off.
+            assert!(app.command(OTP_SECRET_COPY, 0).is_err());
+            assert!(COPIED.with(|c| c.borrow().is_none()));
+            app.command(TOGGLE, 0).unwrap();
+            app.command(OTP_SECRET_COPY, 0).unwrap();
+            let copied = COPIED.with(|c| c.borrow_mut().take()).unwrap();
+            assert_eq!(copied.as_str(), "JBSWY3DPEHPK3PXP");
+            assert!(app.copy_until.is_none() && app.clipboard.is_some());
+            app.clipboard = None;
+            // [QR 보기]: the panel in the secret's place.
+            app.command(OTP_QR, 0).unwrap();
+            assert!(app.qr_shown());
+            for id in [REVEAL, TOGGLE, COPY] {
+                assert!(!style_visible(app.handle(id)), "{id}");
+            }
+            assert_eq!(caption(app.handle(OTP_QR)), "QR 숨기기");
+            let texts = painted(&app);
+            assert!(texts.contains(&"QR 코드 · 휴대폰 인증 앱으로 스캔하세요".to_owned()));
+            assert!(texts.iter().any(|t| t.ends_with("초 뒤 숨김")));
+            assert!(!texts.contains(&"비밀정보".to_owned()));
+            // Its pixels: every module where the encoder put it, the quiet
+            // zone white, sharp edges.
+            let code = qr::encode(o.uri("Bank").as_bytes()).unwrap();
+            let (x, y, w, hh) = QR_AREA;
+            let layout = qr_layout(code.size, app.px(w), app.px(hh)).unwrap();
+            assert!(layout.module >= 4, "{layout:?}");
+            let screen = GetDC(app.hwnd);
+            let dc = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, 1600, 1400);
+            ReleaseDC(app.hwnd, screen);
+            let old = SelectObject(dc, bmp);
+            app.draw_screen(dc);
+            let (left, top, m) = (
+                app.px(x) + layout.offset.0,
+                app.px(y) + layout.offset.1,
+                layout.module,
+            );
+            let n = code.size as i32;
+            for my in -4..n + 4 {
+                for mx in -4..n + 4 {
+                    let dark = (0..n).contains(&mx)
+                        && (0..n).contains(&my)
+                        && code.dark(mx as usize, my as usize);
+                    let want = if dark { 0 } else { 0x00FF_FFFF };
+                    let (px, py) = (left + (mx + 4) * m, top + (my + 4) * m);
+                    for (dx, dy) in [(0, 0), (m - 1, m - 1), (m / 2, m / 2)] {
+                        assert_eq!(GetPixel(dc, px + dx, py + dy), want, "module {mx},{my}");
+                    }
+                }
+            }
+            SelectObject(dc, old);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            // It goes on another entry, after 60 s, on another app in front,
+            // on another screen and on lock.
+            pick(&mut app, 1);
+            assert!(app.qr.is_none() && style_visible(app.handle(REVEAL)));
+            pick(&mut app, 0);
+            app.command(OTP_QR, 0).unwrap();
+            app.expire_qr(Instant::now() + QR_SHOWN - Duration::from_secs(1));
+            assert!(app.qr.is_some());
+            app.expire_qr(Instant::now() + QR_SHOWN);
+            assert!(app.qr.is_none() && style_visible(app.handle(REVEAL)));
+            assert_eq!(caption(app.handle(OTP_QR)), "QR 보기");
+            app.command(OTP_QR, 0).unwrap();
+            app.command(OTP_QR, 0).unwrap();
+            assert!(app.qr.is_none());
+            app.command(OTP_QR, 0).unwrap();
+            app.deactivated();
+            assert!(app.qr.is_none());
+            app.activated();
+            app.inactive = false;
+            app.command(OTP_QR, 0).unwrap();
+            // A QR of another entry is never shown for this one.
+            let other = app.session.as_ref().unwrap().entries[1].id();
+            app.qr = Some((other, Instant::now() + QR_SHOWN));
+            assert!(!app.qr_shown());
+            app.command(OTP_QR, 0).unwrap();
+            assert!(app.qr_shown());
+            app.command(EDIT, 0).unwrap();
+            assert!(app.qr.is_none() && app.screen == Screen::Edit);
+            // The editor: masked, unreadable from outside, no IME, the
+            // names in their fields.
+            let field = app.handle(OTP_FIELD);
+            assert_eq!(&*app.read(OTP_FIELD).unwrap(), "JBSWY3DPEHPK3PXP");
+            assert_eq!(&*app.read(OTP_ISSUER).unwrap(), "Synthetic Bank");
+            assert_eq!(&*app.read(OTP_ACCOUNT).unwrap(), "someone@example.com");
+            assert_ne!(SendMessageW(field, 0xd2, 0, 0), 0);
+            assert_eq!(GetWindowTextLengthW(field), 0);
+            assert_eq!(GetWindowTextLengthW(app.handle(OTP_ISSUER)), 0);
+            assert_eq!(SendMessageW(field, 0x301, 0, 0), 0);
+            assert_eq!(ImmGetContext(field), 0);
+            app.command(PEEK_OTP, 0).unwrap();
+            assert_eq!(SendMessageW(field, 0xd2, 0, 0), 0);
+            assert_eq!(GetWindowTextLengthW(field), 0);
+            assert_eq!(ImmGetContext(field), 0);
+            app.command(PEEK_OTP, 0).unwrap();
+            assert_ne!(SendMessageW(field, 0xd2, 0, 0), 0);
+            // A pasted URI fills the names; posted by another program, the
+            // notice does nothing (no bit set).
+            assert!(!take_notice(4));
+            let uri = "otpauth://totp/New%20Issuer:new%40example.com?secret=JBSWY3DPEHPK3PXQ&issuer=New%20Issuer&digits=8";
+            SetWindowTextW(field, secret_wide(uri).as_ptr());
+            app.otp_pasted();
+            assert_eq!(&*app.read(OTP_ISSUER).unwrap(), "New Issuer");
+            assert_eq!(&*app.read(OTP_ACCOUNT).unwrap(), "new@example.com");
+            SetWindowTextW(app.handle(OTP_ACCOUNT), secret_wide("typed").as_ptr());
+            app.command(SAVE, 0).unwrap();
+            assert!(app.screen == Screen::Vault);
+            let saved = app.session.as_ref().unwrap().entries[0].otp().unwrap();
+            assert_eq!(
+                (saved.issuer.as_str(), saved.account.as_str(), saved.digits),
+                ("New Issuer", "typed", 8)
+            );
+            assert_eq!(&*saved.secret_base32(), "JBSWY3DPEHPK3PXQ");
+            assert_eq!(&fs_magic(&app), b"GOYOVA05");
+            // A bad secret is refused and nothing changes; an empty field
+            // removes the secret.
+            app.command(EDIT, 0).unwrap();
+            SetWindowTextW(app.handle(OTP_FIELD), secret_wide("not base32!").as_ptr());
+            assert!(app.command(SAVE, 0).is_err());
+            assert!(app.screen == Screen::Edit);
+            for id in [OTP_FIELD, OTP_ISSUER, OTP_ACCOUNT] {
+                SetWindowTextW(app.handle(id), wide("").as_ptr());
+            }
+            app.command(SAVE, 0).unwrap();
+            assert!(
+                app.session
+                    .as_ref()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .all(|e| !e.has_otp())
+            );
+            assert_eq!(SendMessageW(app.handle(LIST), 0x199, 0, 0), 0);
+            assert_eq!(&fs_magic(&app), b"GOYOVA01");
+            // Lock: no QR survives it.
+            app.session
+                .as_mut()
+                .unwrap()
+                .put(Some(0), {
+                    Entry::new_with_otp(
+                        "Bank".into(),
+                        String::new(),
+                        "x".into(),
+                        String::new(),
+                        Some(&o),
+                    )
+                    .unwrap()
+                })
+                .unwrap();
+            app.build();
+            pick(&mut app, 0);
+            app.command(OTP_QR, 0).unwrap();
+            assert!(app.qr_shown());
+            app.lock("test lock", true);
+            assert!(app.qr.is_none());
+            // A scrub (Windows locking or ending the session, sent from
+            // another thread) drops it at once, before the lock rebuilds.
+            app.qr = Some((other, Instant::now() + QR_SHOWN));
+            app.scrub();
+            assert!(app.qr.is_none());
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The first eight bytes of the open vault's file.
+    fn fs_magic(app: &App) -> [u8; 8] {
+        let path = &app.session.as_ref().unwrap().path;
+        std::fs::read(path).unwrap()[..8].try_into().unwrap()
+    }
+    /// The code in two groups, and the QR layout's whole pixels, centred,
+    /// none below two a module.
+    #[test]
+    fn otp_codes_group_and_the_qr_fits_whole_pixels() {
+        assert_eq!(&*otp_grouped("123456"), "123 456");
+        assert_eq!(&*otp_grouped("1234567"), "123 4567");
+        assert_eq!(&*otp_grouped("12345678"), "1234 5678");
+        assert_eq!(
+            qr_layout(41, 464, 288),
+            Some(QrLayout {
+                module: 5,
+                offset: ((464 - 245) / 2, (288 - 245) / 2)
+            })
+        );
+        assert_eq!(qr_layout(41, 98, 98).unwrap().module, 2);
+        assert_eq!(qr_layout(41, 97, 400), None);
+        assert_eq!(qr_layout(177, 1000, 1000).unwrap().module, 5);
     }
     /// Renders every screen with synthetic data to `test-output/ui-preview/*.bmp`
     /// for design review. It shows a real window briefly without capture
@@ -10223,10 +10966,35 @@ mod tests {
         let auto_lock: Vec<i32> = (AUTO_LOCK..=AUTO_LOCK_LAST).collect();
         let presets: Vec<i32> = (PRESET..=PRESET_LAST).collect();
         let vault = [
-            LOCK, BACKUP, KEYBACKUP, CHANGE, LIST, NEW, EDIT, DELETE, REVEAL, TOGGLE, COPY,
-            PREVIOUS, NEXT,
+            LOCK,
+            BACKUP,
+            KEYBACKUP,
+            CHANGE,
+            LIST,
+            NEW,
+            EDIT,
+            DELETE,
+            REVEAL,
+            TOGGLE,
+            COPY,
+            PREVIOUS,
+            NEXT,
+            OTP_COPY,
+            OTP_SECRET_COPY,
+            OTP_QR,
         ];
-        let edit = [TITLE, KIND, SECRET, NOTES, SAVE, CANCEL];
+        let edit = [
+            TITLE,
+            KIND,
+            SECRET,
+            NOTES,
+            OTP_FIELD,
+            OTP_ISSUER,
+            OTP_ACCOUNT,
+            PEEK_OTP,
+            SAVE,
+            CANCEL,
+        ];
         for (screen, ids) in [
             (Screen::Vault, [&vault[..], &auto_lock].concat()),
             (Screen::Edit, [&edit[..], &presets].concat()),
