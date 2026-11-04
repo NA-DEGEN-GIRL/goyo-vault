@@ -159,14 +159,14 @@ fn cut_unanswered(dir: &Path, id: &[u8; 16], view: &KeyView) -> bool {
         _ => false,
     }
 }
-/// The vault head's header epoch: bytes 40..48 of the GOYOVA04 file in
-/// incoming (KP); None for GOYOVA02 or no copy. Only the first 64 bytes are
-/// read.
+/// The vault head's header epoch: bytes 40..48 of the GOYOVA04 or 08 file
+/// in incoming (KP); None for GOYOVA02/06 or no copy. Only the first 64
+/// bytes are read.
 fn head_epoch(dir: &Path) -> Option<u64> {
     let (file, _) = opened(&dir.join(INCOMING)).ok()?;
     let mut head = [0u8; 64];
     (&file).read_exact(&mut head).ok()?;
-    let keyed = &head[..8] == INCOMING_MAGIC && &head[16..24] == b"GOYOVA04";
+    let keyed = &head[..8] == INCOMING_MAGIC && syncfile::keyed_vault(&head[16..24]);
     keyed.then(|| u64::from_le_bytes(head[56..64].try_into().unwrap()))
 }
 
@@ -821,7 +821,7 @@ impl<T: Transport> Pass<'_, T> {
     /// top changes it) or a helper start; else it goes again hourly.
     pub(super) fn hold_behind(&mut self, sha: [u8; 32], blob: &[u8]) {
         let k = &self.v.keys;
-        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64).is_some_and(|f| f & 1 != 0);
+        let hardware = syncfile::keyed_vault(blob) && blob.get(64).is_some_and(|f| f & 1 != 0);
         let state = if k.line_off() && hardware {
             SyncState::NoKeys
         } else {

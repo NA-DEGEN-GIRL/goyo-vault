@@ -4012,6 +4012,60 @@ pub(crate) mod keys {
         assert_eq!(pc.log().matches("prune.request ignored").count(), 1);
     }
 
+    /// GOYOVA08 (0.12.0, GOYOVA04 with OTP secrets) has GOYOVA04's header:
+    /// its head's epoch lets a KP go, and a hardware GOYOVA08 upload's
+    /// KEY_BEHIND on a line without key ops is `nokeys`.
+    #[test]
+    fn the_keyed_otp_format_counts_for_the_key_steps() {
+        let otp = |fill: u8, epoch: u64| {
+            let mut v = keyed(&id(), fill);
+            v[..8].copy_from_slice(b"GOYOVA08");
+            v[40..48].copy_from_slice(&epoch.to_le_bytes());
+            v
+        };
+        let pc = Pc::with_folder();
+        let clock = TestClock::new();
+        seed_incoming(&pc, id(), 4, &otp(3, 9));
+        replace_file(&pc.dir.join(PRUNE_REQUEST), &render_prune_request(&id(), 9)).unwrap();
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::Empty, 0, b""),
+                reply(Status::NotModified, 4, b""),
+                reply(Status::Ok, 3, b""),
+            ]),
+            &clock,
+        );
+        e.pass(0, false);
+        assert!(e.transport.ops().contains(&(Op::Prune, 9)));
+        assert!(!pc.dir.join(PRUNE_REQUEST).exists());
+
+        let pc = pinned();
+        pc.outgoing(4, &otp(3, 0));
+        let mut e = pc.engine(
+            mock([
+                reply(Status::Empty, 0, b""),
+                reply(Status::KeyBehind, 0, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::KeyFile, 4, None, None));
+        pc.set_view(&KeyView {
+            line: 1,
+            ..pc.view().unwrap()
+        });
+        pc.outgoing(4, &otp(1, 0));
+        let mut e = quiet(
+            &pc,
+            mock([
+                reply(Status::BadRequest, 0, b""),
+                reply(Status::KeyBehind, 0, b""),
+            ]),
+            &clock,
+        );
+        assert_eq!(e.pass(0, false), done(SyncState::NoKeys, 4, None, None));
+    }
+
     /// The server script run locally with `--key-sync` naming `ids` (none:
     /// the flag is left out), one process per request.
     pub(crate) struct KeyLocal {

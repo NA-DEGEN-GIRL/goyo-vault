@@ -2170,6 +2170,14 @@ ROWS = [
      'Instant::now() < until && self.entry().is_some_and(|e| e.id() == id && e.has_otp())',
      'Instant::now() < until && self.entry().is_some_and(|e| e.has_otp())',
      [OTP_UI]),
+    ('OTP-3 a GOYOVA08 head counts for KP', 14, 'feature', 'sync', HELPER_KEYS,
+     '    let keyed = &head[..8] == INCOMING_MAGIC && syncfile::keyed_vault(&head[16..24]);',
+     '    let keyed = &head[..8] == INCOMING_MAGIC && &head[16..24] == b"GOYOVA04";',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
+    ("OTP-3 a hardware GOYOVA08 upload's KEY_BEHIND is nokeys", 14, 'feature', 'sync', HELPER_KEYS,
+     '        let hardware = syncfile::keyed_vault(blob) && blob.get(64)',
+     '        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64)',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
 ]
 
 # The default build has security keys; 'keyless' turns them off.
