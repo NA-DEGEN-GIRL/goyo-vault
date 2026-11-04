@@ -47,7 +47,7 @@ class KeyWait<T>(
         if (result.isCompleted) return
         nfc = try {
             manager.startNfcDiscovery(
-                NfcConfiguration().handleUnavailableNfc(false),
+                NfcConfiguration().handleUnavailableNfc(false).skipNdefCheck(true),
                 activity,
             ) { device -> onDevice(device, Ceremony.NFC) }
             true

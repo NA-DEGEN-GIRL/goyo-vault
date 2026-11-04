@@ -1,6 +1,7 @@
 package app.goyovault
 
 import android.net.Uri
+import android.nfc.NfcAdapter
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -91,6 +92,26 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         keyWait?.startNfc(this)
+        guardNfc()
+    }
+
+    /**
+     * While the app is in front and no key is asked for, NFC reader mode
+     * takes every tag and drops it. Otherwise Android hands the YubiKey's
+     * NDEF tag (a Yubico URL) to the browser when the key touches the phone
+     * before or after a ceremony. A ceremony's own reader mode replaces this
+     * one and turns it back on when it ends.
+     */
+    private fun guardNfc() {
+        if (keyWait != null) return
+        val adapter = NfcAdapter.getDefaultAdapter(this) ?: return
+        val flags = NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+            NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
+        try {
+            adapter.enableReaderMode(this, { }, flags, null)
+        } catch (e: IllegalStateException) {
+            // Not resumed (any more): onResume turns it on again.
+        }
     }
 
     override fun onStop() {
@@ -107,6 +128,7 @@ class MainActivity : ComponentActivity() {
     fun lockNow(why: String?) {
         keyWait?.stop(this)
         keyWait = null
+        guardNfc()
         Ask.cancel()
         AppState.lock(why)
         AppState.refreshHome(this)
@@ -177,6 +199,7 @@ class MainActivity : ComponentActivity() {
         } finally {
             wait.stop(this)
             if (keyWait === wait) keyWait = null
+            guardNfc()
         }
     }
 
