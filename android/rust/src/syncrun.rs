@@ -574,6 +574,122 @@ pub fn check(paths: &Paths, seed: Option<Zeroizing<[u8; 32]>>) -> Shown {
     }
 }
 
+/// A transport for one exchange series of the settings window's kind
+/// (check, list, fetch): the phone's key and the pin, no engine.
+fn one_off(
+    paths: &Paths,
+    seed: Option<Zeroizing<[u8; 32]>>,
+) -> Result<(Settings, AndroidTransport), String> {
+    let settings = load_settings(paths).ok_or("동기화 설정이 없습니다. 먼저 서버를 설정하세요.")?;
+    CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+    let mut transport = AndroidTransport::new(settings.target(), CANCEL.clone());
+    transport.seed = seed;
+    transport.pin = load_pin(paths);
+    Ok((settings, transport))
+}
+/// The text of a failed exchange of `transport` (its own reason first).
+fn failed_text(
+    settings: &Settings,
+    transport: &AndroidTransport,
+    e: &syncengine::CallError,
+) -> String {
+    match e {
+        syncengine::CallError::Cancelled => "취소했습니다.".into(),
+        syncengine::CallError::Failed(state, detail) => {
+            let problem = transport.problem.clone();
+            remember_offer(settings, problem.as_ref());
+            shown(problem.as_ref(), *state, &settings.host, detail).text
+        }
+    }
+}
+
+/// "서버에서 가져오기", step b: the server's vaults (LIST) and, for the
+/// first few, whether the server holds their key file. One row per vault:
+/// ID (hex), tag, head version, size, stored at (Unix seconds), key file.
+pub fn server_list(
+    paths: &Paths,
+    seed: Option<Zeroizing<[u8; 32]>>,
+) -> Result<Vec<[String; 6]>, String> {
+    let (settings, mut transport) = one_off(paths, seed)?;
+    let log = paths.log();
+    let rows = crate::fetch::list(&mut transport, &log)
+        .map_err(|e| failed_text(&settings, &transport, &e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(e, key)| {
+            [
+                syncfile::hex(&e.id),
+                crate::fetch::tag(&e.id),
+                e.head.to_string(),
+                e.size.to_string(),
+                e.mtime.to_string(),
+                key.word().to_owned(),
+            ]
+        })
+        .collect())
+}
+
+/// "서버에서 가져오기", steps b and c: the head version of vault `id` as
+/// the phone's vault file (which must not exist yet: the app removes the
+/// old one first, after the user's yes), then the server's key file into
+/// its sync folder as the key view. Returns the version, the size and
+/// what came of the key file (`fetch::KeyGot::word`).
+pub fn server_fetch(
+    paths: &Paths,
+    seed: Option<Zeroizing<[u8; 32]>>,
+    id: [u8; 16],
+) -> Result<(u64, usize, &'static str), String> {
+    let (settings, mut transport) = one_off(paths, seed)?;
+    let log = paths.log();
+    // A sync folder of an earlier vault at this path would be taken for
+    // the new file's (spec §2.29 (sync)): it goes first, with the engine.
+    if fs::symlink_metadata(&paths.vault).is_ok() {
+        return Err("이 휴대폰에 이미 금고가 있습니다. 먼저 지운 뒤 가져오세요.".into());
+    }
+    reset_folder(paths);
+    let (version, bytes) = match crate::fetch::fetch_vault(&mut transport, &log, id, &paths.vault) {
+        crate::fetch::Fetched::Saved { version, bytes } => (version, bytes),
+        crate::fetch::Fetched::Exists => {
+            return Err("이 휴대폰에 이미 금고가 있습니다. 먼저 지운 뒤 가져오세요.".into());
+        }
+        crate::fetch::Fetched::NotFound => {
+            return Err("서버에 그 금고가 없습니다. 목록을 다시 불러오세요.".into());
+        }
+        crate::fetch::Fetched::Server => {
+            return Err("서버가 금고 파일을 보내지 못했습니다(서버 오류). PC에서 '서버에 설치·업데이트'를 확인하세요.".into());
+        }
+        crate::fetch::Fetched::Write => {
+            return Err("금고 파일을 이 휴대폰에 저장하지 못했습니다.".into());
+        }
+        crate::fetch::Fetched::Failed(e) => return Err(failed_text(&settings, &transport, &e)),
+    };
+    let key = crate::fetch::fetch_key(&mut transport, &log, id, &paths.vault);
+    log.line(&format!(
+        "fetched {} version {version} ({bytes} bytes), key file: {}",
+        crate::fetch::tag(&id),
+        key.word()
+    ));
+    Ok((version, bytes, key.word()))
+}
+
+/// The server's key file of the phone's vault into its sync folder as the
+/// key view (a vault fetched before, or imported without its key file).
+pub fn server_fetch_key(
+    paths: &Paths,
+    seed: Option<Zeroizing<[u8; 32]>>,
+) -> Result<&'static str, String> {
+    let id = vault_id(paths).ok_or("이 휴대폰에 금고가 없습니다.")?;
+    let (_, mut transport) = one_off(paths, seed)?;
+    let log = paths.log();
+    let key = crate::fetch::fetch_key(&mut transport, &log, id, &paths.vault);
+    log.line(&format!(
+        "fetched the key file of {}: {}",
+        crate::fetch::tag(&id),
+        key.word()
+    ));
+    Ok(key.word())
+}
+
 /// The line for the server's authorized_keys (see line.rs).
 pub fn server_line(paths: &Paths, blob: &str, model: &str) -> Result<String, String> {
     let settings = load_settings(paths);

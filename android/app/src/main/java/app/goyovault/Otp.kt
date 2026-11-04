@@ -31,13 +31,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.SecureFlagPolicy
 import kotlinx.coroutines.delay
 
 /** The QR panel hides itself after this long, as on the PC. */
 private const val QR_SHOWN_MS = 60_000L
-private val secureDialog = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn)
 
 /** "123456" as "123 456", as the PC app shows a code. */
 private fun grouped(code: String): String {

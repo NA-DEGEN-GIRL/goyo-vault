@@ -19,7 +19,10 @@ fn paths(env: &mut JNIEnv, root: &JString) -> Result<syncrun::Paths, String> {
     Ok(syncrun::Paths::new(&PathBuf::from(string(env, root)?)))
 }
 /// A 32-byte ed25519 seed from a Java array (zeroed there), or None.
-fn take_seed(env: &mut JNIEnv, a: &JByteArray) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
+pub(crate) fn take_seed(
+    env: &mut JNIEnv,
+    a: &JByteArray,
+) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
     let Some(bytes) = take_secret(env, a)? else {
         return Ok(None);
     };
@@ -30,7 +33,7 @@ fn take_seed(env: &mut JNIEnv, a: &JByteArray) -> Result<Option<Zeroizing<[u8; 3
     seed.copy_from_slice(&bytes);
     Ok(Some(seed))
 }
-fn strings_out(env: &mut JNIEnv, items: &[&str]) -> Result<jobjectArray, String> {
+pub(crate) fn strings_out(env: &mut JNIEnv, items: &[&str]) -> Result<jobjectArray, String> {
     let len = jint::try_from(items.len()).map_err(|_| "too many")?;
     let arr = env
         .new_object_array(len, "java/lang/String", JObject::null())

@@ -16,17 +16,20 @@ import java.io.IOException
 import kotlin.concurrent.thread
 
 /**
- * Waits for a YubiKey over USB-C or NFC and runs the unlock's ceremony on
- * the first one that comes. A key pulled away mid-ceremony (NFC) is waited
- * for again; a wrong PIN, an unregistered key or a cancel ends the wait.
+ * Waits for a YubiKey over USB-C or NFC and runs one ceremony ([op]: an
+ * unlock's or Reauth's assertion, or a registration) on the first one that
+ * comes. A key pulled away mid-ceremony (NFC) is waited for again; a wrong
+ * PIN, an unregistered key or a cancel ends the wait.
  */
-class KeyWait(
+class KeyWait<T>(
     private val manager: YubiKitManager,
-    private val req: AssertRequest,
     private val pin: CharArray?,
     private val note: (String) -> Unit,
+    private val op: (Ctap2Session, Int, CommandState, CharArray?) -> T,
+    /** Wipes a result nobody took (a second answer after the first). */
+    private val discard: (T) -> Unit = {},
 ) {
-    val result = CompletableDeferred<Assertion>()
+    val result = CompletableDeferred<T>()
     private val state = CommandState()
     @Volatile
     private var running = false
@@ -66,16 +69,16 @@ class KeyWait(
         running = true
         thread(name = "goyo-yubikey") {
             try {
-                val assertion = if (transport == Ceremony.USB) {
+                val answer = if (transport == Ceremony.USB) {
                     device.openConnection(FidoConnection::class.java).use {
-                        Ceremony.run(Ctap2Session(it), req, pin, transport, state)
+                        op(Ctap2Session(it), transport, state, pin)
                     }
                 } else {
                     device.openConnection(SmartCardConnection::class.java).use {
-                        Ceremony.run(Ctap2Session(it), req, pin, transport, state)
+                        op(Ctap2Session(it), transport, state, pin)
                     }
                 }
-                if (!result.complete(assertion)) assertion.wipe()
+                if (!result.complete(answer)) discard(answer)
             } catch (e: CtapException) {
                 result.completeExceptionally(GoyoException(Ceremony.text(e)))
             } catch (e: GoyoException) {

@@ -45,6 +45,36 @@ object VaultFiles {
         }
     }
 
+    /**
+     * Copies the picked key file in for the vault already here (a vault
+     * from the server whose key file comes from the PC). Never over a key
+     * file that is there.
+     */
+    @Throws(IOException::class)
+    fun importKey(context: Context, keyUri: Uri) {
+        val dir = dir(context)
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("folder")
+        if (key(context).exists()) throw IOException("exists")
+        val temp = copyIn(context, keyUri, File(dir, "$KEY.import"))
+        if (!temp.renameTo(key(context))) {
+            temp.delete()
+            throw IOException("rename")
+        }
+    }
+
+    /** Copies `file` to the place the user picked (a key backup), then fsyncs it. */
+    @Throws(IOException::class)
+    fun copyOut(context: Context, file: File, uri: Uri) {
+        val out = context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("open")
+        out.use { dst ->
+            file.inputStream().use { it.copyTo(dst) }
+            (dst as? java.io.FileOutputStream)?.fd?.sync()
+        }
+    }
+
+    /** The key backup's temporary copy (app-private, deleted once copied out). */
+    fun backupTemp(context: Context): File = File(context.noBackupFilesDir, "key-backup.goyokey")
+
     private fun copyIn(context: Context, uri: Uri, temp: File): File {
         temp.delete()
         val input = context.contentResolver.openInputStream(uri) ?: throw IOException("open")
@@ -69,8 +99,13 @@ object VaultFiles {
         return temp
     }
 
-    /** Removes the imported files (the anchor stays, as on a PC). */
+    /**
+     * Removes the vault and its key file (the anchor stays, as on a PC).
+     * The caller removes the sync folder first (syncReset, in Rust, which
+     * never follows a link).
+     */
     fun remove(context: Context) {
-        dir(context).listFiles()?.forEach { it.delete() }
+        dir(context).listFiles()?.forEach { if (!it.isDirectory) it.delete() }
+        backupTemp(context).delete()
     }
 }

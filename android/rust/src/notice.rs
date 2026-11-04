@@ -1,14 +1,18 @@
 //! The Korean texts of the open vault's sync news (the lib's `SyncNotice`
 //! and `SyncBadge`), worded after goyo-vault.exe's status line
-//! (src/main.rs `sync_line`). Where the PC app sends the user to a screen
-//! this app does not have yet (the Keys screen, its gates: a key code or a
-//! pick), the text says to settle it on a PC first: the lib meanwhile
-//! keeps the server's key file in the sync folder and neither uploads nor
-//! merges, as on a PC that has not answered its gate. No text names an
-//! entry.
+//! (src/main.rs `sync_line`). Another device's key change that waits on
+//! the server is offered at the next unlock (its gate, then [받기]); where
+//! the PC app sends the user to a screen this app does not have (a fork, a
+//! removal merge, key-file sync off), the text says to settle it on a PC
+//! first: the lib meanwhile keeps the server's key file in the sync folder
+//! and neither uploads nor merges, as on a PC that has not answered its
+//! gate. No text names an entry.
 use goyo_vault::vault::{SyncBadge, SyncNotice};
 
 const ON_PC: &str = "PC의 고요 금고에서 먼저 처리하세요(열쇠 관리). 그때까지 이 휴대폰은 올리지도 합치지도 않고, 변경은 이 휴대폰에 저장되어 있습니다.";
+/// A key change of another device that this phone takes at its next
+/// unlock (stage 4: the gate, then [받기], with the unlock's touch).
+const AT_UNLOCK: &str = "금고를 잠근 뒤 다시 열면 받을지 묻습니다(필요하면 그 기기의 열쇠 확인 코드나 잃어버린 키 고르기). 그때까지 이 휴대폰은 올리지도 합치지도 않고, 변경은 이 휴대폰에 저장되어 있습니다.";
 
 /// The badge's word: 0 synced, 1 uploading, 2 helper off, 3 offline,
 /// 4 warning; -1 when the vault does not sync.
@@ -129,7 +133,7 @@ pub fn text(notice: &SyncNotice) -> (String, bool) {
         SyncNotice::BadKeyIncoming => plain("서버의 열쇠 파일 기록을 읽을 수 없어 무시했습니다."),
         SyncNotice::GatePending => (
             format!(
-                "다른 기기에서 바꾼 열쇠 파일이 서버에 있습니다. 확인 전에는 받지 않습니다. {ON_PC}"
+                "다른 기기에서 바꾼 열쇠 파일이 서버에 있습니다. 확인 전에는 받지 않습니다. {AT_UNLOCK}"
             ),
             true,
         ),
@@ -160,7 +164,7 @@ pub fn text(notice: &SyncNotice) -> (String, bool) {
             false,
         ),
         SyncNotice::KeyChangedServer | SyncNotice::KeyChangedServerPwOnly => (
-            format!("다른 기기에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. {ON_PC}"),
+            format!("다른 기기에서 이 금고의 열쇠를 바꿔 동기화를 멈췄습니다. {AT_UNLOCK}"),
             true,
         ),
         SyncNotice::KeyForkMerge { .. } => (
@@ -229,7 +233,7 @@ mod tests {
         assert!(
             text(&SyncNotice::GatePending)
                 .0
-                .contains("PC의 고요 금고에서 먼저 처리하세요")
+                .contains("다시 열면 받을지 묻습니다")
         );
     }
 }

@@ -15,15 +15,22 @@
 #[cfg(test)]
 mod engine_tests;
 mod entry_otp;
+mod fetch;
+#[cfg(test)]
+mod fetch_tests;
+mod flows;
 mod hostkey;
+mod jni_keys;
 mod jni_sync;
 mod line;
 mod notice;
+mod reg;
 mod ssh;
 #[cfg(test)]
 mod ssh_tests;
 mod syncrun;
 mod tailnet;
+mod take;
 
 use goyo_vault::{
     clock, crypto, fido,
@@ -49,12 +56,21 @@ const REQUEST_VERSION: u8 = 1;
 /// Status bits of `status`.
 const STATUS_TOFU: jint = 1;
 const STATUS_GATE_PENDING: jint = 2;
+/// The session's key file came from the server's key view and is not
+/// saved on this device yet ("서버에서 가져온 금고", `fetchedSave`).
+const STATUS_FETCHED: jint = 4;
+/// Another device's key change waits to be taken with this unlock's touch
+/// (`takeInfo`, `takePreview`, `takeAccept`).
+const STATUS_TAKE: jint = 8;
 
 /// A login between its two calls: the files as `prepare` read them and the
 /// request the touch must answer (None: a key file without security keys).
+/// `restore`: a vault from the server opened with the server's key file
+/// (`prepareFetched`), restored in place.
 struct Pending {
     prepared: Prepared,
     request: Option<fido::AssertRequest>,
+    restore: Option<PathBuf>,
 }
 enum Slot {
     Pending(Box<Pending>),
@@ -96,11 +112,6 @@ fn with_session<T>(
 }
 const LOCKED: &str = "금고가 잠겼습니다. 다시 여세요.";
 const NOT_SUPPORTED_YET: &str = "이 상태의 금고는 아직 Android 앱에서 열 수 없습니다. PC의 고요 금고에서 먼저 연 뒤 다시 가져오세요.";
-/// A key file change from another device waits for its gate (a key code
-/// or a pick), which this app has no screen for yet: as on a PC that has
-/// not answered it, the vault stays unopened and the server's key file
-/// stays in the sync folder.
-const GATE_ON_PC: &str = "다른 기기에서 바꾼 열쇠 파일이 확인을 기다립니다. 이 앱에는 아직 그 확인 화면이 없으니 PC에서 먼저 처리하세요(고요 금고의 열쇠 관리). 그 뒤 두 파일을 다시 가져오세요.";
 
 /// A core refusal as text, its `{…}` slots filled when the core kept values.
 fn text(e: &'static str) -> String {
@@ -259,9 +270,11 @@ pub extern "system" fn Java_app_goyovault_Native_vaultTag<'l>(
 }
 
 /// `prepare(vaultPath, keyPath)`: phase 1 of a login (public checks, no
-/// password). Returns the pending login's handle. A state the app cannot
-/// handle yet (an older vault file that needs the user's yes, a key file
-/// change that waits for its gate code) is refused before any touch.
+/// password). Returns the pending login's handle. An older vault file that
+/// needs the user's yes (S-OLDER) is refused before any touch. A changed
+/// key file that waits for its gate opens in gate-pending mode (read-only)
+/// and the vault screen asks the gate (`gateInfo`, `gatePass`), as the
+/// PC's [나중에] then [받기…] do.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_goyovault_Native_prepare<'l>(
     mut env: JNIEnv<'l>,
@@ -276,11 +289,12 @@ pub extern "system" fn Java_app_goyovault_Native_prepare<'l>(
         if matches!(prepared.check().vault, VaultClass::Older { .. }) {
             return Err(NOT_SUPPORTED_YET.to_owned());
         }
-        if prepared.login_gate().is_some() {
-            return Err(GATE_ON_PC.to_owned());
-        }
         let request = prepared.unlock_request(0);
-        insert(Slot::Pending(Box::new(Pending { prepared, request })))
+        insert(Slot::Pending(Box::new(Pending {
+            prepared,
+            request,
+            restore: None,
+        })))
     })
 }
 
@@ -347,7 +361,11 @@ pub extern "system" fn Java_app_goyovault_Native_unlock<'l>(
             None => return Err(LOCKED.to_owned()),
         };
         let password = secret_text(password.ok_or("비밀번호를 입력하세요.")?)?;
-        let Pending { prepared, request } = *p;
+        let Pending {
+            prepared,
+            request,
+            restore,
+        } = *p;
         let hint = prepared.auth_failure();
         let failed = |e: &'static str| {
             if e == crypto::AUTH_ERROR {
@@ -356,33 +374,80 @@ pub extern "system" fn Java_app_goyovault_Native_unlock<'l>(
                 text(e)
             }
         };
-        let session = match request {
-            None => Session::login(prepared, &password, None).map_err(failed)?,
-            Some(request) => {
-                let (Some(first), false, false) = (first, cred_id.is_null(), auth_data.is_null())
-                else {
+        let session = match (request, &restore) {
+            (None, None) => Session::login(prepared, &password, None).map_err(failed)?,
+            (None, Some(v)) => Session::restore_from(prepared, v, &password).map_err(failed)?,
+            (Some(request), restore) => {
+                if first.is_none() || cred_id.is_null() || auth_data.is_null() {
                     return Err("보안 키 응답이 없습니다. YubiKey를 다시 대세요.".to_owned());
-                };
-                let transport = match u32::try_from(transport) {
-                    Ok(t @ (fido::USB | fido::NFC)) => t,
-                    _ => return Err(fido_text(fido::FidoError::Transport)),
-                };
-                let raw = fido::RawAssertion {
-                    // Version 4 states its transport, which check_assertion
-                    // then holds to USB or NFC.
-                    version: 4,
-                    auth_data: env.convert_byte_array(&auth_data).map_err(jerr)?,
-                    cred_id: env.convert_byte_array(&cred_id).map_err(jerr)?,
-                    first: Some(first),
-                    second,
-                    transport: Some(transport),
-                };
+                }
+                let raw = assertion_of(env, &cred_id, &auth_data, first, second, transport)?;
                 let touch = fido::check_assertion(raw, &request, false).map_err(fido_text)?;
-                Session::login_with(prepared, &password, None, &touch).map_err(failed)?
+                if let Some(v) = restore {
+                    Session::restore_with(prepared, v, &password, &touch).map_err(failed)?
+                } else {
+                    // The login that proves itself (spec §5.3): another
+                    // device's key change waiting on the server may be
+                    // taken with this unlock's password and touch.
+                    let (session, proof) = Session::login_proved(prepared, &password, None, &touch)
+                        .map_err(|f| failed(f.error))?;
+                    let take = take::Take::offer(&session, proof, touch);
+                    let h = insert(Slot::Open(Box::new(session)))?;
+                    if let Some(take) = take {
+                        jni_keys::set_take(h, take);
+                    }
+                    return Ok(h);
+                }
             }
         };
         insert(Slot::Open(Box::new(session)))
     })
+}
+
+/// The transport a YubiKey answered over: 1 USB, 2 NFC.
+fn transport_of(transport: jint) -> Result<u32, String> {
+    match u32::try_from(transport) {
+        Ok(t @ (fido::USB | fido::NFC)) => Ok(t),
+        _ => Err(fido_text(fido::FidoError::Transport)),
+    }
+}
+/// What a GetAssertion returned, as the core reads it: version 4 states
+/// its transport, which check_assertion then holds to USB or NFC. The
+/// outputs are already out of the Java arrays.
+fn assertion_of(
+    env: &mut JNIEnv,
+    cred_id: &JByteArray,
+    auth_data: &JByteArray,
+    first: Option<Zeroizing<Vec<u8>>>,
+    second: Option<Zeroizing<Vec<u8>>>,
+    transport: jint,
+) -> Result<fido::RawAssertion, String> {
+    let transport = transport_of(transport)?;
+    Ok(fido::RawAssertion {
+        version: 4,
+        auth_data: env.convert_byte_array(auth_data).map_err(jerr)?,
+        cred_id: env.convert_byte_array(cred_id).map_err(jerr)?,
+        first,
+        second,
+        transport: Some(transport),
+    })
+}
+/// The same from the Java arrays of one JNI call (the outputs zeroed
+/// there first, whatever fails next).
+fn raw_assertion(
+    env: &mut JNIEnv,
+    cred_id: &JByteArray,
+    auth_data: &JByteArray,
+    first: &JByteArray,
+    second: &JByteArray,
+    transport: jint,
+) -> Result<fido::RawAssertion, String> {
+    let first = take_secret(env, first)?;
+    let second = take_secret(env, second)?;
+    if first.is_none() || cred_id.is_null() || auth_data.is_null() {
+        return Err("보안 키 응답이 없습니다. YubiKey를 다시 대세요.".to_owned());
+    }
+    assertion_of(env, cred_id, auth_data, first, second, transport)
 }
 
 /// `discard(handle)`: drops a pending login, or locks a session.
@@ -393,6 +458,7 @@ pub extern "system" fn Java_app_goyovault_Native_close<'l>(
     handle: jlong,
 ) {
     run(&mut env, (), |_| {
+        jni_keys::drop_flows_of(handle);
         let slot = slots().as_mut().and_then(|m| m.remove(&handle));
         if let Some(Slot::Open(mut s)) = slot {
             s.before_lock();
@@ -409,6 +475,7 @@ pub extern "system" fn Java_app_goyovault_Native_closeAll<'l>(
     _this: JObject<'l>,
 ) {
     run(&mut env, (), |_| {
+        jni_keys::drop_flows();
         let all = slots().take();
         for (_, slot) in all.into_iter().flatten() {
             if let Slot::Open(mut s) = slot {
@@ -437,7 +504,17 @@ pub extern "system" fn Java_app_goyovault_Native_status<'l>(
             if s.gate_pending() {
                 bits |= STATUS_GATE_PENDING;
             }
+            if s.fetched_unsaved() {
+                bits |= STATUS_FETCHED;
+            }
             Ok(bits)
+        })
+        .map(|bits| {
+            if jni_keys::has_take(session) {
+                bits | STATUS_TAKE
+            } else {
+                bits
+            }
         })
     })
 }

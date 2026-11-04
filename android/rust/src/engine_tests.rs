@@ -35,13 +35,13 @@ use std::{
     time::Duration,
 };
 
-const PASSWORD: &str = "a long synthetic password";
+pub(crate) const PASSWORD: &str = "a long synthetic password";
 /// The GOYOKS01 fixture of the lib's tests: vault 3a3b…49, epoch 9.
-const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
+pub(crate) const KS: &[u8] = include_bytes!("../../../tests/fixtures/goyoks01.goyokey");
 
-struct Temp(PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 impl Temp {
-    fn new(what: &str) -> Self {
+    pub(crate) fn new(what: &str) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let p = std::env::temp_dir().join(format!(
             "goyo-android-{what}-{:x}-{}",
@@ -62,7 +62,7 @@ impl Drop for Temp {
 fn server_script() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server/goyo-sync-server.py")
 }
-fn python() -> bool {
+pub(crate) fn python() -> bool {
     let ok = Command::new("python")
         .arg("--version")
         .output()
@@ -76,9 +76,9 @@ fn python() -> bool {
 /// The server script over pipes: one process per exchange, as one ssh
 /// connection runs one `serve`. `key_sync` is the forced command's
 /// `--key-sync=` list.
-struct Pipe {
-    root: PathBuf,
-    key_sync: Vec<[u8; 16]>,
+pub(crate) struct Pipe {
+    pub(crate) root: PathBuf,
+    pub(crate) key_sync: Vec<[u8; 16]>,
 }
 impl Transport for Pipe {
     fn exchange(&mut self, request: &[u8], beat: &mut dyn FnMut()) -> Result<Output, Failure> {
@@ -131,15 +131,15 @@ impl Transport for Pipe {
 
 /// A device: a folder laid out as the phone's `<files>` (or a PC's
 /// GoyoVault folder), and its engine, which runs the phone's passes.
-struct Device {
-    t: Temp,
-    vault: PathBuf,
-    key: PathBuf,
-    dir: PathBuf,
-    engine: Engine<Pipe>,
+pub(crate) struct Device {
+    pub(crate) t: Temp,
+    pub(crate) vault: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) dir: PathBuf,
+    pub(crate) engine: Engine<Pipe>,
 }
 impl Device {
-    fn new(name: &str, root: &Path, key_sync: &[[u8; 16]]) -> Self {
+    pub(crate) fn new(name: &str, root: &Path, key_sync: &[[u8; 16]]) -> Self {
         let t = Temp::new(name);
         let paths = syncrun::Paths::new(&t.0);
         fs::create_dir_all(paths.vault.parent().unwrap()).unwrap();
@@ -162,7 +162,7 @@ impl Device {
             engine,
         }
     }
-    fn pass(&mut self) -> Report {
+    pub(crate) fn pass(&mut self) -> Report {
         match self.engine.pass(0, true) {
             Outcome::Done(report) => report,
             other => panic!("{other:?}"),
@@ -176,7 +176,7 @@ impl Device {
         fs::read_to_string(self.t.0.join("goyo-sync.log")).unwrap_or_default()
     }
 }
-fn entry(title: &str, secret: &str) -> Entry {
+pub(crate) fn entry(title: &str, secret: &str) -> Entry {
     Entry::new(title.into(), "login".into(), secret.into(), String::new()).unwrap()
 }
 fn titles(s: &Session) -> Vec<String> {
