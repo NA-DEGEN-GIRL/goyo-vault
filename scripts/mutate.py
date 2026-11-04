@@ -2090,6 +2090,14 @@ ROWS = [
      ['gui::tests::one_button_setup_makes_registers_and_saves_the_key']),
     # The per-entry OTP secret (stage 14): its own vault formats, merges
     # that see it, and the entry view's code, copies and QR panel.
+    ('OTP-3 a GOYOVA08 head counts for KP', 14, 'feature', 'sync', HELPER_KEYS,
+     '    let keyed = &head[..8] == INCOMING_MAGIC && syncfile::keyed_vault(&head[16..24]);',
+     '    let keyed = &head[..8] == INCOMING_MAGIC && &head[16..24] == b"GOYOVA04";',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
+    ("OTP-3 a hardware GOYOVA08 upload's KEY_BEHIND is nokeys", 14, 'feature', 'sync', HELPER_KEYS,
+     '        let hardware = syncfile::keyed_vault(blob) && blob.get(64)',
+     '        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64)',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
     ('OTP-1 an OTP secret takes the OTP magic', 14, 'both', 'lib', VAULT,
      '    out.extend_from_slice(header.magic(format, otp));',
      '    out.extend_from_slice(header.magic(format, false));',
