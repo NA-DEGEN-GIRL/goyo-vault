@@ -1281,6 +1281,7 @@ impl App {
         Ok(())
     }
     /// Every screen change goes through here (see serial).
+    /// Every screen change, a lock's included, takes the QR panel away.
     fn show(&mut self, screen: Screen) {
         self.screen = screen;
         self.serial += 1;
@@ -2301,7 +2302,6 @@ impl App {
         self.editing = None;
         self.copy_until = None;
         self.reveal_until = None;
-        self.qr = None;
         self.page = 0;
         if clear_clipboard {
             self.expire_clipboard();
@@ -9323,6 +9323,11 @@ mod tests {
             app.command(OTP_QR, 0).unwrap();
             assert!(app.qr_shown());
             app.lock("test lock", true);
+            assert!(app.qr.is_none());
+            // A scrub (Windows locking or ending the session, sent from
+            // another thread) drops it at once, before the lock rebuilds.
+            app.qr = Some((other, Instant::now() + QR_SHOWN));
+            app.scrub();
             assert!(app.qr.is_none());
             drop(app);
             DestroyWindow(h);
