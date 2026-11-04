@@ -58,8 +58,14 @@ pub const OUTGOING_MAGIC: &[u8; 8] = b"GOYOSOU1";
 pub const INCOMING_MAGIC: &[u8; 8] = b"GOYOSIN1";
 /// The vault formats that are synced, each with its smallest file: GOYOVA02
 /// (48-byte header, 32-byte empty plaintext, tag) and GOYOVA04, the same
-/// contents under a KF2 key file (92-byte header).
-pub const SYNC_MAGICS: [(&[u8; 8], usize); 2] = [(b"GOYOVA02", 96), (b"GOYOVA04", 140)];
+/// contents under a KF2 key file (92-byte header); GOYOVA06 and 08 are the
+/// two with the OTP field (0.12.0).
+pub const SYNC_MAGICS: [(&[u8; 8], usize); 4] = [
+    (b"GOYOVA02", 96),
+    (b"GOYOVA04", 140),
+    (b"GOYOVA06", 96),
+    (b"GOYOVA08", 140),
+];
 /// The smallest synced vault file of any format: the wrappers' lower bound.
 pub const MIN_VAULT: usize = 96;
 /// Magic and one u64 in front of the vault file.
@@ -310,21 +316,27 @@ pub fn remove_own_temps(dir: &Path, prefixes: &[&str]) -> usize {
     removed
 }
 
-/// `GOYOVA` and two digits from `05` up: written by a newer Goyo Vault. The
-/// magic is public, so telling it apart reveals nothing.
+/// `GOYOVA` and two digits from `09` up: written by a newer Goyo Vault. The
+/// magic is public, so telling it apart reveals nothing. (0.11.0 and older
+/// stop at `05`: GOYOVA05 to 08 are 0.12.0's OTP formats.)
 pub fn newer_vault_format(bytes: &[u8]) -> bool {
     match bytes.get(..8) {
         Some([b'G', b'O', b'Y', b'O', b'V', b'A', a, b])
             if a.is_ascii_digit() && b.is_ascii_digit() =>
         {
-            (a - b'0') * 10 + (b - b'0') >= 5
+            (a - b'0') * 10 + (b - b'0') >= 9
         }
         _ => false,
     }
 }
-/// A vault file that may be synced: GOYOVA02 or GOYOVA04, from the smallest
-/// file of its format up to MAX_FILE. GOYOVA01/03 (sync off), a newer format
-/// and every key file (GOYOK…) are not.
+/// A synced vault file under a KF2 key file, whose header holds the key ID,
+/// the epoch, the state tag and the flags: GOYOVA04, or GOYOVA08 with OTP.
+pub fn keyed_vault(vault: &[u8]) -> bool {
+    vault.starts_with(b"GOYOVA04") || vault.starts_with(b"GOYOVA08")
+}
+/// A vault file that may be synced: GOYOVA02, 04, 06 or 08, from the
+/// smallest file of its format up to MAX_FILE. GOYOVA01/03/05/07 (sync off),
+/// a newer format and every key file (GOYOK…) are not.
 pub fn is_sync_vault(vault: &[u8]) -> bool {
     vault.len() <= MAX_FILE
         && SYNC_MAGICS
@@ -686,23 +698,38 @@ mod tests {
         let mut bad = render_outgoing(3, &v).unwrap();
         bad[7] = b'2';
         assert_eq!(parse_outgoing(&bad), None);
-        // GOYOVA04 from its 140 bytes up, as GOYOVA02 from its 96.
-        for len in [140, 4096, MAX_FILE] {
-            let v = keyed(len);
-            assert!(is_sync_vault(&v), "{len}");
-            let out = render_outgoing(0, &v).unwrap();
-            assert_eq!(parse_outgoing(&out), Some((0, &v[..])));
-            let inc = render_incoming(42, &v).unwrap();
-            assert_eq!(parse_incoming(&inc), Some((42, &v[..])));
+        // GOYOVA04 from its 140 bytes up, as GOYOVA02 from its 96; their
+        // OTP forms GOYOVA08 and 06 the same (0.12.0).
+        for magic in [b"GOYOVA04", b"GOYOVA08"] {
+            for len in [140, 4096, MAX_FILE] {
+                let mut v = keyed(len);
+                v[..8].copy_from_slice(magic);
+                assert!(is_sync_vault(&v) && keyed_vault(&v), "{len}");
+                let out = render_outgoing(0, &v).unwrap();
+                assert_eq!(parse_outgoing(&out), Some((0, &v[..])));
+                let inc = render_incoming(42, &v).unwrap();
+                assert_eq!(parse_incoming(&inc), Some((42, &v[..])));
+            }
+            let mut long = keyed(MAX_FILE + 1);
+            long[..8].copy_from_slice(magic);
+            for len in [MIN_VAULT, 139, MAX_FILE + 1] {
+                let v = &long[..len];
+                assert!(!is_sync_vault(v), "{len}");
+                assert_eq!(render_outgoing(1, v), None, "{len}");
+                assert_eq!(render_incoming(1, v), None, "{len}");
+                assert_eq!(parse_outgoing(&wrap(OUTGOING_MAGIC, 1, v)), None, "{len}");
+            }
         }
-        let long = keyed(MAX_FILE + 1);
-        for len in [MIN_VAULT, 139, MAX_FILE + 1] {
-            let v = &long[..len];
-            assert!(!is_sync_vault(v), "{len}");
-            assert_eq!(render_outgoing(1, v), None, "{len}");
-            assert_eq!(render_incoming(1, v), None, "{len}");
-            assert_eq!(parse_outgoing(&wrap(OUTGOING_MAGIC, 1, v)), None, "{len}");
+        for len in [MIN_VAULT, 4096, MAX_FILE] {
+            let mut v = vault(len);
+            v[..8].copy_from_slice(b"GOYOVA06");
+            assert!(is_sync_vault(&v) && !keyed_vault(&v), "{len}");
+            assert_eq!(
+                parse_outgoing(&render_outgoing(0, &v).unwrap()),
+                Some((0, &v[..]))
+            );
         }
+        assert!(!keyed_vault(&vault(MIN_VAULT)));
         // Key files and other formats are never wrapped for upload.
         for magic in [
             b"GOYOKE01",
@@ -713,6 +740,8 @@ mod tests {
             b"GOYOVA01",
             b"GOYOVA03",
             b"GOYOVA05",
+            b"GOYOVA07",
+            b"GOYOVA09",
         ] {
             let mut other = vault(489);
             other[..8].copy_from_slice(magic);
@@ -723,20 +752,25 @@ mod tests {
         }
         // The app must see a newer format in incoming to stop syncing.
         let mut newer = vault(200);
-        newer[..8].copy_from_slice(b"GOYOVA05");
+        newer[..8].copy_from_slice(b"GOYOVA09");
         let wrapped = wrap(INCOMING_MAGIC, 9, &newer);
         assert_eq!(parse_incoming(&wrapped), Some((9, &newer[..])));
     }
     #[test]
     fn newer_formats_are_recognized() {
-        for magic in [b"GOYOVA05", b"GOYOVA10", b"GOYOVA99"] {
+        for magic in [b"GOYOVA09", b"GOYOVA10", b"GOYOVA99"] {
             assert!(newer_vault_format(magic), "{magic:?}");
         }
+        // GOYOVA05 to 08 are this build's OTP formats (0.11.0 stopped at 05).
         for magic in [
             &b"GOYOVA01"[..],
             b"GOYOVA02",
             b"GOYOVA03",
             b"GOYOVA04",
+            b"GOYOVA05",
+            b"GOYOVA06",
+            b"GOYOVA07",
+            b"GOYOVA08",
             b"GOYOVA00",
             b"GOYOVAx3",
             b"GOYOKE03",

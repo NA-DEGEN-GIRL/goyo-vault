@@ -6,8 +6,8 @@
 //! delete or edit makes one. Every PC gets the same result, whichever side is
 //! local, so the copies converge and stop uploading.
 use crate::vault::{
-    Contents, DataRef, Entry, EntryId, Format, MAX_ENTRIES, MAX_FILE, MAX_TOMBSTONES, derived_id,
-    keyfile::KeyState, plain_size,
+    Content, Contents, DataRef, Entry, EntryId, Format, MAX_ENTRIES, MAX_FILE, MAX_TOMBSTONES,
+    derived_id, keyfile::KeyState, plain_size,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -115,14 +115,14 @@ pub(crate) fn merge(
             // the same rule applies again. Each text thus takes the first ID
             // of its own chain that no smaller text holds, whatever the order
             // of arrival, so every PC gets the same result and it converges.
-            if e.fields() < out[i].fields() {
+            if e.content() < out[i].content() {
                 std::mem::swap(&mut out[i], &mut e);
             }
             moves += 1;
             if moves > MAX_MOVES {
                 return Err(MergeError::TooLarge);
             }
-            let id2 = derived_id(id_key, b"goyo dup\0", &id, e.fields());
+            let id2 = derived_id(id_key, b"goyo dup\0", &id, e.content());
             e.set_ids(id2, id);
             next = Some(e);
         }
@@ -141,12 +141,12 @@ pub(crate) fn merge(
     // A text that lost its ID either went to a derived ID, and both versions
     // are kept, or was dropped there, and it is a removal. Texts are
     // borrowed: counting copies no secret.
-    let texts: BTreeSet<[&str; 4]> = out.iter().map(Entry::fields).collect();
-    let local_texts: BTreeSet<[&str; 4]> = local.entries.iter().map(Entry::fields).collect();
+    let texts: BTreeSet<Content> = out.iter().map(Entry::content).collect();
+    let local_texts: BTreeSet<Content> = local.entries.iter().map(Entry::content).collect();
     let mut duplicates = 0;
     for e in local.entries {
         if !dead.contains(&e.id()) && !holds(e) {
-            if texts.contains(&e.fields()) {
+            if texts.contains(&e.content()) {
                 duplicates += 1;
             } else {
                 removed += 1;
@@ -157,7 +157,7 @@ pub(crate) fn merge(
     duplicates += remote_entries
         .iter()
         .filter(|r| out_ids.contains(&r.id()) && !holds(r))
-        .filter(|r| texts.contains(&r.fields()) && !local_texts.contains(&r.fields()))
+        .filter(|r| texts.contains(&r.content()) && !local_texts.contains(&r.content()))
         .count();
     let (remote_replaced, local_replaced) = (replaced(&remote_entries), replaced(local.entries));
 
@@ -232,9 +232,16 @@ pub(crate) fn check_code(
     mac.update(b"goyo sync check\0");
     for (id, e) in &live {
         let mut text = Sha256::new();
-        for field in e.fields() {
+        let (fields, otp) = e.content();
+        for field in fields {
             text.update((field.len() as u32).to_le_bytes());
             text.update(field.as_bytes());
+        }
+        // An entry's OTP secret after the four fields; nothing without one,
+        // so a vault without OTP shows the code 0.11.0 shows.
+        if !otp.is_empty() {
+            text.update((otp.len() as u32).to_le_bytes());
+            text.update(otp);
         }
         let mut text = text.finalize();
         mac.update(id);
@@ -387,6 +394,141 @@ mod tests {
         assert!(!r.rollback && r.needs_push);
     }
 
+    fn with_otp(id: EntryId, parent: EntryId, title: &str, secret: &str, otp: &str) -> Entry {
+        let otp = crate::otp::Otp::parse(otp).unwrap().unwrap();
+        let mut e = Entry::new_with_otp(
+            title.into(),
+            String::new(),
+            secret.into(),
+            String::new(),
+            Some(&otp),
+        )
+        .unwrap();
+        e.set_ids(id, parent);
+        e
+    }
+    /// An entry's OTP secret merges as its other secret fields do: adding,
+    /// changing or removing it is an edit (new ID, the old one a
+    /// tombstone); two PCs' edits are both kept as a conflict; other OTP
+    /// text under one ID moves to a derived ID like other text; the same
+    /// four fields with another OTP secret are another text.
+    #[test]
+    fn otp_secrets_merge_like_the_other_fields() {
+        let (x, y) = ([1; 16], [2; 16]);
+        let base = || {
+            contents(
+                vec![entry(x, NO_ID, "x", "1"), entry(y, NO_ID, "y", "2")],
+                vec![],
+                1,
+            )
+        };
+        // A added an OTP secret to X; B did nothing: A's version.
+        let xa = [4; 16];
+        let a = contents(
+            vec![
+                with_otp(xa, x, "x", "1", "JBSWY3DPEHPK3PXP"),
+                entry(y, NO_ID, "y", "2"),
+            ],
+            vec![x],
+            2,
+        );
+        for (m, r) in [run(&a, &base()), run(&base(), &a)] {
+            assert_eq!(state(&m), ([xa, y].into(), [x].into()));
+            assert!(r.conflicts == 0);
+            let e = m.entries.iter().find(|e| e.id() == xa).unwrap();
+            assert!(e.has_otp());
+        }
+        // B changed X's password meanwhile: both versions, one conflict.
+        let xb = [5; 16];
+        let b = contents(
+            vec![entry(xb, x, "x", "changed"), entry(y, NO_ID, "y", "2")],
+            vec![x],
+            2,
+        );
+        let (m, r) = run(&a, &b);
+        assert_eq!(state(&m), ([xa, y, xb].into(), [x].into()));
+        assert_eq!(r.conflicts, 1);
+        let (n, r) = run(&b, &a);
+        assert_eq!((state(&n), r.conflicts), (state(&m), 1));
+        // B changed only the OTP secret: two OTP versions, one conflict.
+        let b = contents(
+            vec![
+                with_otp(xb, x, "x", "1", "JBSWY3DPEHPK3PXQ"),
+                entry(y, NO_ID, "y", "2"),
+            ],
+            vec![x],
+            2,
+        );
+        let (m, r) = run(&a, &b);
+        assert_eq!(
+            (state(&m), r.conflicts),
+            (([xa, y, xb].into(), [x].into()), 1)
+        );
+        // A later removal of the OTP secret is an edit too and wins over
+        // the copy that still has it.
+        let xc = [6; 16];
+        let removed = contents(
+            vec![entry(xc, xa, "x", "1"), entry(y, NO_ID, "y", "2")],
+            vec![x, xa],
+            3,
+        );
+        for (m, _) in [run(&removed, &a), run(&a, &removed)] {
+            assert_eq!(state(&m), ([xc, y].into(), [x, xa].into()));
+            assert!(m.entries.iter().all(|e| !e.has_otp()));
+        }
+        // The same ID with another OTP secret (a faulty client): the smaller
+        // text keeps it, the other moves, and both orders agree. No OTP is
+        // smaller than any.
+        for (p, q) in [
+            (
+                entry(x, NO_ID, "x", "1"),
+                with_otp(x, NO_ID, "x", "1", "JBSWY3DPEHPK3PXP"),
+            ),
+            (
+                with_otp(x, NO_ID, "x", "1", "JBSWY3DPEHPK3PXP"),
+                with_otp(x, NO_ID, "x", "1", "JBSWY3DPEHPK3PXQ"),
+            ),
+        ] {
+            let (pa, qa) = (
+                contents(vec![p.clone()], vec![], 3),
+                contents(vec![q.clone()], vec![], 3),
+            );
+            let (ma, ra) = run(&pa, &qa);
+            let (mb, _) = run(&qa, &pa);
+            assert_eq!(state(&ma), state(&mb));
+            assert_eq!(ma.entries.len(), 2);
+            assert!(ra.conflicts == 1 && ra.removed == 0);
+            let kept = ma.entries.iter().find(|e| e.id() == x).unwrap();
+            assert!(kept.same_content(&p));
+            let moved = ma.entries.iter().find(|e| e.id() != x).unwrap();
+            assert!(moved.same_content(&q) && moved.parent() == x);
+            assert_eq!(moved.id(), derived_id(&KEY, b"goyo dup\0", &x, q.content()));
+        }
+        // Two PCs added the same text, one with an OTP secret: two entries.
+        let (n1, n2) = ([7; 16], [8; 16]);
+        let mut a = base();
+        a.entries.push(entry(n1, NO_ID, "same", "text"));
+        let mut b = base();
+        b.entries
+            .push(with_otp(n2, NO_ID, "same", "text", "JBSWY3DPEHPK3PXP"));
+        let (m, r) = run(&a, &b);
+        assert_eq!(ids(&m), [x, y, n1, n2].into());
+        assert!(r.conflicts == 0 && r.needs_push);
+        // The check code tells the two apart.
+        assert_ne!(
+            check_code(&KEY, &a.entries, &[], None),
+            check_code(
+                &KEY,
+                &[a.entries[0].clone(), a.entries[1].clone(), {
+                    let mut e = with_otp(n1, NO_ID, "same", "text", "JBSWY3DPEHPK3PXP");
+                    e.set_ids(n1, NO_ID);
+                    e
+                }],
+                &[],
+                None
+            )
+        );
+    }
     /// Same ID, other text: the smaller text keeps the ID, the other gets a
     /// derived ID, and both orders agree.
     #[test]
@@ -466,7 +608,7 @@ mod tests {
             vec![],
             4,
         );
-        let id2 = |e: &Entry| derived_id(&KEY, b"goyo dup\0", &e.id(), e.fields());
+        let id2 = |e: &Entry| derived_id(&KEY, b"goyo dup\0", &e.id(), e.content());
         let fake = |e: &Entry| entry(e.id(), NO_ID, "!", "x");
         let texts = |c: &Contents| -> BTreeSet<(EntryId, String)> {
             c.entries
@@ -950,7 +1092,7 @@ mod tests {
                     6 if len > 0 => {
                         let id = c.entries[rng.below(len)].id();
                         let moving = rng.entry(id, NO_ID);
-                        let id2 = derived_id(&KEY, b"goyo dup\0", &id, moving.fields());
+                        let id2 = derived_id(&KEY, b"goyo dup\0", &id, moving.content());
                         if ids(c).contains(&id2) || dead(c).contains(&id2) {
                             continue;
                         }

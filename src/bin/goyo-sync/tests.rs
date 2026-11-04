@@ -1363,7 +1363,17 @@ fn goyova04_passes_the_gate_and_incoming_like_goyova02() {
     let pc = Pc::with_folder();
     let id = [0x6D; 16];
     let path = pc.dir.join(OUTGOING);
-    for v in [blob(&id, 1), keyed(&id, 1)] {
+    // And their OTP forms, GOYOVA06 and 08 (0.12.0).
+    let otp = |mut v: Vec<u8>, magic: &[u8; 8]| {
+        v[..8].copy_from_slice(magic);
+        v
+    };
+    for v in [
+        blob(&id, 1),
+        keyed(&id, 1),
+        otp(blob(&id, 1), b"GOYOVA06"),
+        otp(keyed(&id, 1), b"GOYOVA08"),
+    ] {
         fs::write(&path, render_outgoing(0, &v).unwrap()).unwrap();
         let ok = matches!(gate(&path, Some(&id)), Gate::Ok(g) if g.bytes[16..] == v[..]);
         assert!(ok, "{:?}", &v[..8]);
@@ -1378,7 +1388,10 @@ fn goyova04_passes_the_gate_and_incoming_like_goyova02() {
         (b"GOYOVA01", 160),
         (b"GOYOVA03", 160),
         (b"GOYOVA05", 160),
+        (b"GOYOVA07", 160),
+        (b"GOYOVA09", 160),
         (b"GOYOVA04", 139),
+        (b"GOYOVA08", 139),
         (b"GOYOKE01", 148),
         (b"GOYOKE02", 128),
         (b"GOYOKE03", 312),
@@ -1415,6 +1428,33 @@ fn goyova04_passes_the_gate_and_incoming_like_goyova02() {
     let replies = [reply(Status::Empty, 0, b""), reply(Status::BadBlob, 0, b"")];
     let mut e = pc.engine(Mock::with(replies), &clock);
     assert_eq!(e.pass(0, false), done(SyncState::OldServer, 7, None, None));
+}
+
+/// GOYOVA06 and 08, the OTP formats (0.12.0), are held like GOYOVA04 when
+/// a server script older than 0.12.0 answers BAD_BLOB: `oldserver`, the
+/// file kept for a later try, and the log names the script version needed.
+#[test]
+fn an_old_server_script_holds_the_otp_formats() {
+    for magic in [b"GOYOVA06", b"GOYOVA08"] {
+        let pc = Pc::with_folder();
+        let clock = TestClock::new();
+        let id = [0x6B; 16];
+        let mut v = if magic == b"GOYOVA06" {
+            blob(&id, 1)
+        } else {
+            keyed(&id, 1)
+        };
+        v[..8].copy_from_slice(magic);
+        pc.outgoing(0, &v);
+        let mut e = pc.engine(Mock::with([reply(Status::BadBlob, 0, b"")]), &clock);
+        assert_eq!(e.pass(0, false), done(SyncState::OldServer, 0, None, None));
+        let state = pc.state();
+        assert_eq!((state.done, state.rejected), (None, None));
+        let magic = std::str::from_utf8(magic).unwrap();
+        assert!(pc.log().contains(&format!(
+            "6B6B-6B6B server refused {magic}: its goyo-sync script is older than 0.12.0"
+        )));
+    }
 }
 
 /// A server script older than 0.9.0 answers a GOYOVA04 upload with
@@ -2001,7 +2041,7 @@ fn a_newer_format_head_is_never_written() {
             .contains("frame=not a GOYOVA02/04 file of this vault")
     );
     let mut newer = blob(&id, 3);
-    newer[..8].copy_from_slice(b"GOYOVA05");
+    newer[..8].copy_from_slice(b"GOYOVA09");
     let mut e = pc.engine(Mock::with([reply(Status::Ok, 3, &newer)]), &clock);
     assert_eq!(e.pass(0, false), done(SyncState::Update, 2, None, None));
     assert_eq!(pc.incoming().map(|(v, _)| v), Some(2));
