@@ -59,7 +59,11 @@ object Native {
     /** One field as UTF-8 (0 title, 1 kind, 2 secret, 3 notes). */
     external fun field(session: Long, index: Int, which: Int): ByteArray
 
-    /** Stores a new entry (index -1) or replaces one, and saves. */
+    /**
+     * Stores a new entry (index -1) or replaces one, and saves. `otp` is the
+     * editor's OTP field (a Base32 key or an otpauth URI, parsed in Rust);
+     * empty keeps the edited entry's OTP secret, or drops it with `removeOtp`.
+     */
     external fun put(
         session: Long,
         index: Int,
@@ -67,7 +71,26 @@ object Native {
         kind: ByteArray,
         secret: ByteArray,
         notes: ByteArray,
+        otp: ByteArray,
+        removeOtp: Boolean,
     )
+
+    // ---- an entry's OTP secret (0.12.0); the code is made in Rust ----
+
+    /** Issuer, account and unusual settings ("" for SHA1 · 6 digits · 30 s); null without OTP. */
+    external fun otpInfo(session: Long, index: Int): Array<String>?
+
+    /** The code of this moment and the seconds until it changes. */
+    external fun otpCode(session: Long, index: Int): Array<String>
+
+    /** The secret in Base32 (UTF-8), only for "시크릿 복사"; zero it after use. */
+    external fun otpSecret(session: Long, index: Int): ByteArray
+
+    /**
+     * The QR code of the otpauth URI, only for "QR 보기": side (u16 big-endian),
+     * then one byte per module, row-major, 1 dark; zero it after drawing.
+     */
+    external fun otpQr(session: Long, index: Int): ByteArray
 
     external fun delete(session: Long, index: Int)
 

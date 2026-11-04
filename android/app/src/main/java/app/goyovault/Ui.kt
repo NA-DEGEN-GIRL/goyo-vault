@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -315,6 +316,7 @@ private fun Detail(index: Int) {
             }) { Text("복사") }
             OutlinedButton(onClick = { shown = !shown }) { Text(if (shown) "숨기기" else "보기") }
         }
+        OtpSection(index)
         if (fields[3].isNotEmpty()) {
             Text("메모", style = MaterialTheme.typography.labelLarge)
             Text(fields[3])
@@ -357,6 +359,21 @@ private fun Edit(index: Int) {
     val kind = rememberTextFieldState()
     val secret = rememberTextFieldState()
     val notes = rememberTextFieldState()
+    // The OTP field starts empty: an entry's secret never comes to the
+    // editor. Empty keeps it; a new key or otpauth URI replaces it.
+    val otp = rememberTextFieldState()
+    var removeOtp by remember { mutableStateOf(false) }
+    val otpNow = remember(index) {
+        if (index < 0) {
+            null
+        } else {
+            try {
+                Native.otpInfo(AppState.session, index)
+            } catch (e: GoyoException) {
+                null
+            }
+        }
+    }
     LaunchedEffect(index) {
         if (index >= 0) {
             try {
@@ -370,7 +387,7 @@ private fun Edit(index: Int) {
         }
     }
     DisposableEffect(Unit) {
-        onDispose { listOf(title, kind, secret, notes).forEach(TextFieldState::clearText) }
+        onDispose { listOf(title, kind, secret, notes, otp).forEach(TextFieldState::clearText) }
     }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(if (index < 0) "새 항목" else "항목 편집", style = MaterialTheme.typography.titleLarge)
@@ -388,13 +405,30 @@ private fun Edit(index: Int) {
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (otpNow != null) {
+            val names = listOf(otpNow[0], otpNow[1]).filter { it.isNotEmpty() }.joinToString(" · ")
+            Text(if (names.isEmpty()) "OTP 시크릿: 있음" else "OTP 시크릿: 있음 ($names)")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = removeOtp, onCheckedChange = { removeOtp = it })
+                Text("OTP 시크릿 지우기")
+            }
+        }
+        OutlinedSecureTextField(
+            state = otp,
+            label = {
+                Text(if (otpNow != null) "새 OTP 시크릿 (비우면 그대로) · 키 또는 otpauth 주소" else "OTP 시크릿 (선택) · 키 또는 otpauth 주소")
+            },
+            keyboardOptions = secretKeyboard,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = {
-                val f = listOf(title, kind, secret, notes).map { utf8(it.text) }
+                val f = listOf(title, kind, secret, notes, otp).map { utf8(it.text) }
+                val remove = removeOtp
                 val session = AppState.session
                 AppState.work("저장 중…", {
                     try {
-                        Native.put(session, index, f[0], f[1], f[2], f[3])
+                        Native.put(session, index, f[0], f[1], f[2], f[3], f[4], remove)
                     } finally {
                         f.forEach { it.fill(0) }
                     }

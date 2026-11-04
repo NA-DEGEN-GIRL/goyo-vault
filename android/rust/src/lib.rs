@@ -14,6 +14,7 @@
 //! panic and throws `app.goyovault.GoyoException` with a Korean text.
 #[cfg(test)]
 mod engine_tests;
+mod entry_otp;
 mod hostkey;
 mod jni_sync;
 mod line;
@@ -25,13 +26,13 @@ mod syncrun;
 mod tailnet;
 
 use goyo_vault::{
-    crypto, fido,
+    clock, crypto, fido,
     vault::{self, Entry, Prepared, Session, VaultClass},
 };
 use jni::{
     JNIEnv,
     objects::{JByteArray, JObject, JString},
-    sys::{jbyteArray, jint, jlong, jobjectArray, jstring},
+    sys::{jboolean, jbyteArray, jint, jlong, jobjectArray, jstring},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -524,9 +525,12 @@ pub extern "system" fn Java_app_goyovault_Native_field<'l>(
     })
 }
 
-/// `put(session, index, title, kind, secret, notes)`: stores a new entry
-/// (index -1) or replaces entry `index`, and saves the vault file. Every
-/// field is UTF-8 and zeroed in its Java array.
+/// `put(session, index, title, kind, secret, notes, otp, removeOtp)`:
+/// stores a new entry (index -1) or replaces entry `index`, and saves the
+/// vault file. Every field is UTF-8 and zeroed in its Java array. `otp` is
+/// the editor's OTP field (a Base32 key or an otpauth URI, parsed here);
+/// null or empty keeps the edited entry's OTP secret, which the editor
+/// never saw, or drops it when `removeOtp`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_app_goyovault_Native_put<'l>(
@@ -538,32 +542,134 @@ pub extern "system" fn Java_app_goyovault_Native_put<'l>(
     kind: JByteArray<'l>,
     secret: JByteArray<'l>,
     notes: JByteArray<'l>,
+    otp: JByteArray<'l>,
+    remove_otp: jboolean,
 ) {
     run(&mut env, (), |env| {
-        let mut fields = Vec::with_capacity(4);
-        for a in [&title, &kind, &secret, &notes] {
+        let mut fields = Vec::with_capacity(5);
+        for a in [&title, &kind, &secret, &notes, &otp] {
             let bytes = take_secret(env, a)?.unwrap_or_default();
             fields.push(secret_text(bytes)?);
         }
         let take = |z: &mut Zeroizing<String>| std::mem::take(&mut **z);
-        let entry = Entry::new(
-            take(&mut fields[0]),
-            take(&mut fields[1]),
-            take(&mut fields[2]),
-            take(&mut fields[3]),
-        )
-        .map_err(text)?;
         let index = if index < 0 {
             None
         } else {
             Some(usize::try_from(index).map_err(|_| "항목이 없습니다.")?)
         };
         with_session(session, |s| {
-            if index.is_some_and(|i| i >= s.entries.len()) {
-                return Err("항목이 없습니다.".to_owned());
-            }
+            let old = match index {
+                Some(i) => Some(s.entries.get(i).ok_or("항목이 없습니다.")?),
+                None => None,
+            };
+            let entry = entry_otp::edited(
+                old,
+                [
+                    take(&mut fields[0]),
+                    take(&mut fields[1]),
+                    take(&mut fields[2]),
+                    take(&mut fields[3]),
+                ],
+                &fields[4],
+                remove_otp != 0,
+            )
+            .map_err(text)?;
             s.put(index, entry).map_err(text)
         })
+    })
+}
+
+/// Runs `f` on entry `index` of the open session `session`.
+fn with_entry<T>(
+    session: jlong,
+    index: jint,
+    f: impl FnOnce(&Entry) -> Result<T, &'static str>,
+) -> Result<T, String> {
+    with_session(session, |s| {
+        let e = usize::try_from(index)
+            .ok()
+            .and_then(|i| s.entries.get(i))
+            .ok_or("항목이 없습니다.")?;
+        f(e).map_err(text)
+    })
+}
+fn strings_out(env: &mut JNIEnv, items: &[&str]) -> Result<jobjectArray, String> {
+    let len = jint::try_from(items.len()).map_err(|_| "too many")?;
+    let arr = env
+        .new_object_array(len, "java/lang/String", JObject::null())
+        .map_err(jerr)?;
+    for (i, item) in items.iter().enumerate() {
+        let s = env.new_string(item).map_err(jerr)?;
+        env.set_object_array_element(&arr, i as jint, &s)
+            .map_err(jerr)?;
+        env.delete_local_ref(s).map_err(jerr)?;
+    }
+    Ok(arr.into_raw())
+}
+
+/// `otpInfo(session, index)`: issuer, account and the code's settings when
+/// they are not the usual ones (else ""), or null for an entry without an
+/// OTP secret. Never the secret.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_otpInfo<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    session: jlong,
+    index: jint,
+) -> jobjectArray {
+    run(&mut env, std::ptr::null_mut(), |env| {
+        match with_entry(session, index, |e| Ok(entry_otp::info(e)))? {
+            Some(info) => strings_out(env, &[&info[0], &info[1], &info[2]]),
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+
+/// `otpCode(session, index)`: the code of this moment (made here from the
+/// device clock) and the seconds until it changes.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_otpCode<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    session: jlong,
+    index: jint,
+) -> jobjectArray {
+    run(&mut env, std::ptr::null_mut(), |env| {
+        let now = clock::now().map_err(str::to_owned)?;
+        let (code, left) = with_entry(session, index, |e| entry_otp::code(e, now))?;
+        strings_out(env, &[&code, &left.to_string()])
+    })
+}
+
+/// `otpSecret(session, index)`: the OTP secret in Base32 as UTF-8, only for
+/// the user's "시크릿 복사"; Kotlin zeroes the array after use.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_otpSecret<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    session: jlong,
+    index: jint,
+) -> jbyteArray {
+    run(&mut env, std::ptr::null_mut(), |env| {
+        let secret = with_entry(session, index, entry_otp::secret)?;
+        bytes_out(env, secret.as_bytes())
+    })
+}
+
+/// `otpQr(session, index)`: the QR code of the entry's otpauth URI, only
+/// for the user's "QR 보기": side in modules (u16 big-endian), then one
+/// byte per module, row-major, 1 dark. Kotlin zeroes the array once it
+/// drew the bitmap.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_otpQr<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    session: jlong,
+    index: jint,
+) -> jbyteArray {
+    run(&mut env, std::ptr::null_mut(), |env| {
+        let modules = with_entry(session, index, entry_otp::qr_modules)?;
+        bytes_out(env, &modules)
     })
 }
 

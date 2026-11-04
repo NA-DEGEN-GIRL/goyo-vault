@@ -79,9 +79,34 @@ class VaultTest {
 
         // A password-only vault with no trace of security keys needs no TOFU.
         assertEquals(0, Native.status(session))
-        val fields = listOf("Added on Android", "모바일", "synthetic-secret-3", "").map { it.toByteArray() }
-        Native.put(session, -1, fields[0], fields[1], fields[2], fields[3])
+        // A new entry with an OTP secret (a synthetic otpauth URI).
+        val fields = listOf(
+            "Added on Android", "모바일", "synthetic-secret-3", "",
+            "otpauth://totp/Synthetic:test?secret=JBSWY3DPEHPK3PXP&issuer=Synthetic",
+        ).map { it.toByteArray() }
+        Native.put(session, -1, fields[0], fields[1], fields[2], fields[3], fields[4], false)
         fields.forEach { assertArrayEquals(ByteArray(it.size), it) }
+        assertNull(Native.otpInfo(session, 0))
+        assertEquals(listOf("Synthetic", "test", ""), Native.otpInfo(session, 2)!!.toList())
+        val code = Native.otpCode(session, 2)
+        assertTrue(code[0].matches(Regex("[0-9]{6}")))
+        assertTrue(code[1].toInt() in 1..30)
+        val qr = Native.otpQr(session, 2)
+        val side = ((qr[0].toInt() and 0xff) shl 8) or (qr[1].toInt() and 0xff)
+        assertEquals(2 + side * side, qr.size)
+        val secret = Native.otpSecret(session, 2)
+        assertEquals("JBSWY3DPEHPK3PXP", String(secret, Charsets.UTF_8))
+        // An edit with an empty OTP field keeps the secret it never saw.
+        val edit = listOf("Added on Android", "모바일", "synthetic-secret-3", "", "").map { it.toByteArray() }
+        Native.put(session, 2, edit[0], edit[1], edit[2], edit[3], edit[4], false)
+        assertEquals(listOf("Synthetic", "test", ""), Native.otpInfo(session, 2)!!.toList())
+        try {
+            val bad = listOf("x", "", "s", "", "not base32!").map { it.toByteArray() }
+            Native.put(session, -1, bad[0], bad[1], bad[2], bad[3], bad[4], false)
+            fail("a bad OTP secret was saved")
+        } catch (e: GoyoException) {
+            assertTrue(e.message!!.contains("OTP"))
+        }
         Native.delete(session, 1)
         Native.close(session)
         try {
@@ -96,6 +121,7 @@ class VaultTest {
         val after = Native.titles(again).toList()
         assertEquals(listOf("테스트 항목 1", "웹", "Added on Android", "모바일"), after)
         assertEquals("synthetic-secret-3", text(again, 1, 2))
+        assertEquals(listOf("Synthetic", "test", ""), Native.otpInfo(again, 1)!!.toList())
         Native.closeAll()
     }
 

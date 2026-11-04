@@ -181,7 +181,7 @@ pub fn forget_pin(paths: &Paths) -> Result<(), String> {
         Err(_) => Err("고정된 호스트 키를 지우지 못했습니다.".to_owned()),
     }
 }
-/// The vault's ID from its plaintext header (GOYOVA01 to 04), for the
+/// The vault's ID from its plaintext header (GOYOVA01 to 08), for the
 /// line's `--key-sync=`; None without an imported vault.
 pub fn vault_id(paths: &Paths) -> Option<[u8; 16]> {
     use std::io::Read;
@@ -190,8 +190,9 @@ pub fn vault_id(paths: &Paths) -> Option<[u8; 16]> {
         .ok()?
         .read_exact(&mut head)
         .ok()?;
-    let known = [b"GOYOVA01", b"GOYOVA02", b"GOYOVA03", b"GOYOVA04"];
-    if !known.iter().any(|m| head[..8] == m[..]) {
+    // GOYOVA05 to 08 (0.12.0, entries with OTP secrets) keep the header
+    // of 01 to 04.
+    if !(head.starts_with(b"GOYOVA0") && (b'1'..=b'8').contains(&head[7])) {
         return None;
     }
     let id: [u8; 16] = head[8..24].try_into().ok()?;
@@ -600,6 +601,24 @@ pub fn reset_folder(paths: &Paths) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OTP formats (GOYOVA05 to 08, 0.12.0) keep the ID where 01 to 04
+    /// have it; a newer format or no vault gives none.
+    #[test]
+    fn the_vault_id_is_read_from_every_known_format() {
+        let dir = std::env::temp_dir().join(format!("goyo-vault-id-{}", std::process::id()));
+        let paths = Paths::new(&dir);
+        fs::create_dir_all(paths.vault.parent().unwrap()).unwrap();
+        assert_eq!(vault_id(&paths), None);
+        for n in 1..=9u8 {
+            let mut head = format!("GOYOVA0{n}").into_bytes();
+            head.extend_from_slice(&[0x5a; 16]);
+            fs::write(&paths.vault, &head).unwrap();
+            let want = (n <= 8).then_some([0x5a; 16]);
+            assert_eq!(vault_id(&paths), want, "GOYOVA0{n}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn settings_round_trip_and_refuse_bad_words() {
