@@ -142,9 +142,11 @@ pub struct AndroidTransport {
     /// Why the last exchange failed before an answer; None after one that
     /// reached the server's script.
     pub problem: Option<Problem>,
-    /// Whether the local end must be a Tailscale address too (off only in
-    /// the tests, which run the server script over pipes, not this).
-    pub check_local: bool,
+    /// Tests only: also admit a host that resolves to loopback addresses
+    /// alone (the test's SSH server on 127.0.0.1), with no check of the
+    /// local end. No build of the app has this.
+    #[cfg(test)]
+    pub loopback: bool,
 }
 impl AndroidTransport {
     pub fn new(target: Target, cancel: Arc<AtomicBool>) -> Self {
@@ -154,7 +156,8 @@ impl AndroidTransport {
             pin: None,
             cancel,
             problem: None,
-            check_local: true,
+            #[cfg(test)]
+            loopback: false,
         }
     }
     fn refused(&mut self, problem: Problem, log: String) -> Result<Output, Failure> {
@@ -186,7 +189,17 @@ impl Transport for AndroidTransport {
             Ok(it) => it.collect(),
             Err(_) => Vec::new(),
         };
-        let addrs = match tailnet::admit(&resolved) {
+        let admitted = tailnet::admit(&resolved);
+        #[cfg(test)]
+        let admitted = if self.loopback
+            && !resolved.is_empty()
+            && resolved.iter().all(|a| a.ip().is_loopback())
+        {
+            Ok(resolved.clone())
+        } else {
+            admitted
+        };
+        let addrs = match admitted {
             Ok(addrs) => addrs,
             Err(tailnet::Refusal::Unresolved) => {
                 return self.refused(
@@ -222,7 +235,10 @@ impl Transport for AndroidTransport {
             seen: seen.clone(),
         };
         let cancel = self.cancel.clone();
-        let check_local = self.check_local;
+        #[cfg(test)]
+        let check_local = !self.loopback;
+        #[cfg(not(test))]
+        let check_local = true;
         let started = Instant::now();
         let outcome = rt.block_on(run(
             addrs,

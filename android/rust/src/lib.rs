@@ -19,6 +19,8 @@ mod jni_sync;
 mod line;
 mod notice;
 mod ssh;
+#[cfg(test)]
+mod ssh_tests;
 mod syncrun;
 mod tailnet;
 
