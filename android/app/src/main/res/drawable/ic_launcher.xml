@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A plain lock on a dark circle: a placeholder icon for stage 1. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#FF2B3A4A" android:pathData="M24,2a22,22 0,1 1,0 44a22,22 0,1 1,0 -44z" />
+    <path android:fillColor="#00000000" android:strokeColor="#FFF2EDE4" android:strokeWidth="3"
+        android:pathData="M17,22v-5a7,7 0,0 1,14 0v5" />
+    <path android:fillColor="#FFF2EDE4" android:pathData="M14,22h20v14h-20z" />
+    <path android:fillColor="#FF2B3A4A" android:pathData="M24,27a2,2 0,1 1,0 4a2,2 0,1 1,0 -4z" />
+</vector>

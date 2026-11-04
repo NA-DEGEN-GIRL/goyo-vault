@@ -150,17 +150,41 @@ const TEST_ANCHOR_MARKER: &str = "goyo-test-anchor";
 pub fn set_anchor_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     ANCHOR_DIR.with(|d| d.replace(dir))
 }
+/// The folder `locate` uses in place of %LOCALAPPDATA%, set once by an app
+/// that has no such variable: the Android app passes its private files
+/// folder (Context.getFilesDir), which only the app's own user can reach.
+static ANCHOR_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// Sets the base folder of the anchor for this process, once, before any
+/// vault is opened; the anchor is then `<root>/GoyoVault`. Refused for a
+/// path that is not absolute, and for a second root (a first one stays,
+/// so an anchor never moves under an open session). The Windows app never
+/// calls it and keeps %LOCALAPPDATA%.
+pub fn set_anchor_root(root: &Path) -> Result<(), &'static str> {
+    if !root.is_absolute() {
+        return Err("열쇠 기록 폴더는 절대 경로여야 합니다.");
+    }
+    let set = ANCHOR_ROOT.get_or_init(|| root.to_owned());
+    if set != root {
+        return Err("열쇠 기록 폴더는 한 번만 정할 수 있습니다.");
+    }
+    Ok(())
+}
 /// The anchor's folder: `%LOCALAPPDATA%\GoyoVault`, per user and per PC,
-/// never next to the exe (a USB disk reports itself as fixed too). A build
-/// with debug assertions uses `GoyoVault-debug` instead, or the thread's
-/// test folder. None without an absolute %LOCALAPPDATA%.
+/// never next to the exe (a USB disk reports itself as fixed too), or
+/// `GoyoVault` under the root `set_anchor_root` set (the Android app). A
+/// build with debug assertions uses `GoyoVault-debug` instead, or the
+/// thread's test folder. None without either an absolute %LOCALAPPDATA%
+/// or a root.
 pub(super) fn locate() -> Option<PathBuf> {
     #[cfg(debug_assertions)]
     if let Some(dir) = ANCHOR_DIR.with(|d| d.borrow().clone()) {
         std::hint::black_box(TEST_ANCHOR_MARKER);
         return Some(dir);
     }
-    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    let base = match ANCHOR_ROOT.get() {
+        Some(root) => root.clone(),
+        None => PathBuf::from(std::env::var_os("LOCALAPPDATA")?),
+    };
     if !base.is_absolute() {
         return None;
     }
@@ -1388,17 +1412,28 @@ pub(super) fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     f.take(LIMIT as u64 + 1).read_to_end(&mut bytes)?;
     Ok(Some(bytes))
 }
-#[cfg(not(windows))]
+/// The same on Unix: O_NOFOLLOW, so a symlink fails the open (ELOOP) and
+/// reads as no anchor, like a reparse point on Windows; then the handle's
+/// own fstat decides (a regular file with one name).
+#[cfg(unix)]
 pub(super) fn open_plain(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
+    use std::os::unix::fs::MetadataExt;
+    let f = match crate::posix::open_nofollow(path) {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(ELOOP) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let m = f.metadata()?;
+    if !m.file_type().is_file() || m.nlink() != 1 {
         return Ok(None);
     }
     let mut bytes = Vec::new();
-    File::open(path)?
-        .take(LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    f.take(LIMIT as u64 + 1).read_to_end(&mut bytes)?;
     Ok(Some(bytes))
 }
+/// ELOOP on Linux and Android: O_NOFOLLOW met a symlink.
+#[cfg(unix)]
+const ELOOP: i32 = 40;
 /// `goyo-vault.keys.<16 lowercase hex>.tmp`, the names `update` gives its
 /// temp files.
 fn temp_name(name: &str) -> bool {
@@ -2885,6 +2920,7 @@ mod tests {
 
     /// A link with the anchor's name is no anchor: it reads as empty, and a
     /// write replaces the link instead of writing through it.
+    #[cfg_attr(target_os = "android", ignore = "Android refuses hard links (SELinux)")]
     #[test]
     fn a_link_is_no_anchor() {
         let d = Dir::new();

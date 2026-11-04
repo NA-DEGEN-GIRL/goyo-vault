@@ -319,6 +319,10 @@ Review notes (in Korean): [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).
 
 </details>
 
+## Android app
+
+The `android/` folder holds an Android app. It opens the same vault and key files as the PC with the same Rust code, and supports YubiKeys (NFC and USB-C), sync over Tailscale only, fetching from the server, and entry OTP. **No APK is distributed:** build and install it yourself as described under 'Build' in [docs/ANDROID.md](docs/ANDROID.md) (Korean). The screens are Korean only for now, and some key tasks (key removal, password change, turning keys off) are done on the PC.
+
 ## Building from source
 
 You need the stable Rust MSVC x64 toolchain and its linker. No GUI or crypto SDK is used. The only direct dependencies are Rust crates for cryptography and secret handling, pinned in `Cargo.toml` and `Cargo.lock`.

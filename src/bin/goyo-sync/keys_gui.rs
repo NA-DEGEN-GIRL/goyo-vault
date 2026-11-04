@@ -15,6 +15,70 @@ use goyo_vault::syncfile::{
 };
 use std::{io::Read, path::Path};
 
+/// The server card's button that registers an Android phone's key
+/// (docs/ANDROID.md): its line is taken from the clipboard.
+pub const PHONE_BUTTON: &str = "Android 기기 추가…";
+/// When the clipboard holds no phone line.
+pub const PHONE_HOWTO: &str = "클립보드에 휴대폰의 줄이 없습니다. 휴대폰의 고요 금고 앱에서 '동기화 설정 › 줄 복사'로 복사한 줄을 이 PC의 클립보드에 넣은 뒤(메신저나 메일로 보내도 됩니다. 공개 키라 비밀은 아닙니다) 다시 누르세요. 줄에는 ssh-ed25519 키와 영문·숫자·. _ - 로 된 기기 이름이 있어야 합니다.";
+/// The one question before a phone's line goes to the server: the server,
+/// the device, the exact line (this PC's forced command, the phone's key
+/// and name), what `--key-sync` allows, and that the usual login does it.
+pub fn phone_question(c: &Config, phone: &crate::keysetup::Phone, ids: &[[u8; 16]]) -> String {
+    let line = match crate::keysetup::server_line(
+        &c.python,
+        &c.remote,
+        ids,
+        &phone.blob,
+        &phone.comment(),
+    ) {
+        Some(line) => line,
+        None => return tr(UNSAFE_LINE).to_owned(),
+    };
+    let allowed = if ids.is_empty() {
+        tr("목록에 ID를 아는 금고가 없어 --key-sync가 없는 줄입니다(동기화만, 열쇠 파일 동기화는 안 됨).").to_owned()
+    } else {
+        fill(
+            "--key-sync=에는 이 창 목록의 금고 {}개의 ID가 들어가, 휴대폰이 그 금고들의 열쇠 파일을 받고 올릴 수 있게 됩니다.",
+            &[&ids.len()],
+        )
+    };
+    fill(
+        "{} 서버의 ~/.ssh/authorized_keys에 Android 기기 '{}'의 줄을 넣습니다. 같은 키의 줄이 있으면 그 줄만 바꾸고, 바꾸기 전에 authorized_keys.goyo-backup으로 백업합니다.
+
+{}
+
+{}
+
+휴대폰 화면에 보이는 키와 같은지 끝까지 확인하세요. 이 키로는 서버에서 동기화 스크립트만 실행됩니다. 등록에는 이 PC의 평소 ssh 로그인을 씁니다. 휴대폰을 잃어버리면 이 줄을 바로 지우세요. 계속할까요?",
+        &[&c.host, &phone.name, &line, &allowed],
+    )
+}
+/// A phone's line went on the server (or already was there).
+pub fn phone_added(name: &str, same: bool) -> String {
+    if same {
+        fill(
+            "Android 기기 '{}'의 줄은 이미 서버에 있습니다. 휴대폰의 동기화 설정에서 '연결 확인'을 누르세요.",
+            &[&name],
+        )
+    } else {
+        fill(
+            "Android 기기 '{}'의 줄을 서버에 넣었습니다. 휴대폰의 동기화 설정에서 '연결 확인'을 누르세요.",
+            &[&name],
+        )
+    }
+}
+/// A phone's line did not go on the server, for an answer of the script.
+pub fn phone_refused(outcome: &Outcome) -> Option<String> {
+    match outcome {
+        Outcome::Unrestricted => Some(tr("그 키가 서버에 강제 명령 없이(평소 로그인 키로) 이미 있어 authorized_keys를 바꾸지 않았습니다. 휴대폰에서 '키 새로 만들기'를 하세요.").to_owned()),
+        Outcome::Script(line) => Some(fill(
+            "서버의 authorized_keys를 고치지 못했습니다. 서버 출력: {}",
+            &[&cut(line)],
+        )),
+        _ => None,
+    }
+}
+
 /// The button under the vault list that shows the forced-command line.
 pub const LINE_BUTTON: &str = "강제 명령 줄…";
 /// Beside it: where key-file sync is switched, and why the line matters

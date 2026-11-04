@@ -131,8 +131,8 @@ WIN = 'src/win.rs'
 SERVER = 'server/goyo-sync-server.py'
 SELFTEST = BIN_T + 'server_selftest_passes'
 # Stage 6, the helper's key steps and the wire (goyo-sync bin tests).
-HELPER_KEYS = 'src/bin/goyo-sync/engine/keys.rs'
-ENGINE = 'src/bin/goyo-sync/engine.rs'
+HELPER_KEYS = 'src/syncengine/keys.rs'
+ENGINE = 'src/syncengine.rs'
 SYNCFILE_KEYS = 'src/syncfile/keys.rs'
 SYNCWIRE = 'src/syncwire.rs'
 KEYSYNC = 'src/vault/keysync.rs'
@@ -1769,7 +1769,7 @@ ROWS = [
      '        && key_ignored(&out.log, &identity) && false\n',
      ['setup::tests::an_ignored_dedicated_key_is_refused']),
     ("U only ssh's words about the dedicated key itself count", 10, 'both', 'sync',
-     'src/bin/goyo-sync/transport.rs',
+     'src/syncengine/transport.rs',
      '        file.is_none_or(|f| f == ours)',
      '        file.is_none_or(|_| true)',
      ['setup::tests::an_ignored_dedicated_key_is_refused']),
@@ -2090,14 +2090,6 @@ ROWS = [
      ['gui::tests::one_button_setup_makes_registers_and_saves_the_key']),
     # The per-entry OTP secret (stage 14): its own vault formats, merges
     # that see it, and the entry view's code, copies and QR panel.
-    ('OTP-3 a GOYOVA08 head counts for KP', 14, 'feature', 'sync', HELPER_KEYS,
-     '    let keyed = &head[..8] == INCOMING_MAGIC && syncfile::keyed_vault(&head[16..24]);',
-     '    let keyed = &head[..8] == INCOMING_MAGIC && &head[16..24] == b"GOYOVA04";',
-     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
-    ("OTP-3 a hardware GOYOVA08 upload's KEY_BEHIND is nokeys", 14, 'feature', 'sync', HELPER_KEYS,
-     '        let hardware = syncfile::keyed_vault(blob) && blob.get(64)',
-     '        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64)',
-     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
     ('OTP-1 an OTP secret takes the OTP magic', 14, 'both', 'lib', VAULT,
      '    out.extend_from_slice(header.magic(format, otp));',
      '    out.extend_from_slice(header.magic(format, false));',
@@ -2178,6 +2170,14 @@ ROWS = [
      'Instant::now() < until && self.entry().is_some_and(|e| e.id() == id && e.has_otp())',
      'Instant::now() < until && self.entry().is_some_and(|e| e.has_otp())',
      [OTP_UI]),
+    ('OTP-3 a GOYOVA08 head counts for KP', 14, 'feature', 'sync', HELPER_KEYS,
+     '    let keyed = &head[..8] == INCOMING_MAGIC && syncfile::keyed_vault(&head[16..24]);',
+     '    let keyed = &head[..8] == INCOMING_MAGIC && &head[16..24] == b"GOYOVA04";',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
+    ("OTP-3 a hardware GOYOVA08 upload's KEY_BEHIND is nokeys", 14, 'feature', 'sync', HELPER_KEYS,
+     '        let hardware = syncfile::keyed_vault(blob) && blob.get(64)',
+     '        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64)',
+     [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
 ]
 
 # The default build has security keys; 'keyless' turns them off.

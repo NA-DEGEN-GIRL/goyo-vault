@@ -2809,6 +2809,10 @@ mod tests {
     /// written stops the vault before any file, and a crash after the key
     /// and vault files leaves the line the next unlock promotes: written by
     /// this PC, with no question.
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: a read-only file cannot be replaced there"
+    )]
     #[test]
     fn a_vault_made_with_keys_writes_its_anchor_line_first() {
         set_kdf_profile(KdfProfile::Test);

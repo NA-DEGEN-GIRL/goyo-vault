@@ -319,6 +319,10 @@
 
 </details>
 
+## Android 앱
+
+`android/` 폴더에 Android 앱이 있습니다. PC와 같은 금고 파일·열쇠 파일을 같은 Rust 코드로 열고, YubiKey(NFC·USB-C)와 Tailscale로만 하는 동기화, 서버에서 가져오기, 항목의 OTP를 지원합니다. **APK는 배포하지 않습니다.** [docs/ANDROID.md](docs/ANDROID.md)의 '빌드'대로 직접 빌드해 설치하세요. 화면은 아직 한국어만 있고, 키 제거·비밀번호 변경·보안 키 끄기 같은 일부 열쇠 작업은 PC에서 합니다.
+
 ## 직접 빌드하기
 
 Rust stable MSVC x64 툴체인과 링커가 필요합니다. 이 버전은 rustc 1.98.1로 빌드해 확인했고, 링커 옵션 `/Brepro` 덕분에 같은 툴체인으로 같은 커밋을 빌드하면 같은 실행 파일이 나오는지 비교할 수 있습니다. GUI·암호화용 별도 SDK는 쓰지 않습니다. 직접 의존성은 암호화·비밀값 처리용 Rust 라이브러리뿐이며, 버전은 `Cargo.toml`과 `Cargo.lock`에 고정했습니다.

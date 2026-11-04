@@ -115,9 +115,24 @@ fn open_candidate(path: &Path, limit: usize) -> Option<Candidate> {
         written: (u64::from(info.times[5]) << 32) | u64::from(info.times[4]),
     })
 }
-#[cfg(not(windows))]
-fn open_candidate(_path: &Path, _limit: usize) -> Option<Candidate> {
-    None
+/// The same on Unix: opened without following a symlink (O_NOFOLLOW), then
+/// checked and read through that one handle; a folder, FIFO, device or a
+/// file with a second name (a hard link) is no candidate.
+#[cfg(unix)]
+fn open_candidate(path: &Path, limit: usize) -> Option<Candidate> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let f = crate::posix::open_nofollow(path).ok()?;
+    let m = f.metadata().ok()?;
+    if !m.file_type().is_file() || m.nlink() != 1 || m.len() > limit as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    f.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then(|| Candidate {
+        path: path.to_owned(),
+        bytes,
+        written: crate::posix::filetime(&m),
+    })
 }
 
 /// What a key file states before any password.

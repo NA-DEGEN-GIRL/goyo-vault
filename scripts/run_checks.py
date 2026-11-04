@@ -10,9 +10,13 @@ no file written unless asked:
                                                     rewrites docs/dependency-audit.json)
     python -X utf8 scripts/run_checks.py --mutate   also scripts/mutate.py (§14.11)
 
+With an Android NDK, cargo-ndk and the aarch64-linux-android target, the
+lib is also checked for the Android app (clippy, both editions); without
+them that step is skipped with a note (docs/ANDROID.md).
+
 The release checklist runs it before package_release.py.
 """
-import pathlib, subprocess, sys
+import os, pathlib, shutil, subprocess, sys
 
 root = pathlib.Path(__file__).resolve().parents[1]
 args = set(sys.argv[1:])
@@ -30,6 +34,38 @@ steps = [
     ['cargo', 'build', '--release', '--locked', '--bins'],
     ['cargo', 'build', '--release', '--locked', '--bins', *keyless],
 ]
+
+
+def android_env():
+    """The environment for cargo-ndk, or the reason the Android step is
+    skipped: an NDK (ANDROID_NDK_HOME, else the newest under the SDK's ndk
+    folder), cargo-ndk and the rustup target."""
+    ndk = os.environ.get('ANDROID_NDK_HOME') or os.environ.get('ANDROID_NDK_ROOT')
+    if not ndk:
+        sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+        if not sdk and os.environ.get('LOCALAPPDATA'):
+            sdk = os.path.join(os.environ['LOCALAPPDATA'], 'Android', 'Sdk')
+        found = sorted(pathlib.Path(sdk, 'ndk').glob('*')) if sdk else []
+        ndk = str(found[-1]) if found else None
+    if not ndk or not pathlib.Path(ndk).is_dir():
+        return None, 'no Android NDK (set ANDROID_NDK_HOME)'
+    if shutil.which('cargo-ndk') is None:
+        return None, 'cargo-ndk is not installed (cargo install cargo-ndk)'
+    targets = subprocess.run(['rustup', 'target', 'list', '--installed'],
+                             capture_output=True, text=True).stdout.split()
+    if 'aarch64-linux-android' not in targets:
+        return None, 'no aarch64-linux-android target (rustup target add aarch64-linux-android)'
+    return dict(os.environ, ANDROID_NDK_HOME=ndk), None
+
+
+android, skipped = android_env()
+if android is None:
+    print(f'NOTE: Android lib check skipped: {skipped}', flush=True)
+else:
+    ndk = ['cargo', 'ndk', '-t', 'arm64-v8a', '--platform', '28']
+    for edition in ([], keyless):
+        steps.append((ndk + ['clippy', '--lib', '--locked', *edition, '--', '-D', 'warnings'],
+                      android))
 if '--deps' in args:
     steps.append([sys.executable, 'scripts/check_dependencies.py'])
 if '--mutate' in args:
@@ -37,8 +73,9 @@ if '--mutate' in args:
         sys.exit('scripts/mutate.py is not in the tree yet.')
     steps.append([sys.executable, '-X', 'utf8', 'scripts/mutate.py'])
 for step in steps:
+    step, env = step if isinstance(step, tuple) else (step, None)
     print('>', ' '.join(step), flush=True)
-    if subprocess.run(step, cwd=root).returncode != 0:
+    if subprocess.run(step, cwd=root, env=env).returncode != 0:
         sys.exit('FAILED: ' + ' '.join(step))
 # The server script runs alone on the server: its own selftest.
 selftest = subprocess.run([sys.executable, '-I', 'server/goyo-sync-server.py', 'selftest'],

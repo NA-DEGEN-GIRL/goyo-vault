@@ -27,6 +27,7 @@ mod serverkey;
 mod sync;
 #[cfg(debug_assertions)]
 pub use anchor::set_anchor_dir;
+pub use anchor::set_anchor_root;
 pub use anchor::{
     ANCHOR_DOWNGRADE, ANCHOR_EPOCH, ANCHOR_FORK, ANCHOR_FORK_VAULT, ANCHOR_NEWER, ANCHOR_RELIST,
     AnchorClass, SIDECAR_FAILED,
@@ -3085,9 +3086,13 @@ fn file_identity(path: &Path) -> Result<(u32, u64)> {
     let i = file_info(&File::open(path).map_err(|_| "파일 식별 실패")?)?;
     Ok((i.volume, ((i.index_hi as u64) << 32) | i.index_lo as u64))
 }
-#[cfg(not(windows))]
-fn file_identity(_path: &Path) -> Result<(u32, u64)> {
-    Err("Windows에서만 지원합니다.")
+/// (st_dev, st_ino) of the file `path` names, through a symlink as the
+/// Windows open goes through one.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(path).map_err(|_| "파일 식별 실패")?;
+    Ok((m.dev(), m.ino()))
 }
 struct FileLock(File);
 impl FileLock {
@@ -3767,6 +3772,7 @@ mod workflow_tests {
         drop(other);
         drop(s);
     }
+    #[cfg_attr(target_os = "android", ignore = "Android refuses hard links (SELinux)")]
     #[test]
     fn path_aliases_and_streams_rejected() {
         let t = Temp::new();
@@ -3833,6 +3839,10 @@ mod workflow_tests {
             assert!(password_policy(strong).is_ok(), "{strong}");
         }
     }
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: a read-only file cannot be replaced there"
+    )]
     #[test]
     fn password_change_failure_stages_preserve_recoverability() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
@@ -4299,6 +4309,10 @@ mod workflow_tests {
             other => panic!("expected a kept temp file, got {other:?}"),
         }
     }
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: an open handle blocks a replace there"
+    )]
     #[test]
     fn atomic_write_keeps_the_only_copy_through_a_replace_gap() {
         let t = Temp::new();
@@ -4417,6 +4431,8 @@ mod workflow_tests {
         drop(s);
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
+    /// Windows only: it holds files open with Windows share modes.
+    #[cfg(windows)]
     #[test]
     fn unlock_takes_the_key_file_back_from_its_temp_file() {
         use std::os::windows::fs::OpenOptionsExt;
@@ -4591,6 +4607,7 @@ mod workflow_tests {
         assert!(input.exists() && !temp.exists());
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
+    #[cfg_attr(target_os = "android", ignore = "Android refuses hard links (SELinux)")]
     #[test]
     fn only_plain_temp_files_of_this_vault_stand_in_for_a_key_file() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
@@ -5560,6 +5577,10 @@ mod workflow_tests {
     /// next unlock takes the temp file back (spec §5.2 step 8, §5.7); any
     /// other failure leaves the session open and the next save or poll
     /// does it.
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: an open handle blocks a replace there"
+    )]
     #[test]
     fn the_resave_at_unlock_meets_the_gap_and_other_failures() {
         crypto::set_kdf_profile(crypto::KdfProfile::Test);
@@ -5718,12 +5739,34 @@ mod workflow_tests {
         crypto::set_kdf_profile(crypto::KdfProfile::Real);
     }
 }
-#[cfg(not(windows))]
+/// The Unix publish (Linux, the Android app): rename(2) replaces the target
+/// atomically. Without `replace` the target must not exist: link(2) is the
+/// atomic no-clobber (EEXIST), then the temp name goes. Where hard links are
+/// refused (Android's SELinux policy for apps, FAT), the no-clobber check
+/// and the rename are two steps, which FileLock keeps every goyo writer out
+/// of. Either way the folder is flushed after, so the rename itself
+/// survives a power cut (`flush` then flushes the file under its name).
+#[cfg(unix)]
 fn publish(temp: &Path, target: &Path, replace: bool) -> Result<()> {
-    if !replace {
-        return Err("Windows에서만 저장할 수 있습니다.");
+    const FAILED: &str = "파일 저장/교체 실패: 기존 파일, 저장장치 연결과 쓰기 권한을 확인하세요.";
+    if replace {
+        fs::rename(temp, target).map_err(|_| FAILED)?;
+    } else {
+        match fs::hard_link(temp, target) {
+            Ok(()) => {
+                let _ = fs::remove_file(temp);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(FAILED),
+            Err(_) => {
+                if fs::symlink_metadata(target).is_ok() {
+                    return Err(FAILED);
+                }
+                fs::rename(temp, target).map_err(|_| FAILED)?;
+            }
+        }
     }
-    fs::rename(temp, target).map_err(|_| "파일 교체 실패")
+    let _ = crate::posix::sync_parent(target);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5908,6 +5951,10 @@ mod tests {
         relabelled[..8].copy_from_slice(b"GOYOKE01");
         assert!(decode_key(&relabelled, "long-test-password").is_err());
     }
+    #[cfg_attr(
+        not(windows),
+        ignore = "Windows only: an open handle blocks a replace there"
+    )]
     #[test]
     fn storage_lock_and_overwrite() {
         let dir = std::env::temp_dir().join(format!(

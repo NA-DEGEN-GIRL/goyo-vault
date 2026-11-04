@@ -4,7 +4,10 @@ pub mod crypto;
 pub mod fido;
 mod merge;
 pub mod otp;
+#[cfg(unix)]
+mod posix;
 pub mod qr;
+pub mod syncengine;
 pub mod syncfile;
 pub mod syncwire;
 pub mod vault;

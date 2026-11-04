@@ -88,7 +88,9 @@ pub enum FileError {
 }
 fn classify(e: &io::Error) -> FileError {
     match e.raw_os_error() {
-        Some(5 | 32) => FileError::Busy,
+        // ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: another handle.
+        // On Unix the same numbers are EIO and EPIPE, which are no lock.
+        Some(5 | 32) if cfg!(windows) => FileError::Busy,
         _ if e.kind() == io::ErrorKind::NotFound => FileError::Missing,
         _ => FileError::Io,
     }
@@ -110,7 +112,7 @@ fn reparse_point(m: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     m.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
 }
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn reparse_point(m: &fs::Metadata) -> bool {
     m.file_type().is_symlink()
 }
@@ -139,12 +141,18 @@ pub fn pre_merge_copies(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// What a directory listing says about a file. Every replace is a new file,
-/// so its creation time changes even when size and content do not.
+/// so its creation time changes even when size and content do not. Unix has
+/// no creation time to read (Android's kernels give none), so there the
+/// file's (st_dev, st_ino) stands for it, and [`replace_file`] gives every
+/// new file a modification time past the one it replaces: the kernel's own
+/// is coarse (a clock tick) and an inode number can come back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stamp {
     len: u64,
     created: SystemTime,
     modified: SystemTime,
+    #[cfg(unix)]
+    id: (u64, u64),
 }
 /// The stamp of `dir\name`, or None if it is missing or a directory. Read
 /// from the directory listing only (`DirEntry::metadata` uses the find data
@@ -165,6 +173,11 @@ pub fn stamp(dir: &Path, name: &str) -> Option<Stamp> {
         len: m.len(),
         created: m.created().unwrap_or(UNIX_EPOCH),
         modified: m.modified().unwrap_or(UNIX_EPOCH),
+        #[cfg(unix)]
+        id: {
+            use std::os::unix::fs::MetadataExt;
+            (m.dev(), m.ino())
+        },
     })
 }
 
@@ -209,13 +222,23 @@ fn open_plain(path: &Path) -> Result<File, FileError> {
     }
     Ok(f)
 }
-#[cfg(not(windows))]
+/// On Unix: O_NOFOLLOW (a symlink fails the open) and O_NONBLOCK (a FIFO
+/// cannot hang it), then the handle's own fstat must say regular file.
+#[cfg(unix)]
 fn open_plain(path: &Path) -> Result<File, FileError> {
-    let m = fs::symlink_metadata(path).map_err(|e| classify(&e))?;
-    if !m.file_type().is_file() {
+    let f = crate::posix::open_nofollow(path).map_err(|e| match e.raw_os_error() {
+        Some(40) => FileError::Io, // ELOOP: a symlink
+        _ => classify(&e),
+    })?;
+    if !f
+        .metadata()
+        .map_err(|e| classify(&e))?
+        .file_type()
+        .is_file()
+    {
         return Err(FileError::Io);
     }
-    File::open(path).map_err(|e| classify(&e))
+    Ok(f)
 }
 
 static TEMPS: AtomicU64 = AtomicU64::new(0);
@@ -246,9 +269,10 @@ pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
             .create_new(true)
             .open(&temp)
             .map_err(|_| FileError::Io)?;
-        f.write_all(bytes)
-            .and_then(|_| f.sync_all())
-            .map_err(|_| FileError::Io)?;
+        f.write_all(bytes).map_err(|_| FileError::Io)?;
+        #[cfg(unix)]
+        later_than(&f, path)?;
+        f.sync_all().map_err(|_| FileError::Io)?;
         drop(f);
         let mut tries = 0;
         loop {
@@ -267,6 +291,24 @@ pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+/// Sets the new file's modification time to the clock's own nanoseconds,
+/// and past the file it replaces should that one be as new or newer (a
+/// clock set back, two replaces in one nanosecond): the kernel stamps a
+/// write with a coarse tick, so two replaces within one tick, of the same
+/// size, on a recycled inode, would list alike and a change would be missed
+/// ([`Stamp`]).
+#[cfg(unix)]
+fn later_than(f: &File, path: &Path) -> Result<(), FileError> {
+    let now = SystemTime::now();
+    let old = fs::symlink_metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let time = match old {
+        Some(old) if old >= now => old + Duration::from_nanos(1),
+        _ => now,
+    };
+    f.set_modified(time).map_err(|_| FileError::Io)
 }
 /// The Windows error code on failure.
 #[cfg(windows)]
@@ -288,9 +330,13 @@ fn rename_over(temp: &Path, target: &Path) -> Result<(), u32> {
     }
     Ok(())
 }
-#[cfg(not(windows))]
+/// rename(2), atomic over an existing target; then the folder is flushed
+/// so the rename survives a power cut (MOVEFILE_WRITE_THROUGH on Windows).
+#[cfg(unix)]
 fn rename_over(temp: &Path, target: &Path) -> Result<(), u32> {
-    fs::rename(temp, target).map_err(|_| 0)
+    fs::rename(temp, target).map_err(|_| 0u32)?;
+    let _ = crate::posix::sync_parent(target);
+    Ok(())
 }
 /// Removes this side's leftover temp files from `dir` (`prefixes` is
 /// [`APP_TEMPS`] or [`HELPER_TEMPS`]) and returns how many. Call it only
@@ -1070,6 +1116,7 @@ mod tests {
         assert!(t.file("status.dir.goyotmp").is_dir());
         assert_eq!(remove_own_temps(&t.file("missing"), &APP_TEMPS), 0);
     }
+    #[cfg_attr(not(windows), ignore = "Windows paths")]
     #[test]
     fn folder_and_copy_names() {
         let v = Path::new(r"D:\GoyoVault\vault.goyo");
