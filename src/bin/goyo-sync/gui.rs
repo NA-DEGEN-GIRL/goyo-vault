@@ -109,6 +109,11 @@ const TAKE: i32 = 115;
 /// sync. That sync is switched in goyo-vault only.
 #[cfg(feature = "security-key")]
 const KEY_LINE: i32 = 118;
+/// [Android 기기 추가…] in the server card (security-key build,
+/// docs/ANDROID.md): the phone's line from the clipboard goes on the
+/// server through `authorize`, after one question.
+#[cfg(feature = "security-key")]
+const ANDROID: i32 = 119;
 /// IDCANCEL: Esc in the log and server-list views.
 const ESCAPE: i32 = 2;
 /// A worker finished; the result waits in [`DONE`].
@@ -173,6 +178,9 @@ thread_local! {
     /// The next file dialog fails to open (see pick_failed).
     static PICK_FAILS: Cell<bool> = const { Cell::new(false) };
     static ASKED: RefCell<Vec<String>> = RefCell::default();
+    /// What the clipboard holds for the next [Android 기기 추가…].
+    #[cfg(feature = "security-key")]
+    static PASTE: RefCell<Option<String>> = const { RefCell::new(None) };
     static TOLD: RefCell<Vec<String>> = RefCell::default();
 }
 /// A guarded yes/no box (win::confirm_in): only the user can answer it.
@@ -202,6 +210,16 @@ fn tell(h: Hwnd, text: &str) {
 #[cfg(test)]
 fn tell(_: Hwnd, text: &str) {
     TOLD.with(|t| t.borrow_mut().push(text.to_owned()));
+}
+/// The clipboard's text, for [Android 기기 추가…]; tests give their own.
+#[cfg(all(feature = "security-key", not(test)))]
+fn paste(h: Hwnd) -> Option<String> {
+    let (units, _) = clipboard_text(h).ok()?;
+    String::from_utf16(&units).ok()
+}
+#[cfg(all(feature = "security-key", test))]
+fn paste(_: Hwnd) -> Option<String> {
+    PASTE.with(|p| p.borrow_mut().take())
 }
 /// The file dialog an [`Ask`] needs; the only source of paths.
 #[cfg(not(test))]
@@ -254,6 +272,9 @@ enum Job {
     /// (keysetup.rs), with who may read a new key.
     #[cfg(feature = "security-key")]
     Setup(Config, crate::keysetup::Plan, Option<String>),
+    /// A phone's line on the server through `authorize` (keysetup.rs).
+    #[cfg(feature = "security-key")]
+    Phone(Config, crate::keysetup::Phone, Vec<[u8; 16]>),
     List(Config),
     #[cfg(not(feature = "security-key"))]
     Fetch(Config, [u8; 16], PathBuf),
@@ -272,7 +293,7 @@ impl Job {
             #[cfg(not(feature = "security-key"))]
             Job::Install(_) => Kind::Install,
             #[cfg(feature = "security-key")]
-            Job::Setup(..) => Kind::Install,
+            Job::Setup(..) | Job::Phone(..) => Kind::Install,
             Job::List(_) => Kind::List,
             #[cfg(not(feature = "security-key"))]
             Job::Fetch(..) => Kind::Fetch,
@@ -292,6 +313,11 @@ impl Job {
             Job::Setup(c, plan, account) => {
                 let set = crate::keysetup::run(runner, log, &c, &plan, account.as_deref());
                 Done::Setup(set, c, plan.ids.len())
+            }
+            #[cfg(feature = "security-key")]
+            Job::Phone(c, phone, ids) => {
+                let added = crate::keysetup::add_phone(runner, log, &c, &ids, &phone);
+                Done::Phone(added, phone.name)
             }
             Job::List(c) => {
                 let listed = setup::list(runner, log, &c);
@@ -346,6 +372,12 @@ enum Done {
     /// The setup, its settings and how many vaults the line names.
     #[cfg(feature = "security-key")]
     Setup(crate::keysetup::Setup, Config, usize),
+    /// What `authorize` did with a phone's line, and the phone's name.
+    #[cfg(feature = "security-key")]
+    Phone(
+        Result<crate::keysetup::Authorized, crate::keysetup::Outcome>,
+        String,
+    ),
     /// The server's vaults, and what it holds as each one's key file.
     Listed(Result<Vec<ListEntry>, Checked>, Config, Vec<KeyMark>),
     Got(Got, PathBuf),
@@ -405,6 +437,9 @@ enum Ask {
     /// The one question before the install and the key setup.
     #[cfg(feature = "security-key")]
     Setup(Config, crate::keysetup::Plan),
+    /// The one question before a phone's line goes on the server.
+    #[cfg(feature = "security-key")]
+    Phone(Config, crate::keysetup::Phone, Vec<[u8; 16]>),
     Trust(Config, String),
     /// "이 PC로 가져오기": the folder and name for the server's copy
     /// (suggested: `vault.goyo` beside the exe when free).
@@ -873,6 +908,13 @@ impl App {
         let w = self.toggle_width("고급 설정");
         let variant = if adv { theme::TOGGLE_ON } else { theme::TOGGLE };
         self.button(ADVANCED, "고급 설정", (IX + IW - w, S + 8, w, 32), variant);
+        #[cfg(feature = "security-key")]
+        self.button(
+            ANDROID,
+            crate::keys_gui::PHONE_BUTTON,
+            (IX + IW - w - 192, S + 8, 184, 32),
+            theme::GHOST,
+        );
         self.input(HOST, &f.host, (IX, S + 40, HOST_W, 40), 0);
         self.button(
             CHECK,
@@ -1312,6 +1354,8 @@ impl App {
         match self.screen {
             Screen::Main => match id {
                 CHECK | INSTALL | FETCH | SAVE | SYNC => idle,
+                #[cfg(feature = "security-key")]
+                ANDROID => idle,
                 HOST | REMOTE | PYTHON | IDENTITY | INTERVAL | TIMEOUT | VAULT_LIST | ADVANCED
                 | BROWSE_KEY | ADD | REMOVE | AUTOSTART | STOP | LOG => true,
                 #[cfg(feature = "security-key")]
@@ -1381,6 +1425,8 @@ impl App {
                 None
             }
             INSTALL => self.install_ask(),
+            #[cfg(feature = "security-key")]
+            ANDROID => self.phone_ask(),
             FETCH => {
                 match setup::server_config(&self.fields) {
                     Ok(c) => self.start(Job::List(c)),
@@ -1605,6 +1651,11 @@ impl App {
                 self.start(Job::Setup(c, plan, account));
                 None
             }
+            #[cfg(feature = "security-key")]
+            (Ask::Phone(c, phone, ids), Answer::Yes(true)) => {
+                self.start(Job::Phone(c, phone, ids));
+                None
+            }
             (Ask::Trust(c, _), Answer::Yes(true)) => {
                 self.start(Job::Trust(c));
                 None
@@ -1757,6 +1808,26 @@ impl App {
             },
         ))
     }
+    /// [Android 기기 추가…]: the phone's line from the clipboard, checked
+    /// (keysetup::phone_key: an ed25519 key and a plain name only), with
+    /// this PC's settings and every listed vault's ID; one question first.
+    #[cfg(feature = "security-key")]
+    fn phone_ask(&mut self) -> Option<Ask> {
+        let c = match setup::server_config(&self.fields) {
+            Ok(c) => c,
+            Err(bad) => {
+                self.show_bad(bad, false);
+                return None;
+            }
+        };
+        let pasted = paste(self.hwnd);
+        let Some(phone) = pasted.as_deref().and_then(crate::keysetup::phone_key) else {
+            return Some(Ask::Tell(tr(crate::keys_gui::PHONE_HOWTO).to_owned()));
+        };
+        self.refresh_rows();
+        let (ids, _) = self.configured_ids();
+        Some(Ask::Phone(c, phone, ids))
+    }
     /// Where a new dedicated key goes: `%USERPROFILE%\.ssh`. Tests use
     /// their own folder, never this account's.
     #[cfg(all(feature = "security-key", not(test)))]
@@ -1788,6 +1859,32 @@ impl App {
             }
         }
         (ids, unknown)
+    }
+    /// What [Android 기기 추가…] did: a box for the script's answer, the
+    /// server line for an ssh failure or an unsafe setting.
+    #[cfg(feature = "security-key")]
+    fn phone_done(
+        &mut self,
+        added: Result<crate::keysetup::Authorized, crate::keysetup::Outcome>,
+        name: &str,
+    ) -> Option<Ask> {
+        use crate::keysetup::{Authorized, Outcome};
+        self.set_server_note(Note::Intro);
+        match added {
+            Ok(a) => Some(Ask::Tell(crate::keys_gui::phone_added(
+                name,
+                a == Authorized::Same,
+            ))),
+            Err(Outcome::Failed(t)) => {
+                self.set_server_note(Note::Trouble(t));
+                None
+            }
+            Err(Outcome::Refused(_)) => {
+                self.set_server_note(Note::Unsafe);
+                None
+            }
+            Err(outcome) => crate::keys_gui::phone_refused(&outcome).map(Ask::Tell),
+        }
     }
     /// An install's result on the server line.
     fn installed(&mut self, installed: Installed) {
@@ -1974,6 +2071,8 @@ impl App {
             }
             #[cfg(feature = "security-key")]
             Done::Setup(set, c, vaults) => self.set_up(set, &c, vaults),
+            #[cfg(feature = "security-key")]
+            Done::Phone(added, name) => self.phone_done(added, &name),
             Done::Listed(Ok(entries), c, keys) => {
                 if entries.is_empty() {
                     self.set_server_note(Note::ServerEmpty);
@@ -2903,6 +3002,10 @@ fn run_asks(h: Hwnd, mut next: Option<Ask>) {
             Ask::Setup(c, plan) => {
                 Answer::Yes(ask_yes(h, &crate::keys_gui::setup_question(c, plan)))
             }
+            #[cfg(feature = "security-key")]
+            Ask::Phone(c, phone, ids) => {
+                Answer::Yes(ask_yes(h, &crate::keys_gui::phone_question(c, phone, ids)))
+            }
             Ask::Trust(_, name) => Answer::Yes(ask_yes(h, &trust_question(name))),
             Ask::Close => Answer::Yes(ask_yes(
                 h,
@@ -3689,6 +3792,85 @@ mod tests {
         }
         assert_eq!(asked().len(), 1);
         assert_ne!(unsafe { IsWindow(w.h) }, 0);
+    }
+
+    /// [Android 기기 추가…] (security-key build, docs/ANDROID.md): the
+    /// phone's line comes from the clipboard; without one the box says how
+    /// to get it; with one, one question names the server, the device and
+    /// the exact line (this PC's forced command, every listed vault's ID,
+    /// the phone's key and name), and only a yes runs `authorize` over the
+    /// usual login with that line on stdin.
+    #[cfg(feature = "security-key")]
+    #[test]
+    fn an_android_phone_is_added_through_authorize() {
+        use crate::keysetup::authorize_command;
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let header = {
+            let mut v = b"GOYOVA02".to_vec();
+            v.extend([9u8; 16]);
+            v.resize(200, 0);
+            v
+        };
+        let w = Window::with("android", |dir| {
+            std::fs::write(dir.join("vault.goyo"), &header).unwrap()
+        });
+        w.type_in(HOST, "my-server");
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+        // Nothing usable on the clipboard: how to get the line, no question.
+        PASTE.with(|p| *p.borrow_mut() = Some("hello".into()));
+        w.click(ANDROID);
+        assert_eq!(told(), [crate::keys_gui::PHONE_HOWTO]);
+        assert!(asked().is_empty());
+        // The phone's line, its forced command naming another script: only
+        // the key and the name are taken; the line is this PC's.
+        let pasted = format!(
+            "restrict,command=\"python3 -I other.py serve\" ssh-ed25519 {blob} goyo-sync android-LM-G710N"
+        );
+        let line = format!(
+            "restrict,command=\"python3 -I .local/share/goyo-sync/goyo-sync-server.py serve --key-sync={}\" \
+             ssh-ed25519 {blob} goyo-sync android-LM-G710N",
+            "09".repeat(16)
+        );
+        PASTE.with(|p| *p.borrow_mut() = Some(pasted.clone()));
+        answer(false);
+        w.click(ANDROID);
+        let q = asked();
+        assert_eq!(q.len(), 1);
+        assert!(
+            q[0].contains("my-server") && q[0].contains("android-LM-G710N"),
+            "{}",
+            q[0]
+        );
+        assert!(q[0].contains(&line), "{}", q[0]);
+        assert!(w.script.ran().is_empty(), "a no runs nothing");
+        // Yes: one authorize over the usual login, the line on stdin.
+        w.script.push(crate::setup::tests::out(0, b"ADDED\n", ""));
+        PASTE.with(|p| *p.borrow_mut() = Some(pasted));
+        answer(true);
+        w.click(ANDROID);
+        w.wait();
+        let ran = w.script.ran();
+        assert_eq!(ran.len(), 1);
+        assert!(!ran[0].args.iter().any(|a| a == "-i"));
+        let c = w.app(|a| crate::setup::server_config(&a.fields).unwrap());
+        assert_eq!(
+            ran[0].args.last().unwrap(),
+            &authorize_command(&c.remote, &c.python).unwrap()
+        );
+        assert_eq!(ran[0].stdin, format!("{line}\n").into_bytes());
+        let done = told();
+        assert_eq!(done.len(), 1);
+        assert!(done[0].contains("android-LM-G710N") && done[0].contains("연결 확인"));
+        // A usual login key of that name is never bound: told, nothing else.
+        w.script
+            .push(crate::setup::tests::out(1, b"UNRESTRICTED\n", ""));
+        PASTE.with(|p| *p.borrow_mut() = Some(format!("ssh-ed25519 {blob} android-x")));
+        answer(true);
+        w.click(ANDROID);
+        w.wait();
+        assert!(told()[0].contains("강제 명령 없이"));
+        let _ = asked();
     }
 
     /// Spec v3 §7.12, §2.29 (sync) (security-key build): [강제 명령 줄…]
@@ -5210,6 +5392,25 @@ mod tests {
                     comment: "goyo-sync DESKTOP-AB12CD3".into(),
                 };
                 all.push(crate::keys_gui::setup_question(&c, &plan));
+            }
+            // [Android 기기 추가…].
+            use crate::keysetup::{Outcome, Phone};
+            let phone = Phone {
+                blob: "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f".into(),
+                name: "android-LM-G710N".into(),
+            };
+            all.push(tr(crate::keys_gui::PHONE_HOWTO).to_owned());
+            for ids in [vec![], vec![[0xA7; 16]; 2]] {
+                all.push(crate::keys_gui::phone_question(&c, &phone, &ids));
+            }
+            for same in [false, true] {
+                all.push(crate::keys_gui::phone_added(&phone.name, same));
+            }
+            for outcome in [
+                Outcome::Unrestricted,
+                Outcome::Script("FAIL bad line".into()),
+            ] {
+                all.extend(crate::keys_gui::phone_refused(&outcome));
             }
         }
         all

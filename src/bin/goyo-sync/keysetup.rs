@@ -263,6 +263,132 @@ pub fn authorize_result(out: Result<Output, Failure>) -> Result<Authorized, Outc
     }
 }
 
+/// An Android phone's key, from the line its app shows (docs/ANDROID.md):
+/// the ed25519 public key's base64 and the device's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phone {
+    pub blob: String,
+    /// `[A-Za-z0-9._-]`, 1 to 63 characters (e.g. `android-LM-G710N`).
+    pub name: String,
+}
+impl Phone {
+    /// The line's comment, as the server's `authorize` takes it.
+    pub fn comment(&self) -> String {
+        format!("goyo-sync {}", self.name)
+    }
+}
+/// The phone's key from what the user pasted: the whole line its app shows
+/// (`restrict,command="…" ssh-ed25519 <key> goyo-sync android-<model>`) or
+/// just the key part (`ssh-ed25519 <key> <name>`). Only the key and the
+/// name are taken; the forced command is always this PC's own (its script
+/// path, its Python command, its vault IDs), so nothing pasted reaches the
+/// server's line but a checked key and a plain name. One line, at most
+/// 4 KiB; the key an ed25519 public key whose encoding decodes as one; the
+/// name `[A-Za-z0-9._-]{1,63}` after an optional `goyo-sync`.
+pub fn phone_key(text: &str) -> Option<Phone> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > 4096 || text.contains(['\r', '\n']) {
+        return None;
+    }
+    let at = text.find("ssh-ed25519 ")?;
+    // Before the key: nothing, or exactly the app's forced command.
+    let head = &text[..at];
+    if !head.is_empty() && !(head.starts_with("restrict,command=\"") && head.ends_with("\" ")) {
+        return None;
+    }
+    let mut words = text[at..].split(' ');
+    let (_, blob) = (words.next()?, words.next()?);
+    let mut rest: Vec<&str> = words.collect();
+    if rest.first() == Some(&"goyo-sync") {
+        rest.remove(0);
+    }
+    let [name] = rest[..] else {
+        return None;
+    };
+    let plain = |s: &str| {
+        (1..=63).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let Public::Ed25519(blob) = parse_public(format!("ssh-ed25519 {blob}").as_bytes()) else {
+        return None;
+    };
+    (plain(name) && ed25519_encoding(&blob)).then(|| Phone {
+        blob,
+        name: name.to_owned(),
+    })
+}
+/// Whether `blob` decodes (standard base64, padded) to exactly an ed25519
+/// public key's wire encoding: the type name and a 32-byte key, as the
+/// server's `authorize` checks it.
+fn ed25519_encoding(blob: &str) -> bool {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    // 51 bytes are 17 groups of three: 68 characters, no padding.
+    let bytes = blob.as_bytes();
+    if bytes.len() != 68 {
+        return false;
+    }
+    let mut out = Vec::with_capacity(51);
+    for quad in bytes.chunks(4) {
+        let mut v = 0u32;
+        for c in quad {
+            let Some(d) = value(*c) else {
+                return false;
+            };
+            v = (v << 6) | u32::from(d);
+        }
+        out.extend_from_slice(&v.to_be_bytes()[1..]);
+    }
+    out.starts_with(b"\0\0\0\x0bssh-ed25519\0\0\0\x20")
+}
+/// '서버에 Android 기기 추가': puts the phone's line (this PC's forced
+/// command with `ids`, the phone's key and name) into the server's
+/// authorized_keys through the script's `authorize`, over the usual login,
+/// as the PC's own setup does. The script checks the line again and still
+/// refuses anything else; a key already there without a forced command is
+/// left alone (UNRESTRICTED). The phone's key cannot be checked from here:
+/// the phone's own '연결 확인' does that.
+pub fn add_phone(
+    runner: &mut dyn Runner,
+    log: &Log,
+    config: &Config,
+    ids: &[[u8; 16]],
+    phone: &Phone,
+) -> Result<Authorized, Outcome> {
+    let command = authorize_command(&config.remote, &config.python).map_err(Outcome::Refused)?;
+    let Some(line) = server_line(
+        &config.python,
+        &config.remote,
+        ids,
+        &phone.blob,
+        &phone.comment(),
+    ) else {
+        return Err(Outcome::Refused(Unsafe::Remote));
+    };
+    let started = Instant::now();
+    let out = runner.run(
+        Tool::Ssh,
+        &setup::login_args(config, command),
+        format!("{line}\n").as_bytes(),
+        Duration::from_secs(config.timeout),
+        &mut || {},
+    );
+    let result = authorize_result(out);
+    log.line(&format!(
+        "window android device ids={} {result:?} ms={}",
+        ids.len(),
+        started.elapsed().as_millis()
+    ));
+    result
+}
+
 /// The job: install, then the key, the line and the key's own check.
 /// `account` is who may read a new key (see [`account`]).
 pub fn run(
@@ -435,6 +561,179 @@ mod tests {
             format!("ssh-ed25519 {blob} goyo-sync PC\r\n").as_bytes(),
             "",
         )
+    }
+
+    /// The phone's pasted line: only an ed25519 key and a plain name are
+    /// taken, from the whole line the app shows or the key part alone.
+    #[test]
+    fn a_phone_line_gives_only_its_key_and_name() {
+        let phone = Phone {
+            blob: BLOB.into(),
+            name: "android-LM-G710N".into(),
+        };
+        let want = Some(phone.clone());
+        let full = format!(
+            "restrict,command=\"python3 -I .local/share/goyo-sync/goyo-sync-server.py serve \
+             --key-sync=00112233445566778899aabbccddeeff\" ssh-ed25519 {BLOB} goyo-sync android-LM-G710N"
+        );
+        assert_eq!(phone_key(&full), want);
+        assert_eq!(phone_key(&format!("  {full}\n")), want);
+        assert_eq!(
+            phone_key(&format!("ssh-ed25519 {BLOB} goyo-sync android-LM-G710N")),
+            want
+        );
+        assert_eq!(
+            phone_key(&format!("ssh-ed25519 {BLOB} android-LM-G710N")),
+            want
+        );
+        assert_eq!(phone.comment(), "goyo-sync android-LM-G710N");
+        // Refused: another key type, a bad key, a name with other
+        // characters or none, two names, two lines, junk before the key.
+        let refused = [
+            String::new(),
+            format!("ssh-rsa {BLOB} android-x"),
+            format!("ssh-ed25519 {} android-x", &BLOB[..67]),
+            format!("ssh-ed25519 {} android-x", BLOB.replace('A', "-")),
+            format!("ssh-ed25519 {BLOB} android x"),
+            format!("ssh-ed25519 {BLOB} android-x;id"),
+            format!("ssh-ed25519 {BLOB} \"x\""),
+            format!("ssh-ed25519 {BLOB}"),
+            format!("ssh-ed25519 {BLOB} goyo-sync"),
+            format!("ssh-ed25519 {BLOB} {}", "x".repeat(64)),
+            format!("ssh-ed25519 {BLOB} android-x\nssh-ed25519 {BLOB} y"),
+            format!("command=\"sh\" ssh-ed25519 {BLOB} android-x"),
+            format!("restrict ssh-ed25519 {BLOB} android-x"),
+            format!("x ssh-ed25519 {BLOB} android-x"),
+        ];
+        for text in &refused {
+            assert_eq!(phone_key(text), None, "{text:?}");
+        }
+        // The key's encoding must be exactly an ed25519 key: the prefix
+        // alone is not enough (a 33rd key byte, a wrong length field).
+        let mut wire = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        wire.extend([7u8; 32]);
+        let good = base64(&wire);
+        assert!(phone_key(&format!("ssh-ed25519 {good} a")).is_some());
+        let mut long = wire.clone();
+        long[18] = 0x21;
+        assert_eq!(phone_key(&format!("ssh-ed25519 {} a", base64(&long))), None);
+    }
+    /// Standard padded base64, for the test keys.
+    fn base64(bytes: &[u8]) -> String {
+        const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let v = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ABC[(v >> (18 - 6 * i)) as usize & 63] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+    /// '서버에 Android 기기 추가': one `authorize` over the usual login
+    /// (no -i), with this PC's forced command, the phone's key and name;
+    /// the script's answers come back as they are.
+    #[test]
+    fn a_phone_is_authorized_over_the_usual_login() {
+        let phone = phone_key(&format!("ssh-ed25519 {BLOB} android-Pixel8")).unwrap();
+        let mut c = config();
+        c.identity = Some(PathBuf::from(r"C:\keys\goyo-sync_ed25519"));
+        let id = [0x11u8; 16];
+        let mut script = Script::with([out(0, b"ADDED\n", "")]);
+        let log = Log::new(None);
+        assert_eq!(
+            add_phone(&mut script, &log, &c, &[id], &phone),
+            Ok(Authorized::Added)
+        );
+        let ran = script.ran();
+        assert_eq!(ran.len(), 1);
+        assert_eq!(ran[0].tool, Tool::Ssh);
+        assert!(!ran[0].args.iter().any(|a| a == "-i"), "the usual login");
+        assert_eq!(
+            ran[0].args.last().unwrap(),
+            &authorize_command(&c.remote, &c.python).unwrap()
+        );
+        assert_eq!(
+            String::from_utf8(ran[0].stdin.clone()).unwrap(),
+            format!(
+                "restrict,command=\"python3 -I .local/share/goyo-sync/goyo-sync-server.py serve \
+                 --key-sync={}\" ssh-ed25519 {BLOB} goyo-sync android-Pixel8\n",
+                "11".repeat(16)
+            )
+        );
+        let mut script = Script::with([out(1, b"UNRESTRICTED\n", "")]);
+        assert_eq!(
+            add_phone(&mut script, &log, &c, &[], &phone),
+            Err(Outcome::Unrestricted)
+        );
+        let mut bad = c.clone();
+        bad.python = "python3;id".into();
+        let mut script = Script::with([]);
+        assert!(matches!(
+            add_phone(&mut script, &log, &bad, &[], &phone),
+            Err(Outcome::Refused(_))
+        ));
+        assert!(script.ran().is_empty());
+    }
+    /// The phone's line goes through the real script's `authorize` into a
+    /// temporary home; the script still refuses a line it would refuse.
+    #[test]
+    fn the_server_script_takes_a_phone_line() {
+        if !crate::tests::python() {
+            return;
+        }
+        let t = Temp::new("keysetup-phone");
+        let script = t.0.join("goyo-sync-server.py");
+        fs::write(&script, setup::SERVER_SCRIPT).unwrap();
+        let home = t.0.join("home");
+        fs::create_dir(&home).unwrap();
+        let phone = phone_key(&format!("ssh-ed25519 {BLOB} android-LM-G710N")).unwrap();
+        let line = server_line(
+            "python3",
+            crate::config::DEFAULT_REMOTE,
+            &[[0xab; 16]],
+            &phone.blob,
+            &phone.comment(),
+        )
+        .unwrap();
+        let run = |input: &str| {
+            let mut child = crate::tests::python_command()
+                .arg("-I")
+                .arg(&script)
+                .args(["authorize", "--home"])
+                .arg(&home)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+            )
+        };
+        assert_eq!(run(&format!("{line}\n")), (Some(0), "ADDED".into()));
+        let keys = fs::read_to_string(home.join(".ssh").join("authorized_keys")).unwrap();
+        assert_eq!(keys, format!("{line}\n"));
+        // A comment the script does not take is refused there too.
+        let odd = line.replace("goyo-sync android-LM-G710N", "goyo-sync android LM");
+        assert_eq!(run(&format!("{odd}\n")).0, Some(1));
     }
 
     /// The pure parts: the free name, the comment, the argv of each local

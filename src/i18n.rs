@@ -1798,6 +1798,40 @@ pub const EN: &[(&str, &str)] = &[
 /// build compiles them, so the default exe holds none of them.
 #[cfg(feature = "security-key")]
 pub const EN_SK: &[(&str, &str)] = &[
+    // goyo-sync's 'Android 기기 추가' (keys_gui.rs, docs/ANDROID.md).
+    ("Android 기기 추가…", "Add Android device…"),
+    (
+        "클립보드에 휴대폰의 줄이 없습니다. 휴대폰의 고요 금고 앱에서 '동기화 설정 › 줄 복사'로 복사한 줄을 이 PC의 클립보드에 넣은 뒤(메신저나 메일로 보내도 됩니다. 공개 키라 비밀은 아닙니다) 다시 누르세요. 줄에는 ssh-ed25519 키와 영문·숫자·. _ - 로 된 기기 이름이 있어야 합니다.",
+        "The clipboard holds no phone line. In the Goyo Vault app on the phone, copy the line with 'Sync settings › Copy line', put it on this PC's clipboard (a messenger or mail is fine: it is a public key, no secret), then press again. The line needs an ssh-ed25519 key and a device name of letters, digits and . _ -.",
+    ),
+    (
+        "목록에 ID를 아는 금고가 없어 --key-sync가 없는 줄입니다(동기화만, 열쇠 파일 동기화는 안 됨).",
+        "No listed vault has a known ID, so the line has no --key-sync (sync only, no key-file sync).",
+    ),
+    (
+        "--key-sync=에는 이 창 목록의 금고 {}개의 ID가 들어가, 휴대폰이 그 금고들의 열쇠 파일을 받고 올릴 수 있게 됩니다.",
+        "--key-sync= names the IDs of the {} vaults in this window's list, so the phone can fetch and upload their key files.",
+    ),
+    (
+        "{} 서버의 ~/.ssh/authorized_keys에 Android 기기 '{}'의 줄을 넣습니다. 같은 키의 줄이 있으면 그 줄만 바꾸고, 바꾸기 전에 authorized_keys.goyo-backup으로 백업합니다.\n\n{}\n\n{}\n\n휴대폰 화면에 보이는 키와 같은지 끝까지 확인하세요. 이 키로는 서버에서 동기화 스크립트만 실행됩니다. 등록에는 이 PC의 평소 ssh 로그인을 씁니다. 휴대폰을 잃어버리면 이 줄을 바로 지우세요. 계속할까요?",
+        "On the server {}, the line of Android device '{}' goes into ~/.ssh/authorized_keys. A line of the same key is replaced alone, after a backup to authorized_keys.goyo-backup.\n\n{}\n\n{}\n\nCheck to the end that the key is the one the phone shows. This key runs only the sync script on the server. The registration uses this PC's usual ssh login. If the phone is lost, remove this line at once. Continue?",
+    ),
+    (
+        "Android 기기 '{}'의 줄은 이미 서버에 있습니다. 휴대폰의 동기화 설정에서 '연결 확인'을 누르세요.",
+        "The line of Android device '{}' is already on the server. Press 'Check connection' in the phone's sync settings.",
+    ),
+    (
+        "Android 기기 '{}'의 줄을 서버에 넣었습니다. 휴대폰의 동기화 설정에서 '연결 확인'을 누르세요.",
+        "The line of Android device '{}' is on the server. Press 'Check connection' in the phone's sync settings.",
+    ),
+    (
+        "그 키가 서버에 강제 명령 없이(평소 로그인 키로) 이미 있어 authorized_keys를 바꾸지 않았습니다. 휴대폰에서 '키 새로 만들기'를 하세요.",
+        "That key is already on the server without a forced command (as a usual login key), so authorized_keys was not changed. Make a new key on the phone.",
+    ),
+    (
+        "서버의 authorized_keys를 고치지 못했습니다. 서버 출력: {}",
+        "Could not change authorized_keys on the server. Server output: {}",
+    ),
     // The server's key file at login and from Restore (spec §5.2, §7.17).
     (
         "열리지 않았습니다. 다른 PC에서 비밀번호를 바꿨다면 서버에 온 새 열쇠 파일로 열 수 있습니다. 서버의 새 열쇠 파일로 열어 볼까요?",
