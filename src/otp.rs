@@ -96,6 +96,8 @@ const BAD_PARAMS: &str =
     "OTP 설정이 지원 범위 밖입니다(알고리즘 SHA1/SHA256/SHA512, 6~8자리, 주기 1~3600초).";
 const TOO_LONG: &str = "OTP 시크릿이나 발급자·계정 이름이 너무 깁니다.";
 const BAD_LABEL: &str = "발급자·계정 이름에는 ':'나 제어 문자를 쓸 수 없습니다.";
+const LABELS_ONLY: &str =
+    "발급자·계정 이름만 있고 OTP 시크릿이 없습니다. 시크릿을 넣거나 두 칸을 비우세요.";
 
 impl Otp {
     /// A secret with the defaults: SHA-1, 6 digits, 30 seconds.
@@ -110,6 +112,26 @@ impl Otp {
         };
         otp.validate()?;
         Ok(otp)
+    }
+    /// The entry editor's three fields: the secret field (see `parse`) and
+    /// the issuer and account names. A name typed in its field wins over
+    /// the URI's; an empty field takes the URI's. Names without a secret
+    /// are refused rather than dropped.
+    pub fn from_editor(field: &str, issuer: &str, account: &str) -> Result<Option<Self>> {
+        let Some(mut otp) = Self::parse(field)? else {
+            if issuer.trim().is_empty() && account.trim().is_empty() {
+                return Ok(None);
+            }
+            return Err(LABELS_ONLY);
+        };
+        if !issuer.trim().is_empty() {
+            otp.issuer = Zeroizing::new(issuer.trim().to_owned());
+        }
+        if !account.trim().is_empty() {
+            otp.account = Zeroizing::new(account.trim().to_owned());
+        }
+        otp.validate()?;
+        Ok(Some(otp))
     }
     /// What the editor's field holds: empty (no OTP, None), a Base32 secret
     /// (spaces, dashes, `=` padding and lowercase are fine) or a whole
@@ -656,6 +678,36 @@ mod tests {
         assert!(Otp::new(vec![], "", "").is_err());
     }
 
+    #[test]
+    fn the_editor_fields_combine() {
+        assert!(Otp::from_editor("", " ", "").unwrap().is_none());
+        assert_eq!(Otp::from_editor("", "ACME", "").err(), Some(LABELS_ONLY));
+        assert_eq!(Otp::from_editor(" ", "", "jo").err(), Some(LABELS_ONLY));
+        let o = Otp::from_editor("JBSWY3DPEHPK3PXP", " ACME ", "jo")
+            .unwrap()
+            .unwrap();
+        assert_eq!((o.issuer.as_str(), o.account.as_str()), ("ACME", "jo"));
+        let uri = "otpauth://totp/Old:me?secret=JBSWY3DPEHPK3PXP&issuer=Old&period=60";
+        // The URI's names fill empty fields; typed names win.
+        let o = Otp::from_editor(uri, "", "").unwrap().unwrap();
+        assert_eq!(
+            (o.issuer.as_str(), o.account.as_str(), o.period),
+            ("Old", "me", 60)
+        );
+        let o = Otp::from_editor(uri, "New", "").unwrap().unwrap();
+        assert_eq!((o.issuer.as_str(), o.account.as_str()), ("New", "me"));
+        // The editor's own text for a stored secret reads back the same.
+        let back = Otp::from_editor(&o.editor_text(), &o.issuer, &o.account)
+            .unwrap()
+            .unwrap();
+        assert_eq!(back, o);
+        assert_eq!(Otp::from_editor(uri, "a:b", "").err(), Some(BAD_LABEL));
+        assert_eq!(
+            Otp::from_editor(uri, "", &"x".repeat(65)).err(),
+            Some(TOO_LONG)
+        );
+        assert_eq!(Otp::from_editor("1", "", "").err(), Some(NOT_BASE32));
+    }
     #[test]
     fn the_uri_names_issuer_account_and_only_changed_parameters() {
         let mut o = Otp::new(
