@@ -118,6 +118,25 @@ pub const MAX_TOMBSTONES: usize = 65_536;
 const NEWER_FORMAT: &str = "더 새로운 버전에서 만든 금고 형식입니다. 고요 금고를 업데이트하세요.";
 /// An entry's OTP field that is not the canonical blob.
 const OTP_UNREADABLE: &str = "OTP 시크릿을 읽을 수 없습니다.";
+/// The built-in kind of an OTP entry (0.12.1): an entry that is only an OTP
+/// secret, without 비밀정보. Kinds stay free text; `is_otp_kind` tells it.
+pub const OTP_KIND: &str = "OTP";
+/// What an OTP entry stores in its secret field (0.12.1). The file keeps
+/// the four fields and every 0.12.0 rule (a non-empty secret among them),
+/// so a vault with OTP entries still opens in 0.12.0, which shows this as
+/// the entry's 비밀정보. This version never shows or copies an OTP entry's
+/// secret field (docs/FORMAT.md, "OTP 항목").
+pub const OTP_MARKER: &str = "(OTP)";
+/// Saving an OTP entry without an OTP secret.
+pub const OTP_REQUIRED: &str =
+    "OTP 항목에는 OTP 시크릿이 필요합니다. 키나 otpauth 주소를 넣으세요.";
+/// Saving an OTP entry without a name.
+const NAME_REQUIRED: &str = "이름을 입력하세요.";
+/// Whether `kind` is the OTP kind: "OTP", ignoring surrounding spaces and
+/// ASCII case.
+pub fn is_otp_kind(kind: &str) -> bool {
+    kind.trim().eq_ignore_ascii_case(OTP_KIND)
+}
 const TOMBSTONE_LIMIT: &str = "삭제·수정 기록이 한도(65,536개)에 도달했습니다.";
 const TOO_LARGE: &str = "파일 크기 제한 초과";
 /// A file is missing and a temp file of it is there that no unlock took
@@ -368,7 +387,10 @@ impl Entry {
     pub fn new(title: String, kind: String, secret: String, notes: String) -> Result<Self> {
         Self::new_with_otp(title, kind, secret, notes, None)
     }
-    /// An entry with an OTP secret (or none).
+    /// An entry with an OTP secret (or none), as the editor saves it. An
+    /// entry of the OTP kind (`is_otp_kind`) needs the OTP secret and
+    /// keeps no 비밀정보: `secret` is dropped and OTP_MARKER stored in
+    /// its place.
     pub fn new_with_otp(
         title: String,
         kind: String,
@@ -376,6 +398,19 @@ impl Entry {
         notes: String,
         otp: Option<&Otp>,
     ) -> Result<Self> {
+        let secret = if is_otp_kind(&kind) {
+            if title.trim().is_empty() {
+                return Err(NAME_REQUIRED);
+            }
+            if otp.is_none() {
+                return Err(OTP_REQUIRED);
+            }
+            // Zeroized as it goes: nothing of the dropped secret is kept.
+            drop(Zeroizing::new(secret));
+            OTP_MARKER.to_owned()
+        } else {
+            secret
+        };
         let e = Self {
             id: NO_ID,
             parent: NO_ID,
@@ -391,6 +426,23 @@ impl Entry {
     /// Whether the entry has an OTP secret.
     pub fn has_otp(&self) -> bool {
         !self.otp.is_empty()
+    }
+    /// Whether the entry is shown as an OTP entry: the OTP kind, with an
+    /// OTP secret or the marker (one whose OTP secret 0.12.0 removed). Its
+    /// secret field is never shown, copied or put in the editor. An entry
+    /// typed as "OTP" before 0.12.1 with real 비밀정보 and no OTP secret
+    /// stays an ordinary entry, so nothing it holds is hidden.
+    pub fn is_otp_entry(&self) -> bool {
+        is_otp_kind(&self.kind) && (self.has_otp() || self.secret.as_str() == OTP_MARKER)
+    }
+    /// The 비밀정보 the view and the editor may show: none for an OTP
+    /// entry, whatever its secret field holds.
+    pub fn shown_secret(&self) -> &str {
+        if self.is_otp_entry() {
+            ""
+        } else {
+            &self.secret
+        }
     }
     /// The entry's OTP secret, None without one.
     pub fn otp(&self) -> Option<Otp> {
@@ -3537,6 +3589,118 @@ mod workflow_tests {
         assert_eq!(magic(), DATA_MAGIC_V2);
         assert_eq!(s.tombstones.len(), tombstones + 1);
         assert!(bare(path.clone(), id, key).entries[0].otp().is_none());
+    }
+    /// An OTP entry (0.12.1) is the OTP kind with its OTP secret and no
+    /// 비밀정보: the editor's secret is dropped and OTP_MARKER stored, so
+    /// the file keeps 0.12.0's layout and rules (a non-empty secret) and
+    /// 0.12.0 opens it with nothing lost. The marker is ordinary content.
+    #[test]
+    fn an_otp_entry_stores_the_marker_and_opens_as_before() {
+        for kind in ["OTP", "otp", " Otp "] {
+            assert!(is_otp_kind(kind), "{kind}");
+        }
+        for kind in ["", "OTPs", "O T P", "비밀번호", "OTP 키"] {
+            assert!(!is_otp_kind(kind), "{kind}");
+        }
+        let otp = Otp::parse("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&issuer=Bank")
+            .unwrap()
+            .unwrap();
+        let make = |kind: &str, secret: &str, otp: Option<&Otp>| {
+            Entry::new_with_otp(
+                "Bank".into(),
+                kind.into(),
+                secret.into(),
+                "memo".into(),
+                otp,
+            )
+        };
+        // The OTP kind needs the OTP secret (and a name), not 비밀정보:
+        // whatever the secret field held is dropped for the marker.
+        assert_eq!(make("OTP", "", None).err(), Some(OTP_REQUIRED));
+        assert_eq!(make("OTP", "typed", None).err(), Some(OTP_REQUIRED));
+        assert_eq!(
+            Entry::new_with_otp(" ".into(), "OTP".into(), "".into(), "".into(), Some(&otp)).err(),
+            Some(NAME_REQUIRED)
+        );
+        for secret in ["", " ", "an old password"] {
+            let e = make("OTP", secret, Some(&otp)).unwrap();
+            assert_eq!(&*e.secret, OTP_MARKER);
+            assert!(e.is_otp_entry() && e.shown_secret().is_empty());
+            assert_eq!(e.otp(), Some(otp.clone()));
+        }
+        // The other kinds as before: 비밀정보 needed, the OTP secret optional.
+        assert!(make("비밀번호", "", Some(&otp)).is_err());
+        let plain = make("비밀번호", "pw", Some(&otp)).unwrap();
+        assert!(!plain.is_otp_entry() && plain.shown_secret() == "pw");
+        assert!(!make("", "pw", None).unwrap().is_otp_entry());
+
+        let t = Temp::new();
+        let path = t.file("otp-kind.goyo");
+        let (id, key) = ([0x33; 16], [0x44; 32]);
+        let mut s = bare(path.clone(), id, key);
+        s.put(None, make("OTP", "", Some(&otp)).unwrap()).unwrap();
+        assert_eq!(fs::read(&path).unwrap()[..8], DATA_MAGIC_V5[..]);
+        // What 0.12.0 reads: the file's four strings and blob as 0.12.0
+        // writes them, every one of its rules met (it runs this same
+        // reader and validate), the marker as the entry's 비밀정보.
+        let reopened = bare(path.clone(), id, key);
+        let e = &reopened.entries[0];
+        assert_eq!(e.fields(), ["Bank", "OTP", OTP_MARKER, "memo"]);
+        assert_eq!(e.otp(), Some(otp.clone()));
+        assert!(e.validate().is_ok() && e.same_content(&s.entries[0]));
+        let old = Entry {
+            id: NO_ID,
+            parent: NO_ID,
+            title: Zeroizing::new("Bank".into()),
+            kind: Zeroizing::new("OTP".into()),
+            secret: Zeroizing::new(OTP_MARKER.into()),
+            notes: Zeroizing::new("memo".into()),
+            otp: Otp::encode(&otp),
+        };
+        assert!(old.same_content(e));
+        drop(reopened);
+        // Saving it again unchanged is no edit.
+        let generation = s.generation;
+        s.put(Some(0), make("OTP", "", Some(&otp)).unwrap())
+            .unwrap();
+        assert_eq!(s.generation, generation);
+
+        // A 0.12.0 entry typed "OTP" with a dummy 비밀정보 and an OTP
+        // secret: the file keeps the dummy until the entry is edited, the
+        // view never shows it, and saving puts the marker in its place.
+        let dummy = Entry {
+            secret: Zeroizing::new(" ".into()),
+            ..old.clone()
+        };
+        s.put(None, dummy).unwrap();
+        let reopened = bare(path.clone(), id, key);
+        let e = &reopened.entries[1];
+        assert_eq!(&*e.secret, " ");
+        assert!(e.is_otp_entry() && e.shown_secret().is_empty());
+        drop(reopened);
+        s.put(Some(1), make("OTP", "", Some(&otp)).unwrap())
+            .unwrap();
+        assert_eq!(&*s.entries[1].secret, OTP_MARKER);
+        // An OTP entry whose OTP secret 0.12.0 removed (the marker left) is
+        // still an OTP entry; an "OTP" entry from before 0.12.1 with real
+        // 비밀정보 and no OTP secret stays an ordinary one, shown in full.
+        let removed = Entry {
+            otp: Zeroizing::new(Vec::new()),
+            ..old.clone()
+        };
+        assert!(removed.validate().is_ok());
+        assert!(removed.is_otp_entry() && removed.shown_secret().is_empty());
+        let typed = Entry {
+            secret: Zeroizing::new("real".into()),
+            ..removed
+        };
+        assert!(!typed.is_otp_entry() && typed.shown_secret() == "real");
+        // Another kind again needs 비밀정보; the marker is not offered.
+        assert!(make("비밀번호", s.entries[0].shown_secret(), Some(&otp)).is_err());
+        let back = make("비밀번호", "new pw", Some(&otp)).unwrap();
+        s.put(Some(0), back).unwrap();
+        assert_eq!(&*s.entries[0].secret, "new pw");
+        assert!(!s.entries[0].is_otp_entry());
     }
     #[test]
     fn lifecycle_backup_restore_password_and_failed_save() {

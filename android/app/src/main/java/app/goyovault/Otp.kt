@@ -69,7 +69,8 @@ private fun hide(bmp: Bitmap?) {
 }
 
 /**
- * An entry's OTP in the entry view (nothing without one): the code of the
+ * An entry's OTP in the entry view (without one nothing, or [missing] for an
+ * OTP entry, which shows nothing else): the code of the
  * moment and its seconds, made in Rust each second; [복사] (sensitive,
  * cleared after 15 seconds); [QR 보기] (hidden after 60 seconds, on leaving
  * the entry, on a lock or when the app goes to the background, which
@@ -77,7 +78,7 @@ private fun hide(bmp: Bitmap?) {
  * screenshots.
  */
 @Composable
-fun OtpSection(index: Int) {
+fun OtpSection(index: Int, missing: String? = null) {
     val context = LocalContext.current
     val session = AppState.session
     val info = remember(index) {
@@ -87,7 +88,11 @@ fun OtpSection(index: Int) {
             AppState.message = e.message
             null
         }
-    } ?: return
+    }
+    if (info == null) {
+        if (missing != null) Text(missing)
+        return
+    }
     var code by remember(index) { mutableStateOf("") }
     var left by remember(index) { mutableIntStateOf(0) }
     var qr by remember(index) { mutableStateOf<Bitmap?>(null) }

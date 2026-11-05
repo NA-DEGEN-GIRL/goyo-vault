@@ -78,6 +78,8 @@ The phone OTP feature was removed in 0.10.0. A vault made earlier with the OTP o
 
 From 0.12.0, **a vault with at least one entry that has an OTP secret, and its backups, open only in 0.12.0 or later.** 0.11.0 and earlier refuse such a vault with "This vault was saved by a newer version", and their sync stops meanwhile without removing any OTP secret. Once every OTP secret is removed, the vault is saved in the earlier format again. If several PCs sync, update **every PC's Goyo Vault and goyo-sync and the server script** (goyo-sync's settings window, 'Install or update on server') to 0.12.0 before adding an OTP secret.
 
+From 0.12.1 there is the kind **OTP**. An OTP entry stores only its OTP secret, no secret, and the file holds the marker `(OTP)` in the secret's place. The vault format is 0.12.0's, so a vault saved by 0.12.1 still opens in 0.12.0 (PC and Android), which shows an OTP entry as an ordinary one whose secret is `(OTP)`. An entry typed `OTP` in 0.12.0 with a space or other placeholder as its secret no longer shows that placeholder, which turns into the marker when the entry is next saved. The details are in [docs/FORMAT.md](docs/FORMAT.md), 'OTP 항목'.
+
 From 0.8.0, **a vault with sync turned on, and its backups, open only in 0.8.0 or later.** A vault without sync keeps its format and still opens in 0.7.x and older.
 
 From 0.9.0, **a vault whose key was changed (its password changed, or another PC's new key file received), and its later backups, open only in 0.9.0 or later.** A vault whose key was never changed keeps the 0.8 format and still opens in 0.8. For a synced vault, first update the server script and every PC to 0.9.0, then change the key.
@@ -113,7 +115,8 @@ Switch between **Dark** and **Light** in the top-right corner.
 
 Press **+ New entry**, fill in name, type, secret and note, then press **Save encrypted**.
 
-- Type the kind yourself or use the **password · seed phrase · private key · API key** buttons.
+- Type the kind yourself or use the **password · seed phrase · private key · API key · OTP** buttons.
+- **OTP entries:** with the kind **OTP**, the secret field goes and the OTP secret field takes its place. The OTP secret is then required and no secret is stored. Turning another entry into an OTP entry removes its secret when you save.
 - Multi-line keys such as PEM files are kept exactly.
 - **Names are always visible in the list,** so never put a secret in the name.
 - **OTP secret (optional):** paste the secret key a site shows in its two-step verification setup (often behind "Can't scan the QR code?"; it looks like `JBSW Y3DP …`). You can also paste a whole `otpauth://totp/…` URI, which fills in the **Issuer** and **Account** fields (you can edit them). Spaces and lowercase do not matter. The field is masked like a password, with an eye button to check it. Clear it and save to remove the OTP secret.
@@ -133,6 +136,7 @@ Pick an entry in the list to see it on the right.
   - **Copy** copies the code; like every copy it is wiped from the clipboard after 15 seconds and kept out of clipboard history.
   - **Copy secret** works only after **Allow copy**, like the secret. The OTP secret itself shows only during **Show 15 s**.
   - **Show QR** puts a QR code in the secret's place for a phone authenticator app (Google Authenticator, Microsoft Authenticator and others) to scan. It goes after 60 seconds, when you pick another entry or screen, switch to another app, or lock. The QR code holds the secret, so open it only with nobody and no camera looking.
+  - An entry of the kind **OTP** shows its OTP code where the secret box would be, with the note under it. **Show 15 s** shows its OTP secret and note, **Allow copy** is for **Copy secret**, and there is no **Copy** of a secret.
   - This OTP is for each site's two-step verification. It plays no part in opening Goyo Vault. Keeping a password and its OTP secret in the same vault means both are exposed together if the vault is opened.
 
 ### 5. Lock and open again

@@ -1864,6 +1864,28 @@ pub const EN: &[(&str, &str)] = &[
         "OTP 시크릿을 읽을 수 없습니다.",
         "Cannot read the OTP secret.",
     ),
+    // The OTP entry kind (0.12.1): an OTP secret without 비밀정보.
+    (
+        "OTP 항목에는 OTP 시크릿이 필요합니다. 키나 otpauth 주소를 넣으세요.",
+        "An OTP entry needs its OTP secret. Enter the key or otpauth URI.",
+    ),
+    ("이름을 입력하세요.", "Enter a name."),
+    (
+        "OTP 시크릿 · 키 또는 otpauth 주소",
+        "OTP secret · key or otpauth URI",
+    ),
+    (
+        "OTP 항목은 비밀정보 없이 OTP 시크릿만 저장합니다. 이 항목에 비밀정보가 있었다면 저장할 때 지워집니다.",
+        "An OTP entry stores only its OTP secret, no secret. If this entry had a secret, saving removes it.",
+    ),
+    (
+        "OTP 항목에는 비밀정보가 없습니다.",
+        "An OTP entry has no secret.",
+    ),
+    (
+        "가려짐 · 보기를 누르면 OTP 시크릿과 함께 표시됩니다.",
+        "Hidden · shown with the OTP secret when you press Show.",
+    ),
 ];
 /// The English of the security-key build's own texts (spec §9.3): only that
 /// build compiles them, so the default exe holds none of them.

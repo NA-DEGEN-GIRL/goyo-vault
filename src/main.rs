@@ -106,14 +106,37 @@ const OTP_SECRET_COPY: i32 = 226;
 const OTP_QR: i32 = 227;
 /// The QR panel hides by itself after this long.
 const QR_SHOWN: Duration = Duration::from_secs(60);
-/// The OTP row's buttons: [복사] here, then [시크릿 복사] and [QR 보기].
-const OTP_ROW: (i32, i32) = (536, 556);
-/// What the timer repaints of the OTP row: its names line with the
-/// countdown, and the code (the buttons are child windows).
-const OTP_TICKING: (i32, i32, i32, i32) = (CARD_X, 526, CARD_W, 68);
-/// The QR panel's square, under its caption, above the OTP row.
+/// The OTP row's top: under the memo, or for an OTP entry (0.12.1), which
+/// shows no 비밀정보, in its place under the chip.
+const OTP_TOP: i32 = 522;
+const OTP_ENTRY_TOP: i32 = 190;
+/// The OTP row's buttons, 34 under its top: [복사] at this x, then
+/// [시크릿 복사] and [QR 보기].
+const OTP_ROW: (i32, i32) = (536, OTP_TOP + 34);
+/// What the timer repaints of the OTP row, from its top: its names line
+/// with the countdown, and the code (the buttons are child windows).
+const OTP_TICKING: (i32, i32) = (4, 68);
+/// The QR panel's square, under its caption, above the OTP row; for an OTP
+/// entry under the row, in the memo's place.
 const QR_AREA: (i32, i32, i32, i32) = (CARD_X, 224, CARD_W, 288);
+const QR_AREA_OTP_ENTRY: (i32, i32, i32, i32) = (CARD_X, 324, CARD_W, 288);
 const NO_OTP: &str = "이 항목에는 OTP 시크릿이 없습니다.";
+/// An OTP entry keeps no 비밀정보 to copy or page through.
+const NO_SECRET: &str = "OTP 항목에는 비밀정보가 없습니다.";
+/// The editor's captions that change with the kind, and the OTP kind's
+/// note in the 비밀정보's place (0.12.1).
+const SECRET_LABEL: i32 = 250;
+const OTP_LABEL: i32 = 251;
+const OTP_ISSUER_LABEL: i32 = 252;
+const OTP_ACCOUNT_LABEL: i32 = 253;
+const OTP_KIND_NOTE: i32 = 254;
+/// The editor's OTP row (caption, field, eye and the two names): its top,
+/// and for the OTP kind its top in the 비밀정보's place.
+const OTP_EDIT_TOP: i32 = 500;
+const OTP_EDIT_TOP_KIND: i32 = 272;
+const OTP_FIELD_OPTIONAL: &str = "OTP 시크릿 (선택) · 키 또는 otpauth 주소";
+const OTP_FIELD_REQUIRED: &str = "OTP 시크릿 · 키 또는 otpauth 주소";
+const OTP_KIND_TEXT: &str = "OTP 항목은 비밀정보 없이 OTP 시크릿만 저장합니다. 이 항목에 비밀정보가 있었다면 저장할 때 지워집니다.";
 const NEW: i32 = 110;
 const EDIT: i32 = 111;
 const DELETE: i32 = 112;
@@ -205,7 +228,14 @@ const PEEK_FIELDS: [(i32, i32); 4] = [
 const PRESET: i32 = 130;
 const PRESET_LAST: i32 = PRESET + KIND_PRESETS.len() as i32 - 1;
 const STATUS: i32 = 299;
-const KIND_PRESETS: [&str; 4] = ["비밀번호", "니모닉", "프라이빗키", "API 키"];
+/// The kind chips of the editor; the last is the OTP kind (vault::OTP_KIND).
+const KIND_PRESETS: [&str; 5] = [
+    "비밀번호",
+    "니모닉",
+    "프라이빗키",
+    "API 키",
+    vault::OTP_KIND,
+];
 // Layout grid in 96-DPI units. Auth/password screens use one centered column.
 const AX: i32 = 158;
 const AW: i32 = 560;
@@ -818,8 +848,12 @@ impl App {
         h
     }
     fn label(&mut self, text: &str, x: i32, y: i32, w: i32) {
+        self.label_as(0, text, x, y, w);
+    }
+    /// A caption with control ID `id`, for one whose text or place changes.
+    fn label_as(&mut self, id: i32, text: &str, x: i32, y: i32, w: i32) {
         let small = self.font_of(|t| t.small());
-        self.text(0, text, (x, y, w, 20), small, TONE_MUTED, 0);
+        self.text(id, text, (x, y, w, 20), small, TONE_MUTED, 0);
     }
     fn note(&mut self, text: &str, x: i32, y: i32, w: i32, h: i32) {
         let small = self.font_of(|t| t.small());
@@ -920,12 +954,28 @@ impl App {
     /// Small caption above a 40px single-line input.
     #[allow(clippy::too_many_arguments)] // Native control geometry follows Win32.
     fn field(&mut self, id: i32, label: &str, value: &str, x: i32, y: i32, w: i32, password: bool) {
-        self.label(label, x, y, w);
+        self.field_as(0, id, label, value, (x, y, w), password);
+    }
+    /// field() with its caption's control ID.
+    fn field_as(
+        &mut self,
+        label_id: i32,
+        id: i32,
+        label: &str,
+        value: &str,
+        (x, y, w): (i32, i32, i32),
+        password: bool,
+    ) {
+        self.label_as(label_id, label, x, y, w);
         self.input(id, value, (x, y + 22, w, 40), password, false, 0);
     }
     /// Masked field with an eye button that shows what was typed.
     fn password_field(&mut self, id: i32, label: &str, x: i32, y: i32, w: i32) {
-        self.label(label, x, y, w);
+        self.password_field_as(0, id, label, x, y, w);
+    }
+    /// password_field() with its caption's control ID.
+    fn password_field_as(&mut self, label_id: i32, id: i32, label: &str, x: i32, y: i32, w: i32) {
+        self.label_as(label_id, label, x, y, w);
         self.input(id, "", (x, y + 22, w, 40), true, false, 36);
         let peek = PEEK_FIELDS.iter().find(|(_, f)| *f == id).map(|(p, _)| *p);
         if let Some(peek) = peek {
@@ -1765,7 +1815,9 @@ impl App {
                 Zeroizing::new(e.title.to_string()),
                 // Built-in types such as "니모닉" follow the interface language.
                 Zeroizing::new(tr(&e.kind).to_string()),
-                Zeroizing::new(e.secret.to_string()),
+                // Never an OTP entry's secret field (the marker or older
+                // text): it has no 비밀정보 to show.
+                Zeroizing::new(e.shown_secret().to_owned()),
                 Zeroizing::new(e.notes.to_string()),
             ]
         } else {
@@ -1790,8 +1842,13 @@ impl App {
             let x = 296 + i as i32 * 100;
             self.button(PRESET + i as i32, name, x, 222, 92, 32, theme::CHIP);
         }
-        self.label("비밀정보 · 여러 줄 가능", 40, 272, 400);
+        self.label_as(SECRET_LABEL, "비밀정보 · 여러 줄 가능", 40, 272, 400);
         self.input(SECRET, &values[2], (40, 294, 796, 100), false, true, 0);
+        // In the OTP kind's shape, under its OTP row (see edit_shape).
+        self.note(OTP_KIND_TEXT, 40, 346, 796, 48);
+        if let Some(note) = self.children.last().copied() {
+            self.controls.insert(OTP_KIND_NOTE, note);
+        }
         self.label("메모", 40, 404, 400);
         self.input(NOTES, &values[3], (40, 426, 796, 64), false, true, 0);
         // The OTP secret, masked like a password, and its names. Pasting a
@@ -1804,20 +1861,32 @@ impl App {
             Some(o) => (o.editor_text(), o.issuer.clone(), o.account.clone()),
             None => Default::default(),
         };
-        self.password_field(
-            OTP_FIELD,
-            "OTP 시크릿 (선택) · 키 또는 otpauth 주소",
-            40,
-            500,
-            420,
-        );
+        let y = OTP_EDIT_TOP;
+        self.password_field_as(OTP_LABEL, OTP_FIELD, OTP_FIELD_OPTIONAL, 40, y, 420);
         if !self.input_failed {
             unsafe {
                 SetWindowTextW(self.handle(OTP_FIELD), secret_wide(&text).as_ptr());
             }
         }
-        self.field(OTP_ISSUER, "발급자 (선택)", &issuer, 476, 500, 172, false);
-        self.field(OTP_ACCOUNT, "계정 (선택)", &account, 664, 500, 172, false);
+        let issuer_at = (476, y, 172);
+        self.field_as(
+            OTP_ISSUER_LABEL,
+            OTP_ISSUER,
+            "발급자 (선택)",
+            &issuer,
+            issuer_at,
+            false,
+        );
+        let account_at = (664, y, 172);
+        self.field_as(
+            OTP_ACCOUNT_LABEL,
+            OTP_ACCOUNT,
+            "계정 (선택)",
+            &account,
+            account_at,
+            false,
+        );
+        self.edit_shape();
         let note = format!(
             "{}\r\n{}",
             tr(
@@ -1830,6 +1899,79 @@ impl App {
         self.button(SAVE, "암호화하여 저장", 696, 640, 140, 40, theme::PRIMARY);
         unsafe {
             SetFocus(self.handle(TITLE));
+        }
+    }
+    /// The editor's shape for the kind typed (0.12.1). The OTP kind has no
+    /// 비밀정보: its field goes, the OTP row takes its place with the OTP
+    /// secret required, and a note says none is kept. Other kinds as
+    /// before. Called on build, on each change of the kind and on a chip.
+    fn edit_shape(&mut self) {
+        let (secret, field) = (self.handle(SECRET), self.handle(OTP_FIELD));
+        if self.screen != Screen::Edit || secret == 0 || field == 0 {
+            return;
+        }
+        let otp = self.read(KIND).is_ok_and(|k| vault::is_otp_kind(&k));
+        let top = if otp { OTP_EDIT_TOP_KIND } else { OTP_EDIT_TOP };
+        let Some(now) = self
+            .frames
+            .iter()
+            .find(|(_, h)| *h == field)
+            .map(|(r, _)| r.top - 22)
+        else {
+            return;
+        };
+        unsafe {
+            if otp && GetFocus() == secret {
+                SetFocus(field);
+            }
+            for (id, show) in [(SECRET_LABEL, !otp), (SECRET, !otp), (OTP_KIND_NOTE, otp)] {
+                ShowWindow(self.handle(id), if show { 8 } else { 0 });
+            }
+            let label = if otp {
+                OTP_FIELD_REQUIRED
+            } else {
+                OTP_FIELD_OPTIONAL
+            };
+            SetWindowTextW(self.handle(OTP_LABEL), wide(tr(label)).as_ptr());
+        }
+        if now != top {
+            // The row in its new place, and next in the tab order after
+            // the field above it: the 비밀정보 (hidden) or the memo.
+            let dy = self.px(top) - self.px(now);
+            let mut after = self.handle(if otp { SECRET } else { NOTES });
+            for id in [
+                OTP_LABEL,
+                OTP_FIELD,
+                PEEK_OTP,
+                OTP_ISSUER_LABEL,
+                OTP_ISSUER,
+                OTP_ACCOUNT_LABEL,
+                OTP_ACCOUNT,
+            ] {
+                let h = self.handle(id);
+                unsafe {
+                    let mut r = Rect::default();
+                    GetWindowRect(h, &mut r);
+                    let mut corner = Point {
+                        x: r.left,
+                        y: r.top,
+                    };
+                    MapWindowPoints(0, self.hwnd, &mut corner, 1);
+                    // SWP_NOSIZE | SWP_NOACTIVATE
+                    SetWindowPos(h, after, corner.x, corner.y + dy, 0, 0, 0x1 | 0x10);
+                }
+                after = h;
+            }
+            let moved = [field, self.handle(OTP_ISSUER), self.handle(OTP_ACCOUNT)];
+            for (frame, h) in &mut self.frames {
+                if moved.contains(h) {
+                    frame.top += top - now;
+                    frame.bottom += top - now;
+                }
+            }
+        }
+        unsafe {
+            InvalidateRect(self.hwnd, null(), 0);
         }
     }
     fn build_password(&mut self) {
@@ -2154,7 +2296,11 @@ impl App {
         #[cfg(not(feature = "security-key"))]
         let entry = self.entry();
         let revealed = entry.is_some() && self.reveal_until.is_some();
+        // An OTP entry has no 비밀정보 to page through or copy; 15초 보기
+        // and 복사 허용 stay for its OTP secret and memo.
+        let otp_entry = entry.is_some_and(Entry::is_otp_entry);
         let paging = revealed
+            && !otp_entry
             && entry
                 .and_then(|e| self.shown(e).ok())
                 .is_some_and(|p| p.len() > 1);
@@ -2162,6 +2308,7 @@ impl App {
         let qr = self.qr_shown();
         let secret = entry.is_some() && !qr;
         let otp = entry.is_some_and(Entry::has_otp);
+        self.place_otp_row(self.otp_top());
         unsafe {
             let reveal = if revealed {
                 "가리기"
@@ -2177,7 +2324,7 @@ impl App {
                 (DELETE, entry.is_some()),
                 (REVEAL, secret),
                 (TOGGLE, secret),
-                (COPY, secret),
+                (COPY, secret && !otp_entry),
                 (PREVIOUS, paging && !qr),
                 (NEXT, paging && !qr),
                 (OTP_COPY, otp),
@@ -2189,6 +2336,37 @@ impl App {
                     SetFocus(self.handle(LIST));
                 }
                 ShowWindow(h, if show { 8 } else { 0 });
+            }
+        }
+    }
+    /// The top of the selected entry's OTP row: an OTP entry's in the
+    /// 비밀정보's place, any other's under the memo.
+    fn otp_top(&self) -> i32 {
+        if self.entry().is_some_and(Entry::is_otp_entry) {
+            OTP_ENTRY_TOP
+        } else {
+            OTP_TOP
+        }
+    }
+    /// The QR panel's caption line and square for the selected entry.
+    fn qr_area(&self) -> (i32, (i32, i32, i32, i32)) {
+        if self.otp_top() == OTP_ENTRY_TOP {
+            (OTP_ENTRY_TOP + 108, QR_AREA_OTP_ENTRY)
+        } else {
+            (198, QR_AREA)
+        }
+    }
+    /// The OTP row's buttons under its top `top`.
+    fn place_otp_row(&self, top: i32) {
+        let y = self.px(top + OTP_ROW.1 - OTP_TOP);
+        for (id, dx) in [(OTP_COPY, 0), (OTP_SECRET_COPY, 72), (OTP_QR, 184)] {
+            let h = self.handle(id);
+            if h != 0 {
+                // SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                let x = self.px(OTP_ROW.0 + dx);
+                unsafe {
+                    SetWindowPos(h, 0, x, y, 0, 0, 0x1 | 0x4 | 0x10);
+                }
             }
         }
     }
@@ -2882,6 +3060,11 @@ impl App {
             self.refresh_key_note();
             return Ok(());
         }
+        // The kind typed: the editor's shape follows it.
+        if notify == 0x300 && id == KIND {
+            self.edit_shape();
+            return Ok(());
+        }
         // The review list's double click and its loss date (spec §5.13).
         #[cfg(feature = "security-key")]
         if self.review_notice(id, notify)? {
@@ -2999,7 +3182,14 @@ impl App {
                 let name = KIND_PRESETS[(id - PRESET) as usize];
                 SetWindowTextW(kind, wide(tr(name)).as_ptr());
                 SendMessageW(kind, 0xcd, 0, 0);
-                SetFocus(self.handle(SECRET));
+                self.edit_shape();
+                // The OTP kind's main field is its OTP secret.
+                let next = if styled_visible(self.handle(SECRET)) {
+                    SECRET
+                } else {
+                    OTP_FIELD
+                };
+                SetFocus(self.handle(next));
                 InvalidateRect(self.hwnd, null(), 0);
             },
             SAVE => {
@@ -3061,6 +3251,9 @@ impl App {
                     return Err("먼저 복사 허용을 켜주세요.");
                 }
                 let e = self.entry().ok_or("복사할 항목을 선택하세요.")?;
+                if e.is_otp_entry() {
+                    return Err(NO_SECRET);
+                }
                 let seq = copy_value(self.hwnd, &e.secret)?;
                 self.clipboard = Some((seq, Instant::now() + Duration::from_secs(15)));
                 self.reset_copy();
@@ -3124,6 +3317,9 @@ impl App {
                     return Err("먼저 15초간 보기를 눌러주세요.");
                 }
                 let e = self.entry().ok_or("항목을 선택하세요.")?;
+                if e.is_otp_entry() {
+                    return Err(NO_SECRET);
+                }
                 let pages = self.shown(e)?.len();
                 self.page = if id == NEXT {
                     (self.page + 1).min(pages.saturating_sub(1))
@@ -3375,11 +3571,13 @@ impl App {
         self.expire_qr(now);
         // The OTP code and its countdown, and the QR panel's.
         if self.screen == Screen::Vault && self.entry().is_some_and(Entry::has_otp) {
-            let (x, y, w, h) = OTP_TICKING;
+            let (dy, h) = OTP_TICKING;
+            let caption = self.qr_area().0;
             unsafe {
-                InvalidateRect(self.hwnd, &self.r(x, y, w, h), 0);
+                let ticking = self.r(CARD_X, self.otp_top() + dy, CARD_W, h);
+                InvalidateRect(self.hwnd, &ticking, 0);
                 if self.qr.is_some() {
-                    InvalidateRect(self.hwnd, &self.r(CARD_X, 196, CARD_W, 24), 0);
+                    InvalidateRect(self.hwnd, &self.r(CARD_X, caption - 2, CARD_W, 24), 0);
                 }
             }
         }
@@ -3533,7 +3731,7 @@ impl App {
         );
         for (frame, h) in &self.frames {
             let r = self.scaled(frame);
-            if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+            if styled_visible(*h) && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
                 unsafe {
                     SetFocus(*h);
                     InvalidateRect(self.hwnd, null(), 0);
@@ -3698,7 +3896,8 @@ impl App {
             // TOFU banner's code field sits on the detail card): a field is
             // never drawn without its outline (spec §2.29).
             let focus = GetFocus();
-            for (frame, h) in &self.frames {
+            // A hidden field (the OTP kind's 비밀정보) has no outline.
+            for (frame, h) in self.frames.iter().filter(|(_, h)| styled_visible(*h)) {
                 let border = if *h == focus && *h != self.handle(LIST) {
                     p.focus
                 } else {
@@ -3827,8 +4026,12 @@ impl App {
             theme::text(dc, kind, &chip, small, p.muted, DT_CENTER | LINE);
             theme::fill(dc, &self.r(CARD_X, 184, CARD_W, 1), p.border);
             let otp = e.otp();
+            if e.is_otp_entry() {
+                self.draw_otp_entry(dc, e, otp.as_ref(), small, title);
+                return;
+            }
             if let Some(o) = &otp {
-                self.draw_otp(dc, o, small, title);
+                self.draw_otp(dc, o, OTP_TOP, small, title);
                 if self.qr_shown() {
                     self.draw_qr(dc, e, o, small, body);
                     return;
@@ -3893,13 +4096,68 @@ impl App {
             }
         }
     }
-    /// The OTP row under the memo: the names, the code of the moment with
+    /// An OTP entry (0.12.1): no 비밀정보, its OTP row in that place (or
+    /// a line saying it has no OTP secret), then the QR panel or the hint
+    /// and the memo, which the 15-second view shows with the OTP secret.
+    unsafe fn draw_otp_entry(
+        &self,
+        dc: isize,
+        e: &Entry,
+        otp: Option<&Otp>,
+        small: isize,
+        title: isize,
+    ) {
+        let body = self.font_of(|t| t.body());
+        let p = theme::palette();
+        let wrap = DT_WORDBREAK | DT_NOPREFIX;
+        unsafe {
+            match otp {
+                Some(o) => {
+                    self.draw_otp(dc, o, OTP_ENTRY_TOP, small, title);
+                    if self.qr_shown() {
+                        self.draw_qr(dc, e, o, small, body);
+                        return;
+                    }
+                }
+                None => {
+                    let r = self.r(CARD_X, OTP_ENTRY_TOP + 8, CARD_W, 44);
+                    theme::text(dc, tr(NO_OTP), &r, body, p.muted, wrap);
+                }
+            }
+            let (x, y, w, h) = HINT;
+            theme::text(dc, &self.hint(), &self.r(x, y, w, h), small, p.muted, wrap);
+            theme::fill(dc, &self.r(CARD_X, 428, CARD_W, 1), p.border);
+            theme::text(
+                dc,
+                tr("메모"),
+                &self.r(CARD_X, 442, 200, 20),
+                small,
+                p.muted,
+                LINE,
+            );
+            let notes = self.r(CARD_X, 468, CARD_W, 132);
+            if e.notes.is_empty() {
+                theme::text(dc, tr("메모 없음"), &notes, body, p.faint, wrap);
+            } else if self.reveal_until.is_some() {
+                let flags = wrap | DT_EDITCONTROL | DT_END_ELLIPSIS;
+                theme::text(dc, &e.notes, &notes, body, p.text, flags);
+            } else {
+                let hidden = tr("가려짐 · 보기를 누르면 OTP 시크릿과 함께 표시됩니다.");
+                theme::text(dc, hidden, &notes, small, p.muted, wrap);
+            }
+        }
+    }
+    /// The OTP row with its top at `top` (OTP_TOP under the memo, or an
+    /// OTP entry's OTP_ENTRY_TOP): the names, the code of the moment with
     /// its countdown (shown: it lives only for its period), and the secret,
     /// masked but during the 15-second view.
-    unsafe fn draw_otp(&self, dc: isize, o: &Otp, small: isize, title: isize) {
+    unsafe fn draw_otp(&self, dc: isize, o: &Otp, top: i32, small: isize, title: isize) {
         let p = theme::palette();
+        let dy = top - OTP_TOP;
         unsafe {
-            theme::fill(dc, &self.r(CARD_X, 522, CARD_W, 1), p.border);
+            if top == OTP_TOP {
+                theme::fill(dc, &self.r(CARD_X, 522, CARD_W, 1), p.border);
+            }
             let names = match (o.issuer.is_empty(), o.account.is_empty()) {
                 (false, false) => format!("OTP · {} ({})", *o.issuer, *o.account),
                 (false, true) => format!("OTP · {}", *o.issuer),
@@ -3910,7 +4168,7 @@ impl App {
             theme::text(
                 dc,
                 &names,
-                &self.r(CARD_X, 530, CARD_W - 140, 20),
+                &self.r(CARD_X, 530 + dy, CARD_W - 140, 20),
                 small,
                 p.muted,
                 LINE,
@@ -3918,18 +4176,18 @@ impl App {
             match clock::now() {
                 Ok(now) => {
                     let code = otp_grouped(&o.code(now));
-                    let r = self.r(CARD_X, 554, OTP_ROW.0 - CARD_X - 8, 38);
+                    let r = self.r(CARD_X, 554 + dy, OTP_ROW.0 - CARD_X - 8, 38);
                     theme::text(dc, &code, &r, title, p.text, LINE);
                     let left = fill("{}초 뒤 바뀜", &[&o.remaining(now)]);
-                    let r = self.r(CARD_X + CARD_W - 136, 530, 136, 20);
+                    let r = self.r(CARD_X + CARD_W - 136, 530 + dy, 136, 20);
                     theme::text(dc, &left, &r, small, p.muted, DT_RIGHT | LINE);
                 }
                 Err(e) => {
-                    let r = self.r(CARD_X, 554, OTP_ROW.0 - CARD_X - 8, 38);
+                    let r = self.r(CARD_X, 554 + dy, OTP_ROW.0 - CARD_X - 8, 38);
                     theme::text(dc, tr(e), &r, small, p.danger, LINE);
                 }
             }
-            let r = self.r(CARD_X, 598, CARD_W, 20);
+            let r = self.r(CARD_X, 598 + dy, CARD_W, 20);
             if self.reveal_until.is_some() {
                 let shown = Zeroizing::new(fill("시크릿 {}", &[&*o.secret_grouped()]));
                 theme::text(dc, &shown, &r, small, p.text, LINE);
@@ -3944,10 +4202,11 @@ impl App {
     unsafe fn draw_qr(&self, dc: isize, e: &Entry, o: &Otp, small: isize, body: isize) {
         let p = theme::palette();
         unsafe {
+            let (caption, (x, y, w, h)) = self.qr_area();
             theme::text(
                 dc,
                 tr("QR 코드 · 휴대폰 인증 앱으로 스캔하세요"),
-                &self.r(CARD_X, 198, CARD_W - 120, 20),
+                &self.r(CARD_X, caption, CARD_W - 120, 20),
                 small,
                 p.muted,
                 LINE,
@@ -3957,7 +4216,7 @@ impl App {
                     .saturating_duration_since(Instant::now())
                     .as_millis()
                     .div_ceil(1000);
-                let r = self.r(CARD_X + CARD_W - 120, 198, 120, 20);
+                let r = self.r(CARD_X + CARD_W - 120, caption, 120, 20);
                 theme::text(
                     dc,
                     &fill("{}초 뒤 숨김", &[&left]),
@@ -3967,7 +4226,6 @@ impl App {
                     DT_RIGHT | LINE,
                 );
             }
-            let (x, y, w, h) = QR_AREA;
             let wrap = DT_WORDBREAK | DT_NOPREFIX;
             let uri = o.uri(&e.title);
             let code = match qr::encode(uri.as_bytes()) {
@@ -4176,6 +4434,11 @@ const GRID_GAP: i32 = 6;
 const GRID_NUM_GAP: i32 = 3;
 /// The page, row and column of word `i` (from 0) of a mnemonic's grid; its
 /// number is `i + 1`.
+/// Whether a control has the WS_VISIBLE style, whether or not its window
+/// is on screen.
+fn styled_visible(h: Hwnd) -> bool {
+    unsafe { GetWindowLongPtrW(h, -16) & 0x1000_0000 != 0 }
+}
 fn grid_place(i: usize) -> (usize, usize, usize) {
     let per_page = GRID_COLS * GRID_ROWS;
     (i / per_page, i % per_page / GRID_COLS, i % GRID_COLS)
@@ -7344,6 +7607,36 @@ mod tests {
             app.screen = Screen::Edit;
             app.build();
             visit(&mut app, "edit-otp");
+            // An OTP entry (0.12.1): its view, its QR and its editor.
+            let entry = Entry::new_with_otp(
+                "Synthetic code only".into(),
+                vault::OTP_KIND.into(),
+                String::new(),
+                "synthetic memo".into(),
+                otp.as_ref(),
+            )
+            .unwrap();
+            let s = app.session.as_mut().unwrap();
+            s.put(None, entry).unwrap();
+            let otp_entry_id = s.entries[2].id();
+            app.editing = None;
+            app.screen = Screen::Vault;
+            app.selected = Some(2);
+            app.build();
+            visit(&mut app, "vault-otp-entry");
+            app.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            app.build();
+            visit(&mut app, "vault-otp-entry-shown");
+            app.reveal_until = None;
+            app.qr = Some((otp_entry_id, Instant::now() + QR_SHOWN));
+            app.build();
+            visit(&mut app, "vault-otp-entry-qr");
+            app.qr = None;
+            app.editing = Some(2);
+            app.screen = Screen::Edit;
+            app.build();
+            visit(&mut app, "edit-otp-kind");
+            app.session.as_mut().unwrap().delete(2).unwrap();
             app.editing = None;
             app.screen = Screen::Vault;
             app.selected = Some(0);
@@ -9329,6 +9622,256 @@ mod tests {
             app.qr = Some((other, Instant::now() + QR_SHOWN));
             app.scrub();
             assert!(app.qr.is_none());
+            drop(app);
+            DestroyWindow(h);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A control's top left in the main window's client pixels.
+    fn placed(app: &App, id: i32) -> (i32, i32) {
+        unsafe {
+            let mut r = Rect::default();
+            GetWindowRect(app.handle(id), &mut r);
+            let mut p = Point {
+                x: r.left,
+                y: r.top,
+            };
+            MapWindowPoints(0, app.hwnd, &mut p, 1);
+            (p.x, p.y)
+        }
+    }
+    /// The logical top of a field's painted frame.
+    fn frame_top(app: &App, id: i32) -> i32 {
+        let h = app.handle(id);
+        app.frames.iter().find(|(_, f)| *f == h).unwrap().0.top
+    }
+    /// An OTP entry (0.12.1): the view shows its title and kind, the OTP
+    /// row in the 비밀정보's place and the memo, never its secret field
+    /// (the marker, or a 0.12.0 entry's dummy), with no [복사] or paging
+    /// for it; 15초 보기 shows the OTP secret and memo, and [시크릿 복사]
+    /// still needs 복사 허용. The editor follows the kind: the OTP chip or
+    /// the typed "OTP" hides the 비밀정보 field, puts the required OTP row
+    /// in its place with a note; saving needs the OTP secret and stores the
+    /// marker; another kind brings the field back and needs 비밀정보.
+    #[test]
+    fn an_otp_kind_entry_shows_and_edits_without_a_secret() {
+        let _korean = KoreanAfter::hold();
+        i18n::set_english(false);
+        let dir = test_dir("otp-kind");
+        let mut session = synthetic_session(&dir, "synthetic otp-kind password");
+        let o = Otp::parse(SYNTHETIC_OTP).unwrap().unwrap();
+        let otp_entry = Entry::new_with_otp(
+            "Bank".into(),
+            "OTP".into(),
+            "typed but dropped".into(),
+            "synthetic memo".into(),
+            Some(&o),
+        )
+        .unwrap();
+        assert_eq!(&*otp_entry.secret, vault::OTP_MARKER);
+        session.put(None, otp_entry).unwrap();
+        // As 0.12.0 left it: kind "OTP", a dummy 비밀정보, the OTP secret.
+        let mut legacy = Entry::new_with_otp(
+            "Mail".into(),
+            "비밀번호".into(),
+            "legacy dummy".into(),
+            String::new(),
+            Some(&o),
+        )
+        .unwrap();
+        legacy.kind = Zeroizing::new("OTP".into());
+        session.put(None, legacy).unwrap();
+        let plain = Entry::new(
+            "Plain".into(),
+            "비밀번호".into(),
+            "pw".into(),
+            String::new(),
+        );
+        session.put(None, plain.unwrap()).unwrap();
+        COPIED.with(|c| c.borrow_mut().take());
+        unsafe {
+            SetProcessDPIAware();
+            let h = create_window(GetModuleHandleW(null()), &wide("STATIC"));
+            assert_ne!(h, 0);
+            assert_ne!(SetWindowDisplayAffinity(h, 0x11), 0);
+            let mut app = App::new(h);
+            app.session = Some(session);
+            app.screen = Screen::Vault;
+            app.build();
+            let list = app.handle(LIST);
+            for (i, mark) in [(0, theme::ROW_OTP), (1, theme::ROW_OTP), (2, 0)] {
+                assert_eq!(SendMessageW(list, 0x199, i, 0), mark);
+            }
+            let pick = |app: &mut App, i: usize| {
+                SendMessageW(app.handle(LIST), 0x186, i, 0);
+                app.command(LIST, 1).unwrap();
+            };
+            let now = clock::now().unwrap();
+            let codes: Vec<String> = [now, now + 30]
+                .iter()
+                .map(|t| otp_grouped(&o.code(*t)).to_string())
+                .collect();
+            for i in [0, 1] {
+                pick(&mut app, i);
+                for id in [OTP_COPY, OTP_SECRET_COPY, OTP_QR, REVEAL, TOGGLE] {
+                    assert!(style_visible(app.handle(id)), "{i} {id}");
+                }
+                assert!(!style_visible(app.handle(COPY)));
+                assert!(!style_visible(app.handle(NEXT)));
+                // The OTP row sits under the chip.
+                let y = app.px(OTP_ENTRY_TOP + 34);
+                assert_eq!(placed(&app, OTP_COPY), (app.px(OTP_ROW.0), y));
+                let texts = painted(&app);
+                assert!(texts.iter().any(|t| codes.contains(t)), "{texts:?}");
+                assert!(texts.contains(&"OTP".to_owned()), "the chip: {texts:?}");
+                assert!(texts.contains(&"시크릿 ••••••••".to_owned()));
+                assert!(texts.contains(&"메모".to_owned()));
+                for gone in [
+                    "비밀정보",
+                    "••••••••••••",
+                    vault::OTP_MARKER,
+                    "legacy dummy",
+                ] {
+                    assert!(!texts.iter().any(|t| t.contains(gone)), "{gone}: {texts:?}");
+                }
+                // 15초 보기: the OTP secret (and memo), never the field.
+                app.command(REVEAL, 0).unwrap();
+                let texts = painted(&app);
+                assert!(texts.contains(&format!("시크릿 {}", *o.secret_grouped())));
+                assert!(!texts.iter().any(|t| t.contains("legacy dummy")));
+                assert!(!texts.iter().any(|t| t.contains(vault::OTP_MARKER)));
+                assert!(!style_visible(app.handle(NEXT)));
+                assert_eq!(app.command(NEXT, 0).err(), Some(NO_SECRET));
+                app.command(REVEAL, 0).unwrap();
+                // [복사] of 비밀정보 does not exist for it, even if sent.
+                app.command(TOGGLE, 0).unwrap();
+                assert_eq!(app.command(COPY, 0).err(), Some(NO_SECRET));
+                assert!(COPIED.with(|c| c.borrow().is_none()));
+                // 복사 허용 still on: [시크릿 복사] takes it.
+                app.command(OTP_SECRET_COPY, 0).unwrap();
+                let copied = COPIED.with(|c| c.borrow_mut().take()).unwrap();
+                assert_eq!(copied.as_str(), "JBSWY3DPEHPK3PXP");
+                app.clipboard = None;
+            }
+            assert!(painted(&app).contains(&"메모 없음".to_owned()));
+            pick(&mut app, 0);
+            assert!(
+                painted(&app)
+                    .contains(&"가려짐 · 보기를 누르면 OTP 시크릿과 함께 표시됩니다.".to_owned())
+            );
+            // The QR panel in the memo's place, under the row.
+            app.command(OTP_QR, 0).unwrap();
+            assert!(app.qr_shown() && !style_visible(app.handle(REVEAL)));
+            assert_eq!(app.qr_area().1, QR_AREA_OTP_ENTRY);
+            let texts = painted(&app);
+            assert!(texts.contains(&"QR 코드 · 휴대폰 인증 앱으로 스캔하세요".to_owned()));
+            assert!(!texts.contains(&"메모".to_owned()));
+            app.command(OTP_QR, 0).unwrap();
+            // An ordinary entry: its row under the memo, as before.
+            pick(&mut app, 2);
+            assert!(style_visible(app.handle(COPY)) && !style_visible(app.handle(OTP_COPY)));
+            assert!(painted(&app).contains(&"비밀정보".to_owned()));
+
+            // The editor of the OTP entry: no 비밀정보 field, the OTP row
+            // in its place and required, the note.
+            pick(&mut app, 1);
+            app.command(EDIT, 0).unwrap();
+            let otp_shape = |app: &App| {
+                !style_visible(app.handle(SECRET))
+                    && !style_visible(app.handle(SECRET_LABEL))
+                    && style_visible(app.handle(OTP_KIND_NOTE))
+                    && caption(app.handle(OTP_LABEL)) == "OTP 시크릿 · 키 또는 otpauth 주소"
+                    && frame_top(app, OTP_FIELD) == OTP_EDIT_TOP_KIND + 22
+                    && frame_top(app, OTP_ACCOUNT) == OTP_EDIT_TOP_KIND + 22
+            };
+            let plain_shape = |app: &App| {
+                style_visible(app.handle(SECRET))
+                    && style_visible(app.handle(SECRET_LABEL))
+                    && !style_visible(app.handle(OTP_KIND_NOTE))
+                    && caption(app.handle(OTP_LABEL)) == OTP_FIELD_OPTIONAL
+                    && frame_top(app, OTP_FIELD) == OTP_EDIT_TOP + 22
+            };
+            assert!(otp_shape(&app));
+            assert_eq!(caption(app.handle(OTP_KIND_NOTE)), OTP_KIND_TEXT);
+            // The dummy never reaches the editor.
+            assert_eq!(&*app.read(SECRET).unwrap(), "");
+            assert_eq!(&*app.read(OTP_FIELD).unwrap(), "JBSWY3DPEHPK3PXP");
+            // The field and its eye moved with their frame.
+            let (_, field_y) = placed(&app, OTP_FIELD);
+            assert!(
+                (field_y - app.px(OTP_EDIT_TOP_KIND + 30)).abs() <= 1,
+                "{field_y}"
+            );
+            let (_, eye_y) = placed(&app, PEEK_OTP);
+            assert!(
+                (eye_y - app.px(OTP_EDIT_TOP_KIND + 26)).abs() <= 1,
+                "{eye_y}"
+            );
+            // Without the OTP secret it is refused; saved, the marker
+            // replaces the dummy.
+            SetWindowTextW(app.handle(OTP_FIELD), wide("").as_ptr());
+            for id in [OTP_ISSUER, OTP_ACCOUNT] {
+                SetWindowTextW(app.handle(id), wide("").as_ptr());
+            }
+            assert_eq!(app.command(SAVE, 0).err(), Some(vault::OTP_REQUIRED));
+            assert!(app.screen == Screen::Edit);
+            SetWindowTextW(app.handle(OTP_FIELD), wide("JBSWY3DPEHPK3PXP").as_ptr());
+            app.command(SAVE, 0).unwrap();
+            let s = app.session.as_ref().unwrap();
+            assert_eq!(&*s.entries[1].secret, vault::OTP_MARKER);
+            assert!(s.entries[1].is_otp_entry());
+
+            // Typing another kind brings 비밀정보 back, required.
+            pick(&mut app, 0);
+            app.command(EDIT, 0).unwrap();
+            assert!(otp_shape(&app));
+            SetWindowTextW(app.handle(KIND), wide("OT").as_ptr());
+            app.command(KIND, 0x300).unwrap();
+            assert!(plain_shape(&app));
+            assert_eq!(&*app.read(SECRET).unwrap(), "");
+            assert_eq!(
+                app.command(SAVE, 0).err(),
+                Some("이름과 비밀정보를 입력하세요.")
+            );
+            // Back and forth: the same places.
+            SetWindowTextW(app.handle(KIND), wide(" otp").as_ptr());
+            app.command(KIND, 0x300).unwrap();
+            assert!(otp_shape(&app));
+            SetWindowTextW(app.handle(KIND), wide("비밀번호").as_ptr());
+            app.command(KIND, 0x300).unwrap();
+            assert!(plain_shape(&app));
+            SetWindowTextW(app.handle(SECRET), secret_wide("a new password").as_ptr());
+            app.command(SAVE, 0).unwrap();
+            let s = app.session.as_ref().unwrap();
+            assert_eq!(&*s.entries[0].secret, "a new password");
+            assert!(!s.entries[0].is_otp_entry() && s.entries[0].has_otp());
+
+            // A new entry: the OTP chip turns the editor into the OTP
+            // shape, the OTP field next; the 비밀정보 typed before is not
+            // kept.
+            app.command(NEW, 0).unwrap();
+            assert!(plain_shape(&app));
+            SetWindowTextW(app.handle(TITLE), wide("Code only").as_ptr());
+            SetWindowTextW(app.handle(SECRET), secret_wide("typed first").as_ptr());
+            let chip = PRESET + KIND_PRESETS.len() as i32 - 1;
+            assert_eq!(caption(app.handle(chip)), "OTP");
+            app.command(chip, 0).unwrap();
+            assert!(otp_shape(&app));
+            assert_eq!(GetFocus(), app.handle(OTP_FIELD));
+            assert_eq!(app.command(SAVE, 0).err(), Some(vault::OTP_REQUIRED));
+            SetWindowTextW(app.handle(OTP_FIELD), wide(SYNTHETIC_OTP).as_ptr());
+            app.command(SAVE, 0).unwrap();
+            let s = app.session.as_ref().unwrap();
+            let e = s.entries.last().unwrap();
+            let fields = [&e.title, &e.kind, &e.secret, &e.notes].map(|f| f.as_str());
+            assert_eq!(fields, ["Code only", "OTP", vault::OTP_MARKER, ""]);
+            assert_eq!(e.otp(), Some(o.clone()));
+            // A chip of another kind puts the field back, focused.
+            app.command(NEW, 0).unwrap();
+            app.command(chip, 0).unwrap();
+            app.command(PRESET, 0).unwrap();
+            assert!(plain_shape(&app));
+            assert_eq!(GetFocus(), app.handle(SECRET));
             drop(app);
             DestroyWindow(h);
         }

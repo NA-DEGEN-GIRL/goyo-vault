@@ -213,20 +213,32 @@ private fun Detail(index: Int) {
         LaunchedEffect(Unit) { AppState.screen = Screen.List }
         return
     }
+    // An OTP entry (0.12.1) has no 비밀정보: only its OTP and memo.
+    val otpEntry = remember(index) {
+        try {
+            Native.otpEntry(AppState.session, index)
+        } catch (e: GoyoException) {
+            false
+        }
+    }
     val readOnly = AppState.readOnly()
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(fields[0], style = MaterialTheme.typography.titleLarge)
         if (fields[1].isNotEmpty()) Text(fields[1], style = MaterialTheme.typography.bodyMedium)
-        Text("비밀정보", style = MaterialTheme.typography.labelLarge)
-        Text(if (shown) fields[2] else "•".repeat(12), style = MaterialTheme.typography.bodyLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                Clip.copySecret(context, fields[2])
-                AppState.message = "복사했습니다. 30초 뒤 클립보드에서 지웁니다."
-            }) { Text("복사") }
-            OutlinedButton(onClick = { shown = !shown }) { Text(if (shown) "숨기기" else "보기") }
+        if (otpEntry) {
+            OtpSection(index, missing = "이 항목에는 OTP 시크릿이 없습니다.")
+        } else {
+            Text("비밀정보", style = MaterialTheme.typography.labelLarge)
+            Text(if (shown) fields[2] else "•".repeat(12), style = MaterialTheme.typography.bodyLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    Clip.copySecret(context, fields[2])
+                    AppState.message = "복사했습니다. 30초 뒤 클립보드에서 지웁니다."
+                }) { Text("복사") }
+                OutlinedButton(onClick = { shown = !shown }) { Text(if (shown) "숨기기" else "보기") }
+            }
+            OtpSection(index)
         }
-        OtpSection(index)
         if (fields[3].isNotEmpty()) {
             Text("메모", style = MaterialTheme.typography.labelLarge)
             Text(fields[3])
@@ -261,8 +273,8 @@ private fun Detail(index: Int) {
     }
 }
 
-/** The PC's kind presets (src/main.rs KIND_PRESETS); any other text is kept as typed. */
-private val KIND_PRESETS = listOf("비밀번호", "니모닉", "프라이빗키", "API 키")
+/** The PC's kind presets (src/main.rs KIND_PRESETS; "OTP" is the OTP kind); any other text is kept as typed. */
+private val KIND_PRESETS = listOf("비밀번호", "니모닉", "프라이빗키", "API 키", "OTP")
 
 /** The kind: a drop-down of the PC's presets that also takes a typed kind. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -330,42 +342,44 @@ private fun Edit(index: Int) {
     DisposableEffect(Unit) {
         onDispose { listOf(title, kind, secret, notes, otp).forEach(TextFieldState::clearText) }
     }
+    // The OTP kind (0.12.1): no 비밀정보 field; the OTP secret is the main,
+    // required field (empty keeps the entry's own), as on the PC.
+    val kindText = kind.text.toString()
+    val otpKind = remember(kindText) {
+        try {
+            Native.isOtpKind(kindText)
+        } catch (e: GoyoException) {
+            false
+        }
+    }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(if (index < 0) "새 항목" else "항목 편집", style = MaterialTheme.typography.titleLarge)
         OutlinedTextField(state = title, label = { Text("이름") }, modifier = Modifier.fillMaxWidth())
         KindField(kind)
-        OutlinedSecureTextField(
-            state = secret,
-            label = { Text("비밀정보") },
-            keyboardOptions = secretKeyboard,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            state = notes,
-            label = { Text("메모") },
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        if (otpNow != null) {
-            val names = listOf(otpNow[0], otpNow[1]).filter { it.isNotEmpty() }.joinToString(" · ")
-            Text(if (names.isEmpty()) "OTP 시크릿: 있음" else "OTP 시크릿: 있음 ($names)")
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = removeOtp, onCheckedChange = { removeOtp = it })
-                Text("OTP 시크릿 지우기")
-            }
+        if (otpKind) {
+            OtpEditField(otpNow, otp, required = true, remove = null, onRemove = {})
+            Text(
+                "OTP 항목은 비밀정보 없이 OTP 시크릿만 저장합니다. 이 항목에 비밀정보가 있었다면 저장할 때 지워집니다.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            NotesField(notes)
+        } else {
+            OutlinedSecureTextField(
+                state = secret,
+                label = { Text("비밀정보") },
+                keyboardOptions = secretKeyboard,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            NotesField(notes)
+            OtpEditField(otpNow, otp, required = false, remove = removeOtp, onRemove = { removeOtp = it })
         }
-        OutlinedSecureTextField(
-            state = otp,
-            label = {
-                Text(if (otpNow != null) "새 OTP 시크릿 (비우면 그대로) · 키 또는 otpauth 주소" else "OTP 시크릿 (선택) · 키 또는 otpauth 주소")
-            },
-            keyboardOptions = secretKeyboard,
-            modifier = Modifier.fillMaxWidth(),
-        )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = {
-                val f = listOf(title, kind, secret, notes, otp).map { utf8(it.text) }
-                val remove = removeOtp
+                // An OTP entry keeps no 비밀정보: none is sent.
+                val f = listOf(title, kind, secret, notes, otp).map {
+                    if (otpKind && it === secret) ByteArray(0) else utf8(it.text)
+                }
+                val remove = removeOtp && !otpKind
                 val session = AppState.session
                 AppState.work("저장 중…", {
                     try {
@@ -384,6 +398,53 @@ private fun Edit(index: Int) {
             }) { Text("취소") }
         }
     }
+}
+
+@Composable
+private fun NotesField(notes: TextFieldState) {
+    OutlinedTextField(
+        state = notes,
+        label = { Text("메모") },
+        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/**
+ * The editor's OTP field: what the entry has (never the secret itself), the
+ * remove box for an optional one ([remove] null for the OTP kind, which needs
+ * one), and the field (a Base32 key or an otpauth URI; empty keeps the
+ * entry's own).
+ */
+@Composable
+private fun OtpEditField(
+    otpNow: Array<String>?,
+    otp: TextFieldState,
+    required: Boolean,
+    remove: Boolean?,
+    onRemove: (Boolean) -> Unit,
+) {
+    if (otpNow != null) {
+        val names = listOf(otpNow[0], otpNow[1]).filter { it.isNotEmpty() }.joinToString(" · ")
+        Text(if (names.isEmpty()) "OTP 시크릿: 있음" else "OTP 시크릿: 있음 ($names)")
+        if (remove != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = remove, onCheckedChange = onRemove)
+                Text("OTP 시크릿 지우기")
+            }
+        }
+    }
+    val label = when {
+        otpNow != null -> "새 OTP 시크릿 (비우면 그대로) · 키 또는 otpauth 주소"
+        required -> "OTP 시크릿 · 키 또는 otpauth 주소"
+        else -> "OTP 시크릿 (선택) · 키 또는 otpauth 주소"
+    }
+    OutlinedSecureTextField(
+        state = otp,
+        label = { Text(label) },
+        keyboardOptions = secretKeyboard,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 /** The sync badge, as the PC app's pill: what the open vault and the last run say, and "지금 동기화". */

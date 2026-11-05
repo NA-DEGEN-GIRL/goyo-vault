@@ -216,6 +216,9 @@ WEAKENED_T = BIN_T + 'a_weakened_protection_is_said_and_stays'
 PBAD_T = HW + 'a_broken_pair_record_is_named_by_whole_credhashes'
 # Stage 14, the per-entry OTP secret.
 OTP_UI = BIN_T + 'an_otp_entry_shows_its_code_and_qr'
+# Stage 15, the OTP entry kind (0.12.1).
+OTP_KIND_T = WORKFLOW_T + 'an_otp_entry_stores_the_marker_and_opens_as_before'
+OTP_KIND_UI = BIN_T + 'an_otp_kind_entry_shows_and_edits_without_a_secret'
 
 ROWS = [
     # Auto-apply (trust the server) and the notice of a key change made
@@ -2178,6 +2181,33 @@ ROWS = [
      '        let hardware = syncfile::keyed_vault(blob) && blob.get(64)',
      '        let hardware = blob.starts_with(b"GOYOVA04") && blob.get(64)',
      [KEYS_T + 'the_keyed_otp_format_counts_for_the_key_steps']),
+    # The OTP entry kind (stage 15, 0.12.1): the marker in the secret
+    # field, the OTP secret required, and no 비밀정보 shown or copied.
+    ('OTP-K1 the OTP kind stores the marker, not the secret typed', 15, 'both', 'lib', VAULT,
+     '            drop(Zeroizing::new(secret));\n            OTP_MARKER.to_owned()',
+     '            secret',
+     [OTP_KIND_T]),
+    ('OTP-K1 the OTP kind needs the OTP secret', 15, 'both', 'lib', VAULT,
+     '            if otp.is_none() {\n                return Err(OTP_REQUIRED);',
+     '            if false {\n                return Err(OTP_REQUIRED);',
+     [OTP_KIND_T]),
+    ("OTP-K2 an OTP entry's secret field is never shown", 15, 'both', 'lib', VAULT,
+     '        if self.is_otp_entry() {\n            ""\n        } else {',
+     '        if false {\n            ""\n        } else {',
+     [OTP_KIND_T]),
+    ('OTP-K3 the view of an OTP entry has no 비밀정보 block', 15, 'both', 'bin', MAIN,
+     '            if e.is_otp_entry() {\n                self.draw_otp_entry(',
+     '            if false {\n                self.draw_otp_entry(',
+     [OTP_KIND_UI]),
+    ("OTP-K3 an OTP entry's secret field is never copied", 15, 'both', 'bin', MAIN,
+     '                if e.is_otp_entry() {\n                    return Err(NO_SECRET);\n                }\n'
+     '                let seq = copy_value(self.hwnd, &e.secret)?;',
+     '                let seq = copy_value(self.hwnd, &e.secret)?;',
+     [OTP_KIND_UI]),
+    ('OTP-K4 the editor drops the 비밀정보 field for the OTP kind', 15, 'both', 'bin', MAIN,
+     '        let otp = self.read(KIND).is_ok_and(|k| vault::is_otp_kind(&k));',
+     '        let otp = false;',
+     [OTP_KIND_UI]),
 ]
 
 # The default build has security keys; 'keyless' turns them off.

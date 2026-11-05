@@ -56,7 +56,7 @@ object Native {
     /** Title and kind of every entry, interleaved. */
     external fun titles(session: Long): Array<String>
 
-    /** One field as UTF-8 (0 title, 1 kind, 2 secret, 3 notes). */
+    /** One field as UTF-8 (0 title, 1 kind, 2 secret, 3 notes); an OTP entry's secret is empty. */
     external fun field(session: Long, index: Int, which: Int): ByteArray
 
     /**
@@ -76,6 +76,12 @@ object Native {
     )
 
     // ---- an entry's OTP secret (0.12.0); the code is made in Rust ----
+
+    /** Whether the entry is an OTP entry (0.12.1): the OTP kind, shown without 비밀정보. */
+    external fun otpEntry(session: Long, index: Int): Boolean
+
+    /** Whether the editor's kind is the OTP kind (the lib's own rule). */
+    external fun isOtpKind(kind: String): Boolean
 
     /** Issuer, account and unusual settings ("" for SHA1 · 6 digits · 30 s); null without OTP. */
     external fun otpInfo(session: Long, index: Int): Array<String>?

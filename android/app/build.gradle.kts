@@ -17,8 +17,8 @@ android {
         applicationId = "app.goyovault"
         minSdk = 28
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4.0-stage4"
+        versionCode = 5
+        versionName = "0.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // The Rust bridge is built for 64-bit ARM phones only.

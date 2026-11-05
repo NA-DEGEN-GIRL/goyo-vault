@@ -575,6 +575,8 @@ pub extern "system" fn Java_app_goyovault_Native_titles<'l>(
 
 /// `field(session, index, which)`: one field of one entry as UTF-8 bytes
 /// (0 title, 1 kind, 2 secret, 3 notes); Kotlin zeroes the array after use.
+/// An OTP entry's secret is empty: its field (the marker, or 0.12.0's
+/// dummy) never leaves Rust.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_goyovault_Native_field<'l>(
     mut env: JNIEnv<'l>,
@@ -590,10 +592,10 @@ pub extern "system" fn Java_app_goyovault_Native_field<'l>(
                 .and_then(|i| s.entries.get(i))
                 .ok_or("항목이 없습니다.")?;
             let field = match which {
-                0 => &e.title,
-                1 => &e.kind,
-                2 => &e.secret,
-                3 => &e.notes,
+                0 => e.title.as_str(),
+                1 => e.kind.as_str(),
+                2 => entry_otp::shown_secret(e),
+                3 => e.notes.as_str(),
                 _ => return Err("항목이 없습니다.".to_owned()),
             };
             Ok(Zeroizing::new(field.as_bytes().to_vec()))
@@ -682,6 +684,33 @@ fn strings_out(env: &mut JNIEnv, items: &[&str]) -> Result<jobjectArray, String>
         env.delete_local_ref(s).map_err(jerr)?;
     }
     Ok(arr.into_raw())
+}
+
+/// `otpEntry(session, index)`: whether entry `index` is an OTP entry
+/// (0.12.1), shown without 비밀정보.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_otpEntry<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    session: jlong,
+    index: jint,
+) -> jboolean {
+    run(&mut env, 0, |_| {
+        with_entry(session, index, |e| Ok(u8::from(e.is_otp_entry())))
+    })
+}
+
+/// `isOtpKind(kind)`: whether the editor's kind is the OTP kind, by the
+/// lib's own rule, so the editor's shape matches what saving does.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_goyovault_Native_isOtpKind<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    kind: JString<'l>,
+) -> jboolean {
+    run(&mut env, 0, |env| {
+        Ok(u8::from(vault::is_otp_kind(&string(env, &kind)?)))
+    })
 }
 
 /// `otpInfo(session, index)`: issuer, account and the code's settings when

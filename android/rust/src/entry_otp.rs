@@ -51,10 +51,18 @@ pub fn qr_modules(e: &Entry) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     Ok(out)
 }
 
+/// The 비밀정보 the entry view and the editor get: none for an OTP entry
+/// (0.12.1), whose secret field holds the marker or 0.12.0's dummy.
+pub fn shown_secret(e: &Entry) -> &str {
+    e.shown_secret()
+}
+
 /// The entry the editor saves. `otp_field` is what the user typed in the
 /// OTP field: a Base32 key or an otpauth URI replaces the secret; empty
 /// keeps the edited entry's secret (`old`), or drops it when `remove`.
-/// The secret kept is never sent to the editor.
+/// The secret kept is never sent to the editor. The OTP kind needs an OTP
+/// secret (typed or kept) and stores the marker for 비밀정보 (the lib's
+/// `Entry::new_with_otp`).
 pub fn edited(
     old: Option<&Entry>,
     fields: [String; 4],
@@ -148,6 +156,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The OTP kind (0.12.1) through the editor's call: the OTP secret is
+    /// needed (typed, or kept by an empty field when the entry has one),
+    /// the 비밀정보 sent is dropped for the marker, and the view and the
+    /// editor never get an OTP entry's secret field.
+    #[test]
+    fn the_otp_kind_needs_the_otp_secret_and_keeps_no_secret() {
+        use goyo_vault::vault::{OTP_MARKER, OTP_REQUIRED};
+        let otp_fields = |title: &str, secret: &str| -> [String; 4] {
+            [title.into(), "OTP".into(), secret.into(), "memo".into()]
+        };
+        // A new OTP entry: no OTP secret, refused, whatever 비밀정보 says.
+        for secret in ["", "typed"] {
+            let refused = edited(None, otp_fields("Bank", secret), "", false);
+            assert_eq!(refused.err(), Some(OTP_REQUIRED));
+        }
+        let e = edited(None, otp_fields("Bank", "typed"), RFC_KEY, false).unwrap();
+        assert_eq!(&*e.secret, OTP_MARKER);
+        assert!(e.is_otp_entry() && shown_secret(&e).is_empty());
+        assert_eq!(secret(&e).unwrap().as_str(), RFC_KEY);
+        // Edited with the field left empty: its OTP secret stays.
+        let kept = edited(Some(&e), otp_fields("Bank 2", ""), "", false).unwrap();
+        assert_eq!(kept.otp(), e.otp());
+        assert_eq!(&*kept.secret, OTP_MARKER);
+        // Removing it would leave an OTP entry without one.
+        let removed = edited(Some(&e), otp_fields("Bank", ""), "", true);
+        assert_eq!(removed.err(), Some(OTP_REQUIRED));
+        // Another kind needs 비밀정보 again, and keeps the OTP secret.
+        let mut back = fields("Bank");
+        back[2] = String::new();
+        assert!(edited(Some(&e), back.clone(), "", false).is_err());
+        back[2] = "pw".into();
+        let back = edited(Some(&e), back, "", false).unwrap();
+        assert!(!back.is_otp_entry() && shown_secret(&back) == "pw");
+        assert_eq!(back.otp(), e.otp());
+        // A 0.12.0 entry typed "OTP" with a dummy: never shown, and saving
+        // puts the marker in its place.
+        let mut legacy = edited(None, fields("Mail"), RFC_KEY, false).unwrap();
+        legacy.kind = zeroize::Zeroizing::new("OTP".into());
+        assert!(legacy.is_otp_entry() && shown_secret(&legacy).is_empty());
+        let saved = edited(Some(&legacy), otp_fields("Mail", ""), "", false).unwrap();
+        assert_eq!(&*saved.secret, OTP_MARKER);
+        assert_eq!(saved.otp(), legacy.otp());
+        // An ordinary entry shows its 비밀정보 as before.
+        assert_eq!(shown_secret(&entry(RFC_KEY)), "pw");
     }
 
     #[test]

@@ -163,6 +163,7 @@ unsafe extern "system" {
     pub fn GetClientRect(h: Hwnd, r: *mut Rect) -> i32;
     pub fn GetWindowRect(h: Hwnd, r: *mut Rect) -> i32;
     pub fn MapWindowPoints(from: Hwnd, to: Hwnd, points: *mut Point, count: u32) -> i32;
+    pub fn SetWindowPos(h: Hwnd, after: Hwnd, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     pub fn SetTimer(h: Hwnd, id: usize, ms: u32, callback: isize) -> usize;
     pub fn MessageBoxW(h: Hwnd, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn AdjustWindowRectEx(r: *mut Rect, style: u32, menu: i32, ex: u32) -> i32;

@@ -529,6 +529,50 @@ mod tests {
             )
         );
     }
+    /// An OTP entry (0.12.1) merges as any other: its marker is ordinary
+    /// text. Turning an entry into one is an edit, and a 0.12.0 PC's edit
+    /// of the same entry meanwhile is a conflict with both kept.
+    #[test]
+    fn otp_entries_merge_as_ordinary_text() {
+        use crate::vault::OTP_MARKER;
+        let otp = crate::otp::Otp::parse("JBSWY3DPEHPK3PXP").unwrap().unwrap();
+        let otp_entry = |id: EntryId, parent: EntryId| {
+            let mut e = Entry::new_with_otp(
+                "x".into(),
+                "OTP".into(),
+                "1".into(),
+                String::new(),
+                Some(&otp),
+            )
+            .unwrap();
+            e.set_ids(id, parent);
+            e
+        };
+        let x = [1; 16];
+        let base = || contents(vec![entry(x, NO_ID, "x", "1")], vec![], 1);
+        let xa = [4; 16];
+        let a = contents(vec![otp_entry(xa, x)], vec![x], 2);
+        assert_eq!(a.entries[0].fields()[2], OTP_MARKER);
+        for (m, r) in [run(&a, &base()), run(&base(), &a)] {
+            assert_eq!(state(&m), ([xa].into(), [x].into()));
+            assert!(r.conflicts == 0 && m.entries[0].is_otp_entry());
+        }
+        let xb = [5; 16];
+        let b = contents(vec![entry(xb, x, "x", "changed")], vec![x], 2);
+        let (m, r) = run(&a, &b);
+        let (n, s) = run(&b, &a);
+        assert_eq!((state(&m), r.conflicts), (([xa, xb].into(), [x].into()), 1));
+        assert_eq!((state(&n), s.conflicts), (state(&m), 1));
+        // Two PCs made the same OTP entry on their own: two entries.
+        let (n1, n2) = ([6; 16], [7; 16]);
+        let (p, q) = (
+            contents(vec![otp_entry(n1, NO_ID)], vec![], 1),
+            contents(vec![otp_entry(n2, NO_ID)], vec![], 1),
+        );
+        let (m, r) = run(&p, &q);
+        assert_eq!(ids(&m), [n1, n2].into());
+        assert_eq!(r.conflicts, 0);
+    }
     /// Same ID, other text: the smaller text keeps the ID, the other gets a
     /// derived ID, and both orders agree.
     #[test]
